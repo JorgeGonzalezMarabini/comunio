@@ -53,6 +53,65 @@ def to_api_tactic(formation: str) -> str:
     return formation.replace("-", "")
 
 
+# Orden de slots CONFIRMADO al 100% con una prueba real completa (once de
+# 11 jugadores + interceptación de la llamada PUT real del frontend,
+# 2026-08-15): se numeran 1..11 agrupando por posición en ESTE orden fijo,
+# portero SIEMPRE el último slot (11 en un 4-4-2). No depende de qué
+# jugador concreto sea, solo de su posición.
+LINEUP_SLOT_POSITION_ORDER = ["DEL", "MED", "DEF", "POR"]
+
+# Traducción posición corta (usada en engine/db, ver clients.comunio_client.
+# COMUNIO_POSITION_MAP) -> nombre real que espera la API en "substitutes".
+API_POSITION_NAMES = {"DEL": "striker", "MED": "midfielder", "DEF": "defender", "POR": "keeper"}
+
+
+def build_lineup_slots(players: list[dict], starter_ids: list) -> dict:
+    """
+    Construye el mapa {slot: player_id} que espera
+    clients.comunio_client.ComunioClient.set_lineup(), con la numeración
+    confirmada (ver LINEUP_SLOT_POSITION_ORDER).
+
+    `players`: lista completa (con "id"/"position") de donde sacar la
+    posición de cada titular — normalmente el mismo `squad` pasado a
+    pick_lineup(). `starter_ids`: pick_lineup(...)["starters"].
+    """
+    by_id = {p["id"]: p for p in players}
+    starters_by_position = {pos: [] for pos in LINEUP_SLOT_POSITION_ORDER}
+    for player_id in starter_ids:
+        starters_by_position[by_id[player_id]["position"]].append(player_id)
+
+    slots = {}
+    slot_num = 1
+    for position in LINEUP_SLOT_POSITION_ORDER:
+        for player_id in starters_by_position[position]:
+            slots[str(slot_num)] = player_id
+            slot_num += 1
+    return slots
+
+
+def pick_substitutes(bench: list[dict]) -> dict:
+    """
+    Elige un suplente por posición (el de mayor "expected_score" en cada
+    categoría) entre `bench` (jugadores con "id"/"position"/"expected_score"
+    no titulares, ver pick_lineup(...)["bench"] resuelto contra el squad
+    completo). Comunio solo admite UN suplente por categoría de posición
+    (visto en la UI: 4 slots fijos de banquillo, no una lista libre).
+
+    Devuelve la forma exacta que espera set_lineup(): {"striker": id_o_"",
+    "midfielder": ..., "defender": ..., "keeper": ...}.
+    """
+    substitutes = {name: "" for name in API_POSITION_NAMES.values()}
+    for position, api_name in API_POSITION_NAMES.items():
+        candidates = sorted(
+            (p for p in bench if p.get("position") == position),
+            key=lambda p: p.get("expected_score", 0),
+            reverse=True,
+        )
+        if candidates:
+            substitutes[api_name] = candidates[0]["id"]
+    return substitutes
+
+
 def pick_lineup(squad: list[dict], formation: str = None) -> dict:
     """
     Selecciona el once inicial de `squad` (lista de jugadores con al menos

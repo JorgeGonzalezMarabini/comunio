@@ -7,7 +7,7 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 ## Estado actual
 
 - [x] Captura de endpoints reales de Comunio — hecha el 2026-08-15 con Chrome DevTools sobre una liga de prueba real
-- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; pujar/guardar alineación/retirar puja con path confirmado (por captura + por los `_links` HATEOAS de la propia API), verbo/body por convención razonable sin confirmar al 100%
+- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **guardar alineación confirmado al 100%** (verbo, body exacto y numeración de los 11 slots, ver abajo); pujar/retirar puja con path confirmado (por captura + `_links` HATEOAS), verbo/body por convención razonable sin confirmar al 100%
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
@@ -15,7 +15,7 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido se audita sin tumbar los demás. Probado de punta a punta con un `ComunioClient` simulado
-- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()`; la decisión SIEMPRE se audita en `lineup_decisions`, pero el envío real a Comunio está **desactivado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=false`) hasta cerrar el mapeo completo de los 11 slots de alineación (solo 2 de 11 confirmados)
+- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%
 - [x] Jobs y scheduler en GitHub Actions — YAMLs listos en modo manual (`workflow_dispatch`), cron comentado hasta tener credenciales
 - [x] Notificaciones por Telegram (`notifier.py`)
 
@@ -60,19 +60,37 @@ es una inferencia razonable a partir de esa forma, no un POST confirmado
 literalmente. `game:offer:withdraw` da el path para retirar una puja propia
 (`withdraw_bid()`), verbo DELETE por convención sin confirmar tampoco.
 
-**Guardar alineación**: reutiliza el path de `get_lineup()`
-(`.../users/{userId}/lineup`, patrón PUT-replace). Ojo con dos cosas reales
-confirmadas: `tactic` va **sin guiones** ("442", no "4-4-2" — ver
-`to_api_tactic()` en `lineup_optimizer.py`), y los titulares van en
-`items.lineup` como **mapa por número de slot** (ej. portero=slot 11,
-un defensa=slot 7 en la prueba real), no como lista plana — la numeración
-completa de los 11 slots aún no está terminada de mapear (solo se probaron
-2 jugadores).
+**Guardar alineación — CONFIRMADO AL 100%** (2026-08-15, once completo de 11
+jugadores en la liga de prueba, interceptando la llamada PUT real del
+propio frontend + réplica exacta del body devolviendo 200 `{"status": "OK"}`):
 
-Verbo HTTP exacto (POST/PUT) y nombres de campo del body en ambos casos:
+```
+PUT /communities/{communityId}/users/{userId}/lineup
+body: {
+    "userId": <user_id, int>,
+    "tactic": "442",                              # SIN guiones, ver to_api_tactic()
+    "lineup": {"1": "<playerId>", ..., "11": "<playerId>"},   # strings
+    "substitutes": {"striker": "", "midfielder": "", "defender": "", "keeper": ""},
+    "type": "default",
+}
+```
+
+Numeración de slots CONFIRMADA (patrón fijo, no depende del jugador): se
+numeran 1..11 agrupando por posición en ESTE orden fijo — **delanteros ->
+centrocampistas -> defensas -> portero** (portero SIEMPRE el último slot).
+En un 4-4-2: slots 1-2 delanteros, 3-6 centrocampistas, 7-10 defensas, 11
+portero. Ver `engine.lineup_optimizer.build_lineup_slots()`. `substitutes`
+es UN suplente por categoría de posición (no una lista, solo 4 slots de
+banquillo fijos en la UI) — ver `pick_substitutes()`.
+
+**Pujar**: verbo HTTP exacto (POST) y nombres de campo del body siguen
 implementados por convención REST razonable, **sin confirmación al 100%**
-(no hay forma de leer verbo/body reales sin repetir el submit). Si
-`place_bid`/`set_lineup` devuelven 4xx, revisar esto primero.
+(a diferencia de la alineación, no se ha repetido el submit interceptando
+la llamada real para no generar pujas de más). Si `place_bid` devuelve 4xx,
+revisar esto primero — el patrón de la alineación (body real distinto del
+inferido: `lineup` en la raíz, no anidado bajo `items`, y faltaba
+`substitutes`) es un buen recordatorio de que las inferencias por
+convención pueden fallar en detalles no obvios.
 
 **Nota de privacidad de la captura:** el valor real del `access_token` nunca
 se expuso a mí ni se registró en ningún sitio — se leyó únicamente dentro
@@ -135,11 +153,10 @@ las dos decisiones**:
 
 ## Setup local
 
-Requiere Python 3.11+ (`.venv` de este repo usa 3.14).
+Requiere Python 3.11+ (el `venv/` de este repo, gestionado por PyCharm, usa 3.14).
 
 ```bash
-python3.14 -m venv .venv
-source .venv/bin/activate
+source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # y rellenar credenciales
 python -m db.models    # crea db/comunio.db con el esquema

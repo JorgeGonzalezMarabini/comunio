@@ -92,12 +92,14 @@ DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
 # el score por completo). Ver engine.lineup_optimizer.apply_fixture_difficulty.
 LINEUP_DIFFICULTY_WEIGHT = float(os.getenv("LINEUP_DIFFICULTY_WEIGHT", "0.2"))
 
-# Guarda de seguridad: hasta que no se confirme con una prueba real completa
-# la numeración de los 11 slots de `tactic`/`items.lineup` (ver
-# clients/comunio_client.py, solo 2 de 11 verificados), el job set_lineup
-# calcula y audita la decisión pero NO la envía a Comunio salvo que esto
-# esté a True — evita arriesgar una alineación real con un mapeo adivinado.
-ENABLE_LINEUP_AUTO_SUBMIT = os.getenv("ENABLE_LINEUP_AUTO_SUBMIT", "false").lower() == "true"
+# Envía la alineación decidida a Comunio de verdad (además de auditarla en
+# `lineup_decisions`, que pasa siempre). Activado por defecto: el mapeo de
+# slots y el body están confirmados al 100% con una prueba real completa
+# (once de 11 jugadores + réplica exacta del PUT devolviendo 200 OK,
+# 2026-08-15 — ver clients/comunio_client.py y engine/lineup_optimizer.py).
+# Poner en false en .env si se prefiere revisar manualmente antes de
+# dejarlo escribir solo en una liga real.
+ENABLE_LINEUP_AUTO_SUBMIT = os.getenv("ENABLE_LINEUP_AUTO_SUBMIT", "true").lower() == "true"
 
 # --- Logging / auditoría ---
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")

@@ -46,14 +46,27 @@ permiso explícito del usuario):
       {"type": "PURCHASE", "tradable": {"id": player_id}, "price": amount}.
       "game:offer:withdraw" en la respuesta de una oferta propia es la URL
       para cancelarla (DELETE, sin confirmar el verbo tampoco).
-    - Guardar alineación: reutiliza el mismo path que leerla
-      (.../users/{userId}/lineup). OJO: `tactic` en la respuesta real es
-      "442" (SIN guiones), no "4-4-2" como se asumió inicialmente. Los
-      titulares van en `items.lineup`, un MAPA por nº de slot (no una lista
-      plana) — ej. visto en captura real: slot "11" = portero, slot "7" =
-      un defensa. La numeración completa de los 11 slots según posición NO
-      está confirmada (solo se han visto 2 de 11 en la prueba real); hace
-      falta una prueba con el once completo para terminar de mapearla.
+    - Guardar alineación: **100% confirmado** con una prueba real completa
+      (2026-08-15, once completo de 11 jugadores + interceptación de la
+      llamada XHR real del propio frontend + réplica exacta del body
+      devolviendo 200 "status": "OK"). Verbo y body reales:
+        PUT /communities/{communityId}/users/{userId}/lineup
+        body: {
+            "userId": <user_id, int>,
+            "tactic": "442",  # SIN guiones (distinto de "4-4-2" de la UI)
+            "lineup": {"1": "<playerId>", ..., "11": "<playerId>"},  # strings
+            "substitutes": {"striker": "", "midfielder": "", "defender": "", "keeper": ""},
+            "type": "default",
+        }
+      Numeración de slots CONFIRMADA (patrón fijo, no depende del jugador):
+      se numeran 1..11 consecutivos agrupando por posición en ESTE orden
+      fijo: delanteros -> centrocampistas -> defensas -> portero (portero
+      SIEMPRE el último slot). P.ej. en un 4-4-2: slots 1-2 delanteros,
+      3-6 centrocampistas, 7-10 defensas, 11 portero. Ver
+      engine.lineup_optimizer.build_lineup_slots(). `substitutes` es UN
+      suplente por categoría de posición (no una lista), en inglés
+      ("striker"/"midfielder"/"defender"/"keeper" — igual que el `position`
+      de squad/market), vacío ("") si no hay suplente para esa posición.
 
 Nombres de campo reales confirmados por fetch autenticado real (sin exponer
 nunca el token — se leyó dentro del propio navegador y solo se devolvió la
@@ -254,23 +267,30 @@ class ComunioClient:
         resp.raise_for_status()
         return resp.json() if resp.content else {}
 
-    def set_lineup(self, tactic: str, lineup_by_slot: dict[str, int]) -> dict:
+    def set_lineup(self, tactic: str, lineup_by_slot: dict, substitutes: dict = None) -> dict:
         """
-        Fija el once inicial para la próxima jornada.
+        Fija el once inicial para la próxima jornada. **Body y verbo 100%
+        confirmados** interceptando la llamada real del frontend + réplica
+        exacta devolviendo 200 (ver docstring del módulo y README).
 
-        `tactic`: formato real SIN guiones, ej. "442", "433" (no "4-4-2").
-        `lineup_by_slot`: mapa {slot: player_id} replicando la forma real de
-        GET get_lineup()["items"]["lineup"]. La numeración completa de los
-        11 slots según posición NO está confirmada del todo (solo se
-        verificaron 2 de 11 en la prueba real: portero=11, un defensa=7) —
-        antes de usar esto en producción, conviene guardar un once completo
-        una vez a mano y volcar get_lineup() para terminar el mapeo.
-
-        Verbo (PUT, por convención REST) y forma exacta del body sin
-        confirmar al 100% — ver nota en el docstring del módulo.
+        `tactic`: formato real SIN guiones, ej. "442", "433" (no "4-4-2") —
+        usar engine.lineup_optimizer.to_api_tactic().
+        `lineup_by_slot`: mapa {slot: player_id}, numeración confirmada —
+        ver engine.lineup_optimizer.build_lineup_slots().
+        `substitutes`: {"striker": id_o_"", "midfielder": ..., "defender": ...,
+        "keeper": ...} — un suplente por posición, ver
+        engine.lineup_optimizer.pick_substitutes(). Por defecto, sin
+        suplentes (todo vacío).
         """
+        substitutes = substitutes or {"striker": "", "midfielder": "", "defender": "", "keeper": ""}
         return self._write(
             "PUT",
             f"/communities/{self.community_id}/users/{self.user_id}/lineup",
-            {"tactic": tactic, "items": {"lineup": lineup_by_slot}},
+            {
+                "userId": int(self.user_id),
+                "tactic": tactic,
+                "lineup": {str(slot): str(player_id) for slot, player_id in lineup_by_slot.items()},
+                "substitutes": substitutes,
+                "type": "default",
+            },
         )
