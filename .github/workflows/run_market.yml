@@ -1,0 +1,23 @@
+name: run_market
+
+on:
+  workflow_dispatch: {}
+  # Descomentar cuando la estrategia de pujas esté validada:
+  # schedule:
+  #   - cron: "0 8,20 * * *"  # ajustar a horario de cierre de mercado real
+
+jobs:
+  bid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m jobs.run_market
+        env:
+          COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
+          COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

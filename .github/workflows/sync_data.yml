@@ -1,0 +1,23 @@
+name: sync_data
+
+on:
+  workflow_dispatch: {}
+  # Descomentar cuando los clientes reales estén implementados:
+  # schedule:
+  #   - cron: "0 * * * *"  # cada hora
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m jobs.sync_data
+        env:
+          COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
+          COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

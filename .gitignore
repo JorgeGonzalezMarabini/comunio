@@ -1,0 +1,16 @@
+# Entornos
+.venv/
+__pycache__/
+*.pyc
+
+# Secretos locales (nunca commitear credenciales reales)
+.env
+
+# IDE
+.idea/
+
+# Sistema
+.DS_Store
+
+# Nota: db/comunio.db y logs/ SÍ se versionan a propósito
+# (persistencia simple + auditoría de decisiones), no se ignoran aquí.
