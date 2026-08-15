@@ -29,6 +29,10 @@ COMUNIO_AUTH_SCHEME = os.getenv("COMUNIO_AUTH_SCHEME", "Bearer")
 # el campo exacto de la respuesta) o inspeccionando la URL de la app una vez
 # dentro de la liga. De momento configurable a mano.
 COMUNIO_COMMUNITY_ID = os.getenv("COMUNIO_COMMUNITY_ID")
+# Igual que COMUNIO_COMMUNITY_ID: necesario para casi todos los endpoints
+# (van scoped a /users/{userId}/...) y todavía no se ha confirmado que venga
+# en la respuesta de login, así que es configurable a mano de momento.
+COMUNIO_USER_ID = os.getenv("COMUNIO_USER_ID")
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

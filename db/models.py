@@ -1,13 +1,16 @@
 """
 Esquema de la base de datos (SQLite, archivo versionado en el repo).
 
-Campos alineados con lo confirmado por captura real (ver README):
-  - Comunio (api.comunio.es): precio/VM, puntos y estado (lesión/duda) salen
-    de GET /users/{userId}/squad y GET /communities/{id}/users/{id}/exchangemarket.
-    Nombres de campo exactos del JSON de Comunio AÚN NO confirmados (no se
-    pudo leer el body sin exponer el token, ver clients/comunio_client.py) —
-    los nombres de columna de abajo son los que necesitamos, el job de sync
-    deberá mapear el JSON real a esto la primera vez que se implemente.
+Campos alineados con lo confirmado por fetch autenticado real (2026-08-15,
+ver clients/comunio_client.py para el detalle completo):
+  - Comunio (api.comunio.es): squad/market devuelven position como palabra
+    completa en inglés ("keeper"/"defender"/"midfielder"/"striker") — se
+    normaliza a POR/DEF/MED/DEL (COMUNIO_POSITION_MAP) al escribir aquí, así
+    que `players.position` YA está en la convención corta, no en la de
+    Comunio. `status` real visto: "ACTIVE" | "WEAKENED" | "INJURED" (con
+    `statusInfo` en texto libre); no se ha visto un valor de sanción en esta
+    muestra. `points` puede venir como "-" (string) en pretemporada sin
+    puntos todavía — el job debe manejarlo (NULL, no 0 ni crash).
   - Understat (clients/laliga_stats_client.py): xG/xA/minutos/goles/tarjetas
     vía GET /getLeagueData/{league}/{season}, campos confirmados 1:1 contra
     la respuesta real.
@@ -32,15 +35,18 @@ CREATE TABLE IF NOT EXISTS players (
 
 -- Snapshot de cada sync: precio/VM, puntos y estado tal como los reporta
 -- Comunio en ese momento (para poder ver evolución y auditar decisiones).
+-- price/points en NULL si Comunio devuelve "-" (normal en pretemporada).
 CREATE TABLE IF NOT EXISTS comunio_snapshots (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
-    price           INTEGER,                -- precio de compra actual / VM
-    points          INTEGER,                -- puntos totales Comunio
-    matchday        INTEGER,
+    price           INTEGER,                -- quotedprice/quotedPrice (VM actual)
+    recommended_price INTEGER,               -- recommendedprice/recommendedPrice
+    points          INTEGER,                -- points acumulados (NULL si Comunio da "-")
+    last_points     INTEGER,
+    average_points  REAL,
     on_market       INTEGER,                 -- 0/1, si está en el mercado de fichajes
-    is_injured_or_doubtful INTEGER,          -- 0/1, campo exacto de Comunio TBD
-    status_text     TEXT,                    -- texto libre tal cual lo da Comunio (lesión/duda/sanción)
+    status          TEXT,                    -- ACTIVE | WEAKENED | INJURED | ... (valor real de Comunio)
+    status_info     TEXT,                    -- texto libre tal cual lo da Comunio ("Lesión muscular"...)
     recorded_at     TEXT NOT NULL
 );
 
@@ -69,8 +75,9 @@ CREATE TABLE IF NOT EXISTS external_stats (
 CREATE TABLE IF NOT EXISTS bids (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
+    comunio_offer_id INTEGER,               -- id real de la oferta en Comunio, para poder retirarla (withdraw_bid)
     amount          INTEGER NOT NULL,
-    status          TEXT NOT NULL,         -- 'placed' | 'won' | 'lost' | 'failed'
+    status          TEXT NOT NULL,         -- 'placed' | 'won' | 'lost' | 'withdrawn' | 'failed'
     score           REAL,                  -- score del evaluator que justificó la puja
     reason          TEXT,                  -- explicación legible para auditoría
     created_at      TEXT NOT NULL
@@ -79,7 +86,7 @@ CREATE TABLE IF NOT EXISTS bids (
 CREATE TABLE IF NOT EXISTS lineup_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     matchday        INTEGER NOT NULL,
-    formation       TEXT NOT NULL,          -- formato real Comunio: "4-4-2", "4-3-3", etc.
+    formation       TEXT NOT NULL,          -- formato humano "4-4-2"; convertir con to_api_tactic() al llamar a la API
     player_ids      TEXT NOT NULL,          -- JSON list
     reason          TEXT,
     created_at      TEXT NOT NULL

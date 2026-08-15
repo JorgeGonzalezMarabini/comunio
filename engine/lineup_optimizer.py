@@ -19,6 +19,15 @@ FORMATIONS = {
 }
 
 
+def to_api_tactic(formation: str) -> str:
+    """
+    Convierte el formato humano usado aquí ("4-4-2") al formato real que
+    espera la API de Comunio en `tactic` ("442", SIN guiones — confirmado
+    por captura real de GET lineup, distinto de lo que muestra la UI).
+    """
+    return formation.replace("-", "")
+
+
 def pick_lineup(squad: list[dict], formation: str = None) -> dict:
     """
     Selecciona el once inicial de `squad` (lista de jugadores con al menos
