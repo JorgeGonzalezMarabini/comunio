@@ -50,9 +50,12 @@ permiso explícito del usuario):
          "price": ..., "type": "NEW", "status": "OK"|"ERROR",
          "message": "" o motivo (ej. "player is not on exchangemarket"),
          "processImmediately": bool}], "opponentIds": ...}
-      "game:offer:withdraw" (visto en una oferta propia vía GET
-      .../offers?current) da la URL para cancelarla — verbo DELETE por
-      convención, sin confirmar con una llamada real.
+    - Retirar puja: **100% confirmado** (interceptando la llamada real del
+      frontend al pulsar "Retirar oferta" + réplica exacta + comprobación
+      de que la oferta desaparece de GET .../offers?current). Verbo real
+      **PUT** (NO DELETE, como se asumía inicialmente) con body VACÍO:
+        PUT /communities/{communityId}/users/{userId}/offers/{offerId}
+        body: {}
     - Guardar alineación: **100% confirmado** con una prueba real completa
       (2026-08-15, once completo de 11 jugadores + interceptación de la
       llamada XHR real del propio frontend + réplica exacta del body
@@ -283,18 +286,20 @@ class ComunioClient:
 
     def withdraw_bid(self, offer_id: int) -> dict:
         """
-        Retira una puja propia todavía pendiente. Path confirmado (link real
-        `game:offer:withdraw` de una oferta propia en estado PENDING); verbo
-        DELETE por convención REST, sin confirmar con una llamada real.
+        Retira una puja propia todavía pendiente. **100% confirmado**
+        (2026-08-15, interceptando la llamada real del frontend al pulsar
+        "Retirar oferta" + réplica exacta devolviendo 200 "status": "OK",
+        y comprobando después que la oferta desaparece de get_offers()).
+
+        Verbo real: **PUT** (NO DELETE, como se asumía inicialmente) con
+        body VACÍO `{}` — el propio path (que ya incluye `offer_id`) es
+        toda la información que necesita, el verbo+URL basta.
         """
-        resp = self.session.request(
-            "DELETE",
-            f"{self.base_url}/communities/{self.community_id}/users/{self.user_id}/offers/{offer_id}",
-            headers=self._auth_headers(),
-            timeout=15,
+        return self._write(
+            "PUT",
+            f"/communities/{self.community_id}/users/{self.user_id}/offers/{offer_id}",
+            {},
         )
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
 
     def set_lineup(self, tactic: str, lineup_by_slot: dict, substitutes: dict = None) -> dict:
         """

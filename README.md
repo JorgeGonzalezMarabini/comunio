@@ -7,7 +7,7 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 ## Estado actual
 
 - [x] Captura de endpoints reales de Comunio — hecha el 2026-08-15 con Chrome DevTools sobre una liga de prueba real
-- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **pujar y guardar alineación confirmados al 100%** (verbo y body exactos, ver abajo); retirar puja (`withdraw_bid`) con path confirmado por `_links` HATEOAS, verbo por convención sin confirmar
+- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **pujar, guardar alineación y retirar puja confirmados los tres al 100%** con pruebas reales (verbo y body exactos, ver abajo) — no queda ninguna escritura basada solo en inferencia
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
@@ -107,6 +107,21 @@ ya lo comprueba y lanza `ComunioOfferError` si no es `"OK"`.
 Este es el segundo caso (después de la alineación) en que el body real
 difería de una inferencia razonable por convención en detalles no obvios
 — buen recordatorio de que "parece razonable" no sustituye a probarlo.
+
+**Retirar puja — CONFIRMADO AL 100%** (2026-08-15, interceptando la llamada
+real del frontend al pulsar "Retirar oferta" + réplica exacta sobre otra
+oferta real, comprobando después que desaparece de `get_offers()`):
+
+```
+PUT /communities/{communityId}/users/{userId}/offers/{offerId}
+body: {}
+```
+
+Un tercer caso de inferencia incorrecta: se asumía **DELETE** por
+convención REST (`game:offer:withdraw` sonaba a "borra este recurso"), pero
+el verbo real es **PUT con body vacío** — el path ya identifica la oferta,
+el verbo+URL es toda la instrucción que hace falta. Con esto, **ninguna de
+las tres escrituras del bot depende ya de una convención sin probar**.
 
 **Nota de privacidad de la captura:** el valor real del `access_token` nunca
 se expuso a mí ni se registró en ningún sitio — se leyó únicamente dentro
