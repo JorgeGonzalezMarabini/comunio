@@ -12,12 +12,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Comunio ---
+# Capturado con Chrome DevTools el 2026-08-15 (login real + navegación autenticada).
+# La web (www.comunio.es, Next.js) y la API REST (api.comunio.es) son dominios
+# distintos: el bot habla siempre con api.comunio.es.
 COMUNIO_EMAIL = os.getenv("COMUNIO_EMAIL")
 COMUNIO_PASSWORD = os.getenv("COMUNIO_PASSWORD")
-# TODO: confirmar con el HAR real si es Bearer token, header custom, etc.
-COMUNIO_BASE_URL = os.getenv("COMUNIO_BASE_URL", "https://www.comunio.es")
+COMUNIO_BASE_URL = os.getenv("COMUNIO_BASE_URL", "https://api.comunio.es")
 COMUNIO_AUTH_HEADER = os.getenv("COMUNIO_AUTH_HEADER", "Authorization")
+# Esquema asumido por convención (access_token/refresh_token en localStorage,
+# header "Authorization" confirmado por HAR). No se ha podido confirmar el
+# valor literal del prefijo sin exponer el token real; si el cliente da 401
+# con "Bearer", probar sin prefijo o con otro esquema.
 COMUNIO_AUTH_SCHEME = os.getenv("COMUNIO_AUTH_SCHEME", "Bearer")
+
+# Una liga privada = una "community". Se obtiene tras el login (a confirmar
+# el campo exacto de la respuesta) o inspeccionando la URL de la app una vez
+# dentro de la liga. De momento configurable a mano.
+COMUNIO_COMMUNITY_ID = os.getenv("COMUNIO_COMMUNITY_ID")
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -45,7 +56,8 @@ BIDDING_SAFETY_LIMITS = {
 }
 
 # --- Alineación (engine/lineup_optimizer.py) ---
-DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "1-4-4-2")
+# Formato real del sitio (confirmado por captura): sin el "1-" del portero.
+DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
 
 # --- Logging / auditoría ---
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")

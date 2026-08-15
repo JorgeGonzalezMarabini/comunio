@@ -1,76 +1,125 @@
 """
-Cliente de estadísticas externas (gratis, vía scraping): Understat + FBref.
+Cliente de estadísticas externas (gratis, sin API de pago): Understat.
 
-- Understat: xG embebido en un <script> como JSON dentro del HTML.
-- FBref: tablas HTML (pandas.read_html / BeautifulSoup) con minutos jugados,
-  disciplina, etc.
+FBref quedó descartado (ver README): bloquea con un reto Cloudflare
+("Just a moment...", 403) ante peticiones simples de `requests`, así que no
+es viable desde un runner de GitHub Actions sin meter un navegador headless
+completo — coste/complejidad que no compensa cuando Understat ya cubre casi
+todo lo que FBref iba a aportar (minutos, goles, asistencias, tarjetas,
+posición) además de xG/xA.
 
-Riesgos asumidos: fragilidad ante cambios de HTML y necesidad de espaciar
-peticiones para no acabar bloqueados por IP (rate limiting propio, no solo
-buenas prácticas).
+Understat expone un endpoint JSON real (no hace falta parsear HTML ni
+`<script>` embebidos, a diferencia de lo asumido inicialmente): la propia
+web lo usa vía AJAX para pintar la tabla de la liga.
+
+    GET https://understat.com/getLeagueData/{league}/{season}
+    -> {"teams": {...}, "players": [...], "dates": [...]}
+
+Verificado el 2026-08-15 contra La_liga/2025 (600 jugadores, 20 equipos).
+Nombres de liga válidos (los que acepta el desplegable de la web): "La_liga",
+"EPL", "Bundesliga", "Serie_A", "Ligue_1", "RFPL".
+
+Estado de lesión/duda: Understat NO lo tiene. La propia API de Comunio ya
+marca jugadores lesionados/dudosos con un icono en la plantilla/mercado
+(visto en la UI), así que ese dato sale de comunio_client.py, no de aquí
+— evita depender de una tercera fuente para algo que ya tenemos.
 """
 from __future__ import annotations
 
-import json
-import re
 import time
 
 import requests
-from bs4 import BeautifulSoup
 
 UNDERSTAT_BASE_URL = "https://understat.com"
-FBREF_BASE_URL = "https://fbref.com"
 
-# Espaciado mínimo entre peticiones a la misma fuente para evitar bloqueos.
-REQUEST_DELAY_SECONDS = 2.0
+# Espaciado mínimo entre peticiones para no arriesgarse a un bloqueo por IP
+# (Understat no ha dado problemas hasta ahora, pero mejor no abusar).
+REQUEST_DELAY_SECONDS = 1.0
+
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; comunio-liga-bot/1.0)",
+    "X-Requested-With": "XMLHttpRequest",
+}
 
 
-def _get(url: str) -> requests.Response:
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+def current_season() -> str:
+    """
+    Temporada de Understat vigente (año de inicio; La Liga corre
+    agosto->mayo/junio, así que de enero a junio sigue siendo la temporada
+    del año anterior).
+
+    Nota: justo al arrancar una temporada nueva (agosto), Understat puede
+    tardar unos días en publicar datos -> get_league_data devuelve
+    `players: []`. Si pasa, el llamador debe manejarlo (loggear/notificar y
+    reintentar más tarde), no asumir que siempre habrá datos.
+    """
+    from datetime import datetime
+
+    now = datetime.now()
+    return str(now.year if now.month >= 7 else now.year - 1)
+
+
+def get_league_data(league: str = "La_liga", season: str = None) -> dict:
+    """
+    Devuelve {"teams": {...}, "players": [...], "dates": [...]} para toda la
+    liga/temporada de una sola llamada (no hace falta ir jugador a jugador).
+
+    `players[i]` (campos tal cual los devuelve Understat, todos strings salvo
+    lo ya numérico): id, player_name, team_title, games, time (minutos),
+    goals, npg (goles sin penalti), assists, xG, npxG, xA, xGChain,
+    xGBuildup, shots, key_passes, yellow_cards, red_cards, position
+    (código Understat: "F"/"M"/"D"/"GK" combinable, ej. "F M S").
+
+    `teams[team_id]["history"]` es la lista de partidos de ese equipo con
+    xG/xGA por partido — útil para estimar dificultad del rival.
+
+    `dates` es el calendario de la liga con `forecast` (prob. w/d/l) por
+    partido — la señal más directa de dificultad del próximo rival.
+    """
+    season = season or current_season()
+    resp = requests.get(
+        f"{UNDERSTAT_BASE_URL}/getLeagueData/{league}/{season}",
+        headers=_HEADERS,
+        timeout=15,
+    )
     resp.raise_for_status()
     time.sleep(REQUEST_DELAY_SECONDS)
-    return resp
+    return resp.json()
 
 
-def get_player_xg(understat_player_id: str) -> dict:
+def index_players_by_name(league_data: dict) -> dict:
     """
-    Extrae el JSON embebido de xG de la ficha de un jugador en Understat.
+    Indexa `league_data["players"]` por nombre normalizado (minúsculas, sin
+    acentos) para poder cruzarlo con los nombres que devuelve Comunio.
 
-    TODO: validar el nombre exacto de la variable JS que contiene el JSON
-    (suele ser algo tipo `var playersData = JSON.parse('...')`).
+    TODO: el cruce por nombre es frágil (acentos, apodos, "Álvaro" vs
+    "Alvaro Garcia" vs "A. Garcia"...). Si da muchos fallos de match en la
+    práctica, considerar mapear por equipo+posición como desempate, o
+    mantener a mano un `db.models` de alias jugador Comunio -> id Understat.
     """
-    url = f"{UNDERSTAT_BASE_URL}/player/{understat_player_id}"
-    html = _get(url).text
-    soup = BeautifulSoup(html, "lxml")
+    import unicodedata
 
-    match = re.search(r"JSON\.parse\('(.+?)'\)", html)
-    if not match:
-        raise ValueError(f"No se encontró el bloque JSON esperado en {url}")
+    def normalize(name: str) -> str:
+        nfkd = unicodedata.normalize("NFKD", name)
+        return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
 
-    raw = match.group(1).encode().decode("unicode_escape")
-    return json.loads(raw)
+    return {normalize(p["player_name"]): p for p in league_data.get("players", [])}
 
 
-def get_fbref_player_stats(fbref_player_url: str) -> dict:
+def team_fixture_difficulty(league_data: dict, team_title: str, upcoming_only: bool = True) -> list[dict]:
     """
-    Lee las tablas de estadísticas de un jugador en FBref (minutos, tarjetas...).
+    Devuelve la lista de partidos de `team_title` con la probabilidad de
+    derrota/empate/victoria (`forecast`) como proxy de dificultad del rival.
 
-    TODO: identificar qué tabla(s) concretas hacen falta (standard stats,
-    playing time, etc.) una vez se defina el esquema de db/models.py.
+    Pensado para alimentar la "dificultad del rival" en
+    engine/lineup_optimizer.py (todavía no incorporada allí, ver TODO en
+    ese módulo).
     """
-    import pandas as pd
-
-    tables = pd.read_html(fbref_player_url)
-    raise NotImplementedError(
-        "Pendiente: mapear qué tabla(s) de FBref usar y qué columnas extraer."
-    )
-
-
-def get_injury_status(player_name: str) -> str | None:
-    """
-    Estado de lesión/duda de un jugador.
-
-    TODO: decidir fuente (FBref no siempre lo tiene claro; valorar fuente
-    adicional gratuita específica de lesiones de LaLiga).
-    """
-    raise NotImplementedError("Pendiente: definir fuente de datos de lesiones.")
+    matches = [
+        m
+        for m in league_data.get("dates", [])
+        if m["h"]["title"] == team_title or m["a"]["title"] == team_title
+    ]
+    if upcoming_only:
+        matches = [m for m in matches if not m.get("isResult")]
+    return matches

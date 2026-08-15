@@ -8,12 +8,14 @@ rival (esto último aún no tiene fuente de datos definida).
 """
 import config
 
-# formación -> nº de jugadores por posición (sin contar portero, que es fijo)
+# formación -> nº de jugadores por posición (sin contar portero, que es fijo).
+# Formato real del sitio (confirmado por captura): "4-4-2", sin el "1-" del
+# portero (a diferencia de la convención "1-4-4-2" asumida inicialmente).
 FORMATIONS = {
-    "1-4-4-2": {"POR": 1, "DEF": 4, "MED": 4, "DEL": 2},
-    "1-4-3-3": {"POR": 1, "DEF": 4, "MED": 3, "DEL": 3},
-    "1-3-4-3": {"POR": 1, "DEF": 3, "MED": 4, "DEL": 3},
-    "1-5-3-2": {"POR": 1, "DEF": 5, "MED": 3, "DEL": 2},
+    "4-4-2": {"POR": 1, "DEF": 4, "MED": 4, "DEL": 2},
+    "4-3-3": {"POR": 1, "DEF": 4, "MED": 3, "DEL": 3},
+    "3-4-3": {"POR": 1, "DEF": 3, "MED": 4, "DEL": 3},
+    "5-3-2": {"POR": 1, "DEF": 5, "MED": 3, "DEL": 2},
 }
 
 

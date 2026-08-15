@@ -1,24 +1,48 @@
 """
-Job: actualiza stats externas + estado de Comunio en la base de datos.
+Job: actualiza stats externas (Understat) + estado de Comunio en la base de
+datos. Pensado para correr por cron (GitHub Actions) con más frecuencia que
+los jobs de mercado/alineación, ya que alimenta a ambos.
 
-Pensado para correr por cron (GitHub Actions) con más frecuencia que los
-jobs de mercado/alineación, ya que alimenta a ambos.
-
-TODO: implementar en cuanto comunio_client.py y laliga_stats_client.py
-tengan sus métodos reales (no NotImplementedError).
+Ver clients/comunio_client.py y clients/laliga_stats_client.py para el
+detalle de qué está confirmado con captura real y qué sigue pendiente
+(sobre todo: nombres de campo exactos del JSON de squad/exchangemarket de
+Comunio, que aún no se han podido inspeccionar sin exponer el token).
 """
-from db.models import init_db
+from datetime import datetime, timezone
+
+from clients.comunio_client import ComunioClient
+from clients.laliga_stats_client import get_league_data, index_players_by_name
+from db.models import init_db, get_connection
 from notifier import notify
 
 
 def run():
     init_db()
-    # TODO:
-    #   1. client = ComunioClient(); client.login()
-    #   2. squad = client.get_squad(); market = client.get_market()
-    #   3. Para cada jugador: stats = laliga_stats_client.get_player_xg(...) etc.
-    #   4. Persistir todo en price_history / external_stats
-    notify("sync_data: pendiente de implementar (bloqueado por captura de HAR de Comunio)")
+
+    client = ComunioClient()
+    client.login()
+
+    # TODO: una vez confirmados los nombres de campo reales del JSON de
+    # Comunio, mapear squad/market a la tabla `players` + `comunio_snapshots`.
+    squad = client.get_squad()
+    market = client.get_market()
+
+    league_data = get_league_data()
+    if not league_data.get("players"):
+        # Ver current_season() en laliga_stats_client.py: normal justo al
+        # arrancar temporada, Understat puede tardar días en publicar datos.
+        notify("sync_data: Understat sin datos todavía para la temporada actual, se reintentará en el próximo sync.")
+        return
+    understat_by_name = index_players_by_name(league_data)
+
+    now = datetime.now(timezone.utc).isoformat()
+    # TODO: iterar squad+market, cruzar cada jugador con understat_by_name
+    # por nombre normalizado, y persistir en players/comunio_snapshots/external_stats.
+
+    notify(
+        f"sync_data: Understat OK ({len(league_data['players'])} jugadores). "
+        f"Falta mapear el JSON real de Comunio (squad/market) a la base de datos."
+    )
 
 
 if __name__ == "__main__":
