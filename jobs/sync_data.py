@@ -11,7 +11,7 @@ la respuesta de login (de momento configurables a mano).
 from datetime import datetime, timezone
 
 from clients.comunio_client import ComunioClient, COMUNIO_POSITION_MAP
-from clients.laliga_stats_client import get_league_data, index_players_by_name
+from clients.laliga_stats_client import get_league_data_with_fallback, index_players_by_name
 from db.models import init_db, get_connection
 from notifier import notify
 
@@ -36,13 +36,21 @@ def _parse_float(value) -> float | None:
         return None
 
 
-def _upsert_player_and_snapshot(conn, player: dict, now: str) -> None:
+def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = None) -> None:
     """
     `player` es un item tal cual lo devuelve Comunio, ya sea de squad
     (campos "quotedprice"/"recommendedprice" en minúsculas) o de market
     (campos "quotedPrice"/"recommendedPrice", camelCase distinto — ver nota
     en comunio_client.py). Se leen ambas variantes para no depender de cuál
     endpoint vino el jugador.
+
+    `on_market`: si se pasa explícito, manda sobre `player.get("onMarket")`.
+    Necesario porque los jugadores que vienen de get_market() (el listado
+    de fichajes) NO traen ese campo en su JSON — "onMarket" solo existe en
+    los items de get_squad(), para marcar si un jugador PROPIO está puesto
+    en venta. Sin este parámetro, todo jugador de mercado se guardaba con
+    on_market=0 (bug real detectado: run_market() nunca encontraba
+    candidatos pese a haber jugadores sincronizados).
     """
     player_id = str(player["id"])
     position = COMUNIO_POSITION_MAP.get(player.get("position"), player.get("position"))
@@ -75,7 +83,7 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str) -> None:
             _parse_int(player.get("points")),
             _parse_int(player.get("lastPoints")),
             _parse_float(player.get("averagePoints")),
-            1 if player.get("onMarket") else 0,
+            1 if (on_market if on_market is not None else player.get("onMarket")) else 0,
             player.get("status"),
             player.get("statusInfo") or None,
             now,
@@ -129,15 +137,19 @@ def run():
     squad = client.get_squad()
     market = client.get_market()
 
-    league_data = get_league_data()
+    league_data, season, used_fallback = get_league_data_with_fallback()
     if not league_data.get("players"):
-        # Ver current_season() en laliga_stats_client.py: normal justo al
-        # arrancar temporada, Understat puede tardar días en publicar datos.
-        notify("sync_data: Understat sin datos todavía para la temporada actual, se reintentará en el próximo sync.")
+        # Ni la temporada actual ni la anterior tienen datos -- caso
+        # extremo, no visto en la práctica, pero no debe romper el sync.
+        notify("sync_data: Understat sin datos ni para la temporada actual ni la anterior, se reintentará en el próximo sync.")
         understat_by_name = {}
     else:
+        if used_fallback:
+            notify(
+                f"sync_data: Understat sin datos todavía para la temporada actual, "
+                f"usando temporada {season} (la anterior) como aproximación temporal."
+            )
         understat_by_name = index_players_by_name(league_data)
-    season = league_data.get("season") or ""
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -146,8 +158,16 @@ def run():
 
     matched = 0
     with get_connection() as conn:
-        for player in squad_players + market_players:
-            _upsert_player_and_snapshot(conn, player, now)
+        for player in squad_players:
+            _upsert_player_and_snapshot(conn, player, now)  # on_market: usa el propio player["onMarket"]
+
+            understat_player = understat_by_name.get(_normalize_name(player.get("name", "")))
+            if understat_player:
+                _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
+                matched += 1
+
+        for player in market_players:
+            _upsert_player_and_snapshot(conn, player, now, on_market=True)  # siempre True: viene del listado de mercado
 
             understat_player = understat_by_name.get(_normalize_name(player.get("name", "")))
             if understat_player:

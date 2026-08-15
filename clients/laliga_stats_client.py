@@ -87,6 +87,30 @@ def get_league_data(league: str = "La_liga", season: str = None) -> dict:
     return resp.json()
 
 
+def get_league_data_with_fallback(league: str = "La_liga", season: str = None) -> tuple[dict, str, bool]:
+    """
+    Como get_league_data(), pero si la temporada pedida (por defecto
+    current_season()) todavía no tiene datos en Understat (normal las
+    primeras jornadas de cada temporada nueva, confirmado en la práctica:
+    0 jugadores para "2026" con la 2025/26 recién terminada dando 600),
+    cae a la temporada anterior como aproximación temporal en vez de dejar
+    a todos los jugadores sin stats externas durante ese hueco.
+
+    Devuelve (league_data, season_usada, es_fallback). `season_usada` debe
+    guardarse tal cual en external_stats.season (ver jobs/sync_data.py) para
+    que quede claro en la BD que esos datos son de la temporada anterior,
+    no inventados ni de la actual.
+    """
+    season = season or current_season()
+    league_data = get_league_data(league, season)
+    if league_data.get("players"):
+        return league_data, season, False
+
+    previous_season = str(int(season) - 1)
+    fallback_data = get_league_data(league, previous_season)
+    return fallback_data, previous_season, True
+
+
 def index_players_by_name(league_data: dict) -> dict:
     """
     Indexa `league_data["players"]` por nombre normalizado (minúsculas, sin
