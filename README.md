@@ -15,7 +15,7 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. **Corrido de verdad en producción** (2026-08-16, cron real vía GitHub Actions): pujó por 4 jugadores reales tras el fix del bug de `on_market`
-- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%
+- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%. Ahora también avisa de **riesgo de plantilla** (ver `engine/squad_risk.py` más abajo)
 - [~] Jobs y scheduler en GitHub Actions — `schedule:` ya activado en los 3 YAMLs + persistencia de `db/comunio.db` entre ejecuciones (commit automático, antes faltaba); **pendiente**: push a GitHub (sin acceso desde este entorno) y configurar Secrets/Variables reales en el repo (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`)
 
@@ -179,6 +179,36 @@ depender de una tercera fuente. Cada jugador de `squad`/`market` trae
 de sanción en esta muestra) + `statusInfo` en texto libre (ej. "Lesión
 muscular", "Fractura de peroné") — ya mapeado en `db/models.py`
 (`comunio_snapshots.status`/`status_info`).
+
+## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
+
+Comunio permite (si la liga lo activa) que **cualquier manager fiche un
+jugador de tu plantilla sin tu aprobación**, pagando un múltiplo de su
+valor de mercado (x1,2 a x5, configurable por la liga). Si eso te deja sin
+jugadores suficientes para cubrir una posición de tu alineación, Comunio
+te penaliza con **-4 puntos por esa posición vacía** esa jornada
+([FAQ oficial](https://classic.comunio.es/faq.phtml)). La liga de pruebas
+usada en toda la sesión NO la tiene activada — es una función de pago
+(Comunio Plus/Pro Player, visto en `Ajustes → Administrar liga → Reglas
+del mercado → Cláusula de rescisión`, con badge "PRO" y el toggle inerte
+sin la suscripción) fuera de alcance por la restricción de coste 0 del
+proyecto. **La liga real del usuario sí la tendrá activada.**
+
+`engine/squad_risk.py` vigila el riesgo estructural: para cada posición,
+cuántos jugadores disponibles (sin lesión/sanción) hay por encima de los
+titulares necesarios en `config.DEFAULT_FORMATION`. Si una posición se
+queda sin ningún suplente sano, perder a su único titular por cualquier
+motivo (cláusula, lesión, sanción) deja un hueco automático. `jobs/set_lineup.py`
+ya lo comprueba en cada ejecución y lo incluye en la notificación de
+Telegram — de momento solo avisa, no compra refuerzos automáticamente
+(pendiente: conectar esto a `bidding_strategy.py` para priorizar posiciones
+en riesgo al pujar).
+
+TODO cuando se active en la liga real: si la API expone el importe exacto
+de la cláusula por jugador (probable — el campo `hasAcceptedBuyoutClauseOffer`
+ya aparece en el JSON de squad incluso con la función desactivada, así que
+la estructura de datos ya existe), se podría afinar el riesgo con el coste
+real de "salvar" cada posición, no solo un aviso binario.
 
 ## Pujas vs. alineación: pesos distintos a propósito
 

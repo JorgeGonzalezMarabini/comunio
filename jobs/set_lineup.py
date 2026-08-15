@@ -28,6 +28,7 @@ from engine.lineup_optimizer import (
     pick_substitutes,
     to_api_tactic,
 )
+from engine.squad_risk import assess_squad_depth, depth_warnings
 from notifier import notify
 
 
@@ -60,6 +61,14 @@ def run():
             difficulty_by_team[team] = difficulty
 
     adjusted = apply_fixture_difficulty(ranked, difficulty_by_team)
+
+    # Riesgo estructural de plantilla (independiente de la alineación de
+    # esta jornada): posiciones sin ningún suplente disponible -> perder al
+    # único titular de esa posición (cláusula de rescisión, lesión, sanción)
+    # dejaría un hueco en la alineación (-4 puntos, regla oficial de
+    # Comunio). Solo informa por ahora, no bloquea ni cambia la decisión.
+    depth = assess_squad_depth(adjusted, formation=config.DEFAULT_FORMATION)
+    risk_warnings = depth_warnings(depth)
 
     try:
         lineup = pick_lineup(adjusted, formation=config.DEFAULT_FORMATION)
@@ -105,6 +114,10 @@ def run():
         message.append("Enviada a Comunio." if submitted else f"NO enviada a Comunio (error: {submit_error}).")
     else:
         message.append("NO enviada a Comunio (ENABLE_LINEUP_AUTO_SUBMIT=false).")
+
+    if risk_warnings:
+        message.append("⚠️ Riesgo de plantilla (posición sin suplente disponible):")
+        message.extend(f"  - {w}" for w in risk_warnings)
 
     notify("\n".join(message))
 
