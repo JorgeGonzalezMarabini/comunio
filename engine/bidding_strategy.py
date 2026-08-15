@@ -75,7 +75,15 @@ def decide_bid(
         return None
 
     amount = min(desired_amount, cap)
-    if amount <= 0:
+
+    # Bug real detectado en producción (2026-08-15): el cap de seguridad
+    # puede recortar `amount` por debajo del precio/VM real del jugador
+    # (p.ej. si el presupuesto de jornada ya está casi agotado por pujas
+    # anteriores en la misma pasada) — Comunio rechaza esas pujas por ir
+    # por debajo del precio. Mejor no pujar que mandar una oferta condenada
+    # a fallar: si el cap no llega ni al precio base, no hay margen seguro
+    # para pujar por este jugador en este momento.
+    if amount < price:
         return None
 
     return {

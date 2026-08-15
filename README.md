@@ -11,10 +11,10 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
-- [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe ahora se ancla al VM/precio real del jugador (antes era una fracción arbitraria del presupuesto, sin relación con lo que costaba de verdad) + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada
+- [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe se ancla al VM/precio real del jugador + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; **bug real corregido** (visto en producción): el cap de seguridad podía recortar el importe por debajo del precio del jugador y Comunio rechazaba la puja — ahora `decide_bid()` no puja si el cap no llega al precio, en vez de mandar una oferta condenada a fallar; `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
-- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. Probado de punta a punta con un `ComunioClient` simulado
+- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. **Corrido de verdad en producción** (2026-08-16, cron real vía GitHub Actions): pujó por 4 jugadores reales tras el fix del bug de `on_market`
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%
 - [~] Jobs y scheduler en GitHub Actions — `schedule:` ya activado en los 3 YAMLs + persistencia de `db/comunio.db` entre ejecuciones (commit automático, antes faltaba); **pendiente**: push a GitHub (sin acceso desde este entorno) y configurar Secrets/Variables reales en el repo (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`)
@@ -100,9 +100,18 @@ creada al releerla, un concepto distinto). Además, `"offers"` es una
 (no usado todavía, ver TODO en `place_bid`).
 
 **Importante**: la respuesta es HTTP 200 incluso si la oferta se rechaza a
-nivel de negocio (ej. el jugador ya no está en el mercado) — hay que mirar
-`response["response"][i]["status"]`, no solo el código HTTP. `place_bid()`
-ya lo comprueba y lanza `ComunioOfferError` si no es `"OK"`.
+nivel de negocio (ej. el jugador ya no está en el mercado, o **pujar por
+debajo del precio/VM del jugador** — visto en producción el 2026-08-16) —
+hay que mirar `response["response"][i]["status"]`, no solo el código HTTP.
+`place_bid()` ya lo comprueba y lanza `ComunioOfferError` si no es `"OK"`.
+
+Ese rechazo por precio bajo destapó un bug real en `bidding_strategy.py`:
+el cap de seguridad de jornada podía recortar el importe calculado por
+debajo del precio del jugador (p.ej. con el presupuesto de jornada casi
+agotado por pujas anteriores en la misma pasada), y `decide_bid()` no lo
+comprobaba antes de enviar — mandaba una puja condenada a ser rechazada.
+Corregido: si el cap no llega al precio, no se puja por ese jugador en
+este momento (mejor no pujar que fallar).
 
 Este es el segundo caso (después de la alineación) en que el body real
 difería de una inferencia razonable por convención en detalles no obvios
@@ -153,10 +162,16 @@ todo lo que iba a aportar FBref. El calendario (`dates[].forecast`) da
 además una señal directa de dificultad del próximo rival para
 `lineup_optimizer.py`.
 
-Nota de temporada: `current_season()` en `laliga_stats_client.py` calcula la
-temporada vigente por fecha, pero justo al arrancar una temporada nueva
-Understat puede tardar unos días en publicar datos (`players: []`) — el job
-debe manejarlo sin romper, no asumir que siempre habrá datos.
+Nota de temporada: `current_season()` calcula la temporada vigente por
+fecha, pero justo al arrancar una temporada nueva Understat puede tardar
+unos días en publicar datos (`players: []`) — **confirmado en producción**
+el primer día de la temporada 2026/27 (0 jugadores en "2026" vs 600 en la
+"2025" recién terminada). `get_league_data_with_fallback()` cae
+automáticamente a la temporada anterior en ese caso (aproximación
+temporal, `jobs/sync_data.py` notifica cuándo lo está haciendo) — ojo:
+un fichaje nuevo en La Liga esta temporada no va a cruzar por nombre
+contra datos de la temporada pasada, así que la tasa de cruce con
+Understat baja temporalmente hasta que Understat publique la actual.
 
 **Lesiones/dudas**: resuelto directamente con campos reales de Comunio, sin
 depender de una tercera fuente. Cada jugador de `squad`/`market` trae
