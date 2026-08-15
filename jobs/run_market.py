@@ -7,15 +7,17 @@ Asume que jobs/sync_data.py ya corrió antes en el cron (así `players`/
 `comunio_snapshots`/`external_stats` están al día) — este job solo lee de
 la BD y decide, no vuelve a sincronizar stats.
 
-El body real de place_bid() no está confirmado al 100% (ver
-clients/comunio_client.py) — cada intento va en su propio try/except para
-que un fallo de una puja no tumbe las demás ni la ejecución completa.
+place_bid() está **100% confirmado** (ver clients/comunio_client.py) —
+puede fallar por HTTP (requests.RequestException) o por rechazo de negocio
+con HTTP 200 (ComunioOfferError, ej. el jugador ya no está en el mercado);
+cada intento va en su propio try/except para que un fallo de una puja no
+tumbe las demás ni la ejecución completa.
 """
 from datetime import datetime, timezone
 
 import requests
 
-from clients.comunio_client import ComunioClient
+from clients.comunio_client import ComunioClient, ComunioOfferError
 from db.models import get_connection, get_bids_risked_today, get_player_features
 from engine.bidding_strategy import decide_bids_for_market
 from engine.evaluator import evaluate_players
@@ -62,13 +64,10 @@ def run():
     with get_connection() as conn:
         for decision in decisions:
             try:
-                result = client.place_bid(decision["player_id"], decision["amount"])
-                _persist_bid(conn, decision, "placed", now, comunio_offer_id=result.get("id"))
+                offer = client.place_bid(decision["player_id"], decision["amount"])
+                _persist_bid(conn, decision, "placed", now, comunio_offer_id=offer.get("offerid"))
                 placed.append(decision)
-            except requests.RequestException as e:
-                # No confirmado al 100% el body/verbo real (ver
-                # comunio_client.place_bid) — un 4xx aquí es la primera pista
-                # de que hay que revisar eso, no un bug del bot en sí.
+            except (requests.RequestException, ComunioOfferError) as e:
                 _persist_bid(conn, decision, "failed", now)
                 failed.append((decision, str(e)))
 

@@ -33,19 +33,26 @@ Endpoints confirmados por captura real:
 
 Validado con una prueba real controlada (2026-08-15, liga de prueba, con
 permiso explícito del usuario):
-    - Pujar: el `_links["game:exchangemarket:placeoffers"]` de
-      GET .../exchangemarket apunta literalmente a
-      .../users/{userId}/offers (el mismo path que GET) -> confirma que es
-      POST a ese path. El objeto resultante (releído después con GET
-      .../offers?current) tiene forma:
-        {id, type: "PURCHASE", tradable: {id, name, ...}, user: {id,...},
-         tradingPartner: {id,...}, price, datecreated, datechanged, state,
-         _links: {"game:offer:decline": ..., "game:offer:withdraw": ...}}
-      -> el body de creación más plausible (nunca confirmado con un POST
-      real, solo inferido de la forma del recurso resultante) es
-      {"type": "PURCHASE", "tradable": {"id": player_id}, "price": amount}.
-      "game:offer:withdraw" en la respuesta de una oferta propia es la URL
-      para cancelarla (DELETE, sin confirmar el verbo tampoco).
+    - Pujar: **100% confirmado** interceptando la llamada POST real del
+      frontend + réplica exacta devolviendo 200. Verbo y body reales
+      (distintos de lo inferido inicialmente — ver nota abajo):
+        POST /communities/{communityId}/users/{userId}/offers
+        body: {"offers": [{"price": amount, "tradableid": player_id, "type": "NEW"}]}
+      Nota: "offers" es una LISTA — la API admite pujar por varios
+      jugadores en una sola llamada (no usado todavía, ver TODO en
+      place_bid). "type" al CREAR es "NEW", no "PURCHASE" (ese valor
+      aparece luego en el recurso ya creado, releído con GET
+      .../offers?current — son conceptos distintos: "NEW" = acción de
+      crear, "PURCHASE"/"SALE" = naturaleza de la oferta ya existente).
+      Respuesta real (200 aunque la oferta individual falle a nivel de
+      negocio — HAY QUE MIRAR response[].status, no solo el HTTP status):
+        {"status": "OK", "response": [{"offerid": <int>, "tradableid": ...,
+         "price": ..., "type": "NEW", "status": "OK"|"ERROR",
+         "message": "" o motivo (ej. "player is not on exchangemarket"),
+         "processImmediately": bool}], "opponentIds": ...}
+      "game:offer:withdraw" (visto en una oferta propia vía GET
+      .../offers?current) da la URL para cancelarla — verbo DELETE por
+      convención, sin confirmar con una llamada real.
     - Guardar alineación: **100% confirmado** con una prueba real completa
       (2026-08-15, once completo de 11 jugadores + interceptación de la
       llamada XHR real del propio frontend + réplica exacta del body
@@ -96,6 +103,14 @@ import config
 
 class ComunioAuthError(Exception):
     """Login fallido o token inválido/expirado."""
+
+
+class ComunioOfferError(Exception):
+    """
+    La API respondió 200 pero rechazó la oferta a nivel de negocio (ver
+    place_bid: la respuesta siempre es HTTP 200, el resultado real viene en
+    response["response"][i]["status"]/"message").
+    """
 
 
 # Comunio usa la palabra completa en inglés para la posición (confirmado por
@@ -239,18 +254,32 @@ class ComunioClient:
 
     def place_bid(self, player_id: int, amount: int) -> dict:
         """
-        Puja por un jugador. Path confirmado por el propio `_links` de
-        get_market() (game:exchangemarket:placeoffers). Body inferido de la
-        forma del recurso resultante (ver docstring del módulo) — NUNCA
-        probado con un POST real para no generar más pujas de las
-        necesarias en la liga de prueba. Si da 4xx, revisar primero el
-        nombre/anidamiento de "tradable".
+        Puja por un jugador. **Body y verbo 100% confirmados** (2026-08-15,
+        interceptando la llamada POST real del frontend + réplica exacta
+        con un `offerid` real devuelto). Ver docstring del módulo.
+
+        La API devuelve HTTP 200 incluso si la oferta es rechazada a nivel
+        de negocio (p.ej. el jugador ya no está en el mercado) — por eso se
+        comprueba el `status` del resultado y se lanza ComunioOfferError si
+        no es "OK", en vez de fiarse solo de resp.raise_for_status().
+
+        TODO: la API admite pujar por varios jugadores en una sola llamada
+        (`"offers"` es una lista) — no se usa todavía, cada puja hace su
+        propia llamada; sería una optimización razonable para
+        jobs/run_market.py si el número de pujas por ejecución crece.
+
+        Devuelve el item de "response" tal cual (incluye "offerid", el id
+        real de la oferta en Comunio para poder retirarla con withdraw_bid).
         """
-        return self._write(
+        result = self._write(
             "POST",
             f"/communities/{self.community_id}/users/{self.user_id}/offers",
-            {"type": "PURCHASE", "tradable": {"id": player_id}, "price": amount},
+            {"offers": [{"price": amount, "tradableid": player_id, "type": "NEW"}]},
         )
+        offer = (result.get("response") or [{}])[0]
+        if offer.get("status") != "OK":
+            raise ComunioOfferError(f"Oferta rechazada por Comunio: {offer.get('message') or offer!r}")
+        return offer
 
     def withdraw_bid(self, offer_id: int) -> dict:
         """

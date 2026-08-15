@@ -7,14 +7,14 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 ## Estado actual
 
 - [x] Captura de endpoints reales de Comunio — hecha el 2026-08-15 con Chrome DevTools sobre una liga de prueba real
-- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **guardar alineación confirmado al 100%** (verbo, body exacto y numeración de los 11 slots, ver abajo); pujar/retirar puja con path confirmado (por captura + `_links` HATEOAS), verbo/body por convención razonable sin confirmar al 100%
+- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **pujar y guardar alineación confirmados al 100%** (verbo y body exactos, ver abajo); retirar puja (`withdraw_bid`) con path confirmado por `_links` HATEOAS, verbo por convención sin confirmar
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
 - [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe ahora se ancla al VM/precio real del jugador (antes era una fracción arbitraria del presupuesto, sin relación con lo que costaba de verdad) + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
-- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido se audita sin tumbar los demás. Probado de punta a punta con un `ComunioClient` simulado
+- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. Probado de punta a punta con un `ComunioClient` simulado
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%
 - [x] Jobs y scheduler en GitHub Actions — YAMLs listos en modo manual (`workflow_dispatch`), cron comentado hasta tener credenciales
 - [x] Notificaciones por Telegram (`notifier.py`)
@@ -83,14 +83,30 @@ portero. Ver `engine.lineup_optimizer.build_lineup_slots()`. `substitutes`
 es UN suplente por categoría de posición (no una lista, solo 4 slots de
 banquillo fijos en la UI) — ver `pick_substitutes()`.
 
-**Pujar**: verbo HTTP exacto (POST) y nombres de campo del body siguen
-implementados por convención REST razonable, **sin confirmación al 100%**
-(a diferencia de la alineación, no se ha repetido el submit interceptando
-la llamada real para no generar pujas de más). Si `place_bid` devuelve 4xx,
-revisar esto primero — el patrón de la alineación (body real distinto del
-inferido: `lineup` en la raíz, no anidado bajo `items`, y faltaba
-`substitutes`) es un buen recordatorio de que las inferencias por
-convención pueden fallar en detalles no obvios.
+**Pujar — CONFIRMADO AL 100%** (2026-08-15, interceptando la llamada POST
+real del frontend al pujar por un jugador nuevo + réplica exacta con un
+`offerid` real devuelto):
+
+```
+POST /communities/{communityId}/users/{userId}/offers
+body: {"offers": [{"price": <amount>, "tradableid": <playerId>, "type": "NEW"}]}
+```
+
+Distinto de lo inferido inicialmente (`"tradable": {"id": ...}` anidado,
+`"type": "PURCHASE"`) — el body real usa `"tradableid"` plano y `"type":
+"NEW"` al crear (`"PURCHASE"` es el tipo que aparece luego en la oferta ya
+creada al releerla, un concepto distinto). Además, `"offers"` es una
+**lista**: la API admite pujar por varios jugadores en una sola llamada
+(no usado todavía, ver TODO en `place_bid`).
+
+**Importante**: la respuesta es HTTP 200 incluso si la oferta se rechaza a
+nivel de negocio (ej. el jugador ya no está en el mercado) — hay que mirar
+`response["response"][i]["status"]`, no solo el código HTTP. `place_bid()`
+ya lo comprueba y lanza `ComunioOfferError` si no es `"OK"`.
+
+Este es el segundo caso (después de la alineación) en que el body real
+difería de una inferencia razonable por convención en detalles no obvios
+— buen recordatorio de que "parece razonable" no sustituye a probarlo.
 
 **Nota de privacidad de la captura:** el valor real del `access_token` nunca
 se expuso a mí ni se registró en ningún sitio — se leyó únicamente dentro
