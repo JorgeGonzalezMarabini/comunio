@@ -12,8 +12,10 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
 - [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe ahora se ancla al VM/precio real del jugador (antes era una fracción arbitraria del presupuesto, sin relación con lo que costaba de verdad) + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada
-- [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API), falta incorporar dificultad del rival (ya disponible vía `laliga_stats_client.team_fixture_difficulty`)
+- [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
+- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido se audita sin tumbar los demás. Probado de punta a punta con un `ComunioClient` simulado
+- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()`; la decisión SIEMPRE se audita en `lineup_decisions`, pero el envío real a Comunio está **desactivado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=false`) hasta cerrar el mapeo completo de los 11 slots de alineación (solo 2 de 11 confirmados)
 - [x] Jobs y scheduler en GitHub Actions — YAMLs listos en modo manual (`workflow_dispatch`), cron comentado hasta tener credenciales
 - [x] Notificaciones por Telegram (`notifier.py`)
 
@@ -113,6 +115,23 @@ depender de una tercera fuente. Cada jugador de `squad`/`market` trae
 de sanción en esta muestra) + `statusInfo` en texto libre (ej. "Lesión
 muscular", "Fractura de peroné") — ya mapeado en `db/models.py`
 (`comunio_snapshots.status`/`status_info`).
+
+## Pujas vs. alineación: pesos distintos a propósito
+
+`engine/evaluator.py` acepta un `weights` opcional en `score_player()`/
+`rank_players()`/`evaluate_players()` porque **el mismo score no vale para
+las dos decisiones**:
+
+- **Pujar** (`config.EVALUATOR_WEIGHTS`): el precio importa — es relación
+  calidad/precio con presupuesto limitado que repartir entre candidatos del
+  mercado.
+- **Elegir alineación** (`config.LINEUP_EVALUATOR_WEIGHTS`, sin
+  `comunio_points_per_price`): el precio NO debe importar — un jugador de
+  tu plantilla ya está comprado, es coste hundido. Se detectó probando
+  `jobs/set_lineup.py` con datos sintéticos: reutilizar los pesos de puja
+  hacía que un delantero caro y muy productivo (Mbappe, en la prueba)
+  saliera peor puntuado que suplentes baratos solo por ser caro — un sesgo
+  real que habría llevado a bancar al mejor jugador de la plantilla.
 
 ## Setup local
 

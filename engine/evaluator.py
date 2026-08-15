@@ -19,7 +19,7 @@ import config
 from clients.comunio_client import COMUNIO_INJURY_STATUSES
 
 
-def score_player(player_stats: dict) -> float:
+def score_player(player_stats: dict, weights: dict = None) -> float:
     """
     Calcula el score de un jugador.
 
@@ -34,15 +34,22 @@ def score_player(player_stats: dict) -> float:
             "is_injured_or_doubtful": bool,
         }
 
+    `weights`: por defecto config.EVALUATOR_WEIGHTS (pensado para decidir
+    pujas: el precio importa). Para decidir ALINEACIÓN usar
+    config.LINEUP_EVALUATOR_WEIGHTS — un jugador de la plantilla ya está
+    comprado, su precio es coste hundido y no debería influir en quién
+    juega (ver jobs/set_lineup.py).
+
     Devuelve un score comparable entre jugadores (mayor = mejor). Con los
     pesos por defecto, el rango típico es aprox. [-0.10, 0.90] (la suma de
     pesos positivos es 0.90, injury_penalty resta hasta 0.10 más).
 
     TODO: los pesos son un punto de partida razonado, no calibrado todavía
     contra resultados reales de la liga — ajustar con el tiempo en
-    config.EVALUATOR_WEIGHTS según se vea qué correlaciona con puntos reales.
+    config.EVALUATOR_WEIGHTS/LINEUP_EVALUATOR_WEIGHTS según se vea qué
+    correlaciona con puntos reales.
     """
-    w = config.EVALUATOR_WEIGHTS
+    w = weights or config.EVALUATOR_WEIGHTS
 
     score = (
         w["comunio_points_per_price"] * player_stats.get("points_per_price", 0)
@@ -57,12 +64,12 @@ def score_player(player_stats: dict) -> float:
     return score
 
 
-def rank_players(players_stats: list[dict]) -> list[dict]:
+def rank_players(players_stats: list[dict], weights: dict = None) -> list[dict]:
     """Ordena una lista de jugadores por score descendente, añadiendo el score."""
     scored = []
     for p in players_stats:
         p = dict(p)
-        p["score"] = score_player(p)
+        p["score"] = score_player(p, weights)
         scored.append(p)
     return sorted(scored, key=lambda p: p["score"], reverse=True)
 
@@ -147,6 +154,11 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     return normalized
 
 
-def evaluate_players(raw_players: list[dict]) -> list[dict]:
-    """Atajo: normaliza y puntúa en un solo paso (normalize_pool + rank_players)."""
-    return rank_players(normalize_pool(raw_players))
+def evaluate_players(raw_players: list[dict], weights: dict = None) -> list[dict]:
+    """
+    Atajo: normaliza y puntúa en un solo paso (normalize_pool + rank_players).
+
+    `weights`: config.EVALUATOR_WEIGHTS (default, para pujas) o
+    config.LINEUP_EVALUATOR_WEIGHTS (para elegir alineación).
+    """
+    return rank_players(normalize_pool(raw_players), weights)

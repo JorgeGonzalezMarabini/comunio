@@ -3,8 +3,10 @@ Optimizador de alineaciones: elige el once inicial válido para una
 formación configurable (por defecto config.DEFAULT_FORMATION) maximizando
 el score esperado de cada jugador para la próxima jornada.
 
-El score esperado debe tener en cuenta forma reciente + dificultad del
-rival (esto último aún no tiene fuente de datos definida).
+El score esperado combina el score de engine.evaluator (forma reciente,
+puntos/precio, xG...) con la dificultad del próximo rival vía
+apply_fixture_difficulty() (dato real: clients.laliga_stats_client.
+next_match_difficulty(), basado en el forecast de Understat).
 """
 import config
 
@@ -17,6 +19,29 @@ FORMATIONS = {
     "3-4-3": {"POR": 1, "DEF": 3, "MED": 4, "DEL": 3},
     "5-3-2": {"POR": 1, "DEF": 5, "MED": 3, "DEL": 2},
 }
+
+
+def apply_fixture_difficulty(
+    players: list[dict], difficulty_by_team: dict[str, float], weight: float = None
+) -> list[dict]:
+    """
+    Ajusta el score base de cada jugador (campo "score", el que pone
+    engine.evaluator) por la dificultad de su próximo rival, guardando el
+    resultado en "expected_score" — el campo que espera pick_lineup().
+
+    `difficulty_by_team`: {nombre_equipo: dificultad 0..1, más alto = rival
+    más difícil}, ver clients.laliga_stats_client.next_match_difficulty().
+    Un jugador de un equipo sin entrada en `difficulty_by_team` (sin
+    próximo partido conocido) se deja con su score base sin ajustar.
+    """
+    weight = config.LINEUP_DIFFICULTY_WEIGHT if weight is None else weight
+    adjusted = []
+    for p in players:
+        difficulty = difficulty_by_team.get(p.get("team"))
+        base_score = p.get("score", 0.0)
+        expected = base_score * (1 - weight * difficulty) if difficulty is not None else base_score
+        adjusted.append({**p, "expected_score": expected})
+    return adjusted
 
 
 def to_api_tactic(formation: str) -> str:
@@ -36,8 +61,9 @@ def pick_lineup(squad: list[dict], formation: str = None) -> dict:
     Devuelve:
         {"formation": ..., "starters": [...ids...], "bench": [...ids...]}
 
-    TODO: incorporar dificultad del rival en expected_score una vez se
-    defina esa fuente de datos (por ahora se asume ya calculado fuera).
+    `expected_score` se calcula fuera (evaluator.evaluate_players() +
+    apply_fixture_difficulty() de este mismo módulo), no aquí — pick_lineup
+    solo selecciona dado ese número ya calculado.
     """
     formation = formation or config.DEFAULT_FORMATION
     slots = FORMATIONS.get(formation)

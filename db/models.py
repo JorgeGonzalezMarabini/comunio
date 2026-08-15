@@ -85,9 +85,10 @@ CREATE TABLE IF NOT EXISTS bids (
 
 CREATE TABLE IF NOT EXISTS lineup_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    matchday        INTEGER NOT NULL,
+    matchday        INTEGER,                -- NULL de momento: no hay endpoint de matchday actual implementado todavía
     formation       TEXT NOT NULL,          -- formato humano "4-4-2"; convertir con to_api_tactic() al llamar a la API
     player_ids      TEXT NOT NULL,          -- JSON list
+    submitted_to_comunio INTEGER NOT NULL DEFAULT 0,  -- 0/1, ver config.ENABLE_LINEUP_AUTO_SUBMIT
     reason          TEXT,
     created_at      TEXT NOT NULL
 );
@@ -149,6 +150,28 @@ def get_player_features(only_on_market: bool = False) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(_PLAYER_FEATURES_SQL.format(where=where)).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_bids_risked_today() -> int:
+    """
+    Suma el importe de las pujas ya colocadas hoy (status='placed'),
+    aproximando "jornada" como "día natural" — el mercado no siempre abre y
+    cierra en un único día (la UI mostraba "Desde 15.08 - Hasta 16.08"), así
+    que esto es una aproximación razonable, no un cálculo exacto de
+    jornada. Pensado para pasarlo como `already_risked_this_matchday` a
+    engine.bidding_strategy.decide_bids_for_market en cada ejecución del
+    cron, para que varias ejecuciones el mismo día no acumulen más riesgo
+    del permitido entre todas.
+    """
+    from datetime import datetime, timezone
+
+    today_prefix = datetime.now(timezone.utc).date().isoformat()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM bids WHERE status = 'placed' AND created_at LIKE ?",
+            (f"{today_prefix}%",),
+        ).fetchone()
+        return row["total"]
 
 
 if __name__ == "__main__":

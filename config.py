@@ -43,12 +43,26 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "db/comunio.db")
 
 # --- Pesos del evaluador (engine/evaluator.py) ---
 # Configurables para poder ajustarlos con el tiempo sin tocar código.
+# Para DECIDIR PUJAS: el precio importa (relación calidad/precio del
+# mercado, con presupuesto limitado que repartir entre candidatos).
 EVALUATOR_WEIGHTS = {
     "comunio_points_per_price": 0.35,   # rendimiento Comunio relativo al precio
     "comunio_trend": 0.15,              # tendencia de puntuación reciente
     "xg": 0.25,                         # expected goals (Understat)
-    "minutes_played": 0.15,             # continuidad / peso en su equipo (FBref)
+    "minutes_played": 0.15,             # continuidad / peso en su equipo
     "injury_penalty": 0.10,             # penalización si lesionado/duda
+}
+
+# Para ELEGIR ALINEACIÓN: el precio NO debe importar — un jugador de la
+# plantilla ya está comprado, su precio es coste hundido. Reutilizar
+# EVALUATOR_WEIGHTS aquí penalizaría injustamente a los fichajes caros
+# (ver jobs/set_lineup.py). Mismas features, sin "comunio_points_per_price".
+LINEUP_EVALUATOR_WEIGHTS = {
+    "comunio_points_per_price": 0.0,
+    "comunio_trend": 0.30,
+    "xg": 0.40,
+    "minutes_played": 0.30,
+    "injury_penalty": 0.10,
 }
 
 # --- Límites de seguridad de pujas (engine/bidding_strategy.py) ---
@@ -72,6 +86,18 @@ BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real del sitio (confirmado por captura): sin el "1-" del portero.
 DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
+
+# Cuánto descuenta el score de un jugador la dificultad de su próximo rival
+# (0 = ignorar dificultad, 1 = un rival con 100% prob. de no perder anula
+# el score por completo). Ver engine.lineup_optimizer.apply_fixture_difficulty.
+LINEUP_DIFFICULTY_WEIGHT = float(os.getenv("LINEUP_DIFFICULTY_WEIGHT", "0.2"))
+
+# Guarda de seguridad: hasta que no se confirme con una prueba real completa
+# la numeración de los 11 slots de `tactic`/`items.lineup` (ver
+# clients/comunio_client.py, solo 2 de 11 verificados), el job set_lineup
+# calcula y audita la decisión pero NO la envía a Comunio salvo que esto
+# esté a True — evita arriesgar una alineación real con un mapeo adivinado.
+ENABLE_LINEUP_AUTO_SUBMIT = os.getenv("ENABLE_LINEUP_AUTO_SUBMIT", "false").lower() == "true"
 
 # --- Logging / auditoría ---
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")

@@ -93,25 +93,30 @@ def decide_bid(
 def decide_bids_for_market(
     ranked_candidates: list[dict],
     remaining_budget: int,
+    already_risked_this_matchday: int = 0,
     min_score_threshold: float = None,
     max_bids: int = None,
 ) -> list[dict]:
     """
     Recorre `ranked_candidates` (ya ordenados por score descendente, ver
     engine.evaluator.rank_players/evaluate_players) y decide una puja por
-    cada uno mientras haya margen de seguridad, acumulando en la misma
-    pasada el riesgo ya comprometido por las pujas anteriores de esta
-    ejecución (no solo el de jornadas pasadas) — así dos pujas en la misma
-    llamada no pueden sumar más que el límite de jornada entre las dos.
+    cada uno mientras haya margen de seguridad.
+
+    `already_risked_this_matchday`: importe ya arriesgado ANTES de esta
+    llamada (p.ej. pujas de ejecuciones anteriores del cron en la misma
+    jornada — ver db.models.get_bids_risked_today). Se acumula además el
+    riesgo de las pujas decididas en esta misma pasada, así que ni una sola
+    llamada ni varias llamadas en la misma jornada pueden superar el límite
+    configurado entre todas.
     """
     decisions = []
-    risked_this_pass = 0
+    risked = already_risked_this_matchday
     for player in ranked_candidates:
         if max_bids is not None and len(decisions) >= max_bids:
             break
-        decision = decide_bid(player, remaining_budget, risked_this_pass, min_score_threshold)
+        decision = decide_bid(player, remaining_budget, risked, min_score_threshold)
         if decision is None:
             continue
         decisions.append(decision)
-        risked_this_pass += decision["amount"]
+        risked += decision["amount"]
     return decisions

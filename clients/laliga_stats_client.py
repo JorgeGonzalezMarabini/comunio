@@ -112,8 +112,7 @@ def team_fixture_difficulty(league_data: dict, team_title: str, upcoming_only: b
     derrota/empate/victoria (`forecast`) como proxy de dificultad del rival.
 
     Pensado para alimentar la "dificultad del rival" en
-    engine/lineup_optimizer.py (todavía no incorporada allí, ver TODO en
-    ese módulo).
+    engine/lineup_optimizer.py vía next_match_difficulty() (más abajo).
     """
     matches = [
         m
@@ -123,3 +122,29 @@ def team_fixture_difficulty(league_data: dict, team_title: str, upcoming_only: b
     if upcoming_only:
         matches = [m for m in matches if not m.get("isResult")]
     return matches
+
+
+def next_match_difficulty(league_data: dict, team_title: str) -> float | None:
+    """
+    Dificultad del próximo partido de `team_title`, como probabilidad de NO
+    ganar (empate + derrota) según el `forecast` de Understat: 0 = victoria
+    segura, 1 = derrota segura.
+
+    `forecast` viene SIEMPRE en perspectiva del equipo LOCAL (verificado
+    contra resultados reales: forecast.w alto correlaciona con victoria
+    local, forecast.l alto con derrota local) — hay que voltearlo si
+    `team_title` juega fuera.
+
+    Devuelve None si no hay próximo partido conocido en el calendario
+    (temporada recién empezada sin fixtures cargados, o equipo ya sin
+    partidos pendientes en los datos disponibles).
+    """
+    upcoming = team_fixture_difficulty(league_data, team_title, upcoming_only=True)
+    if not upcoming:
+        return None
+
+    match = min(upcoming, key=lambda m: m["datetime"])
+    forecast = match.get("forecast") or {}
+    is_home = match["h"]["title"] == team_title
+    win_prob = float(forecast.get("w", 0)) if is_home else float(forecast.get("l", 0))
+    return 1 - win_prob
