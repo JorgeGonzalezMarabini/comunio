@@ -110,6 +110,47 @@ def init_db():
         conn.executescript(SCHEMA)
 
 
+# Última fila de comunio_snapshots/external_stats por jugador (usa
+# ROW_NUMBER() de SQLite 3.25+; el sqlite3 embebido en Python 3.11+ ya lo trae).
+_PLAYER_FEATURES_SQL = """
+WITH latest_snapshot AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY recorded_at DESC) AS rn
+    FROM comunio_snapshots
+),
+latest_external AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY recorded_at DESC) AS rn
+    FROM external_stats
+)
+SELECT
+    p.id, p.name, p.team, p.position,
+    s.price, s.recommended_price, s.points, s.last_points, s.average_points,
+    s.on_market, s.status, s.status_info,
+    e.xg, e.xa, e.minutes_played, e.games, e.non_penalty_goals, e.assists, e.understat_position
+FROM players p
+LEFT JOIN latest_snapshot s ON s.player_id = p.id AND s.rn = 1
+LEFT JOIN latest_external e ON e.player_id = p.id AND e.rn = 1
+{where}
+"""
+
+
+def get_player_features(only_on_market: bool = False) -> list[dict]:
+    """
+    Devuelve una fila por jugador combinando `players` con su snapshot más
+    reciente de `comunio_snapshots` y de `external_stats` (LEFT JOIN: un
+    jugador sin stats de Understat todavía cruzadas sale con esos campos en
+    NULL, no se descarta). Pensado como entrada directa de
+    engine/evaluator.py (ver `normalize_pool`/`evaluate_players`).
+
+    `only_on_market=True` filtra a solo jugadores marcados `onMarket` en el
+    snapshot más reciente — para evaluar candidatos de puja en vez de toda
+    la plantilla propia.
+    """
+    where = "WHERE s.on_market = 1" if only_on_market else ""
+    with get_connection() as conn:
+        rows = conn.execute(_PLAYER_FEATURES_SQL.format(where=where)).fetchall()
+        return [dict(r) for r in rows]
+
+
 if __name__ == "__main__":
     init_db()
     print(f"Base de datos inicializada en {config.DATABASE_PATH}")

@@ -57,7 +57,17 @@ BIDDING_SAFETY_LIMITS = {
     "max_spend_per_player": 15_000_000,      # tope absoluto por jugador
     "max_budget_risk_per_matchday_pct": 0.30,  # % máx. del presupuesto restante jugable en una jornada
     "min_budget_reserve": 2_000_000,          # colchón que nunca se toca
+    # Cuánto por encima del precio/VM real del jugador (Comunio) se está
+    # dispuesto a pujar como máximo, escalado por el score (0..1) del
+    # jugador: prima_aplicada = max_premium_over_price_pct * score. Un
+    # jugador con score 1.0 se puja hasta un +20% sobre su VM; uno con
+    # score 0 no se puja por encima del VM.
+    "max_premium_over_price_pct": 0.20,
 }
+
+# Score mínimo (ver engine/evaluator.score_player) para considerar pujar por
+# un jugador. Punto de partida sin calibrar con datos reales todavía.
+BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.15"))
 
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real del sitio (confirmado por captura): sin el "1-" del portero.

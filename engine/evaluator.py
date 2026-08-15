@@ -1,35 +1,46 @@
 """
 Motor de evaluación: calcula un score combinado por jugador a partir de
-datos internos de Comunio (puntos, precio, tendencia) y stats externas
-(xG, minutos, estado de lesión).
+datos internos de Comunio (puntos, precio, tendencia, estado) y stats
+externas de Understat (xG, minutos).
+
+Dos capas:
+  - `score_player`/`rank_players`: funciones puras sobre features ya
+    normalizadas 0..1 (fáciles de testear sin BD).
+  - `normalize_pool`/`evaluate_players`: puente real desde
+    `db.models.get_player_features()` (columnas crudas de Comunio +
+    Understat) a esas features normalizadas.
 
 Los pesos NO están hardcodeados aquí: viven en config.EVALUATOR_WEIGHTS
 para poder ajustarlos con el tiempo sin tocar esta lógica.
 """
+from __future__ import annotations
+
 import config
+from clients.comunio_client import COMUNIO_INJURY_STATUSES
 
 
 def score_player(player_stats: dict) -> float:
     """
     Calcula el score de un jugador.
 
-    `player_stats` es un dict que combina lo que salga de db/models.py
-    (players + price_history + external_stats) una vez esas fuentes estén
-    pobladas de verdad. Forma esperada (provisional):
+    `player_stats` espera (todas ya normalizadas/comparables, ver
+    `normalize_pool` para cómo se obtienen a partir de datos reales):
 
         {
-            "points_per_price": float,   # normalizado, ej. puntos/millón
-            "trend": float,              # -1..1, tendencia reciente
-            "xg": float,                 # normalizado 0..1
-            "minutes_played_ratio": float,  # 0..1, % de minutos posibles jugados
+            "points_per_price": float,   # normalizado 0..1 dentro del pool
+            "trend": float,              # normalizado 0..1 dentro del pool
+            "xg": float,                 # normalizado 0..1 dentro del pool (xG/90)
+            "minutes_played_ratio": float,  # normalizado 0..1 dentro del pool
             "is_injured_or_doubtful": bool,
         }
 
-    Devuelve un score comparable entre jugadores (mayor = mejor).
+    Devuelve un score comparable entre jugadores (mayor = mejor). Con los
+    pesos por defecto, el rango típico es aprox. [-0.10, 0.90] (la suma de
+    pesos positivos es 0.90, injury_penalty resta hasta 0.10 más).
 
-    TODO: definir normalización real de cada input una vez haya datos
-    reales en db/models.py (por ahora los pesos son un punto de partida,
-    no valores validados).
+    TODO: los pesos son un punto de partida razonado, no calibrado todavía
+    contra resultados reales de la liga — ajustar con el tiempo en
+    config.EVALUATOR_WEIGHTS según se vea qué correlaciona con puntos reales.
     """
     w = config.EVALUATOR_WEIGHTS
 
@@ -54,3 +65,88 @@ def rank_players(players_stats: list[dict]) -> list[dict]:
         p["score"] = score_player(p)
         scored.append(p)
     return sorted(scored, key=lambda p: p["score"], reverse=True)
+
+
+def _minmax_normalize(values: list[float]) -> list[float]:
+    """
+    Normaliza a 0..1 dentro de la propia lista. Si todos los valores son
+    iguales (rango 0, p. ej. un pool de un solo jugador, o en pretemporada
+    con todo a cero), devuelve 0.5 para todos en vez de dividir por cero o
+    sesgar a 0/1 arbitrariamente.
+    """
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-9:
+        return [0.5 for _ in values]
+    return [(v - lo) / (hi - lo) for v in values]
+
+
+def normalize_pool(raw_players: list[dict]) -> list[dict]:
+    """
+    Convierte una lista de jugadores con columnas crudas (la forma que
+    devuelve `db.models.get_player_features()`: price, points, last_points,
+    average_points, status, xg, minutes_played, games...) en la forma que
+    espera `score_player`, normalizando cada feature 0..1 **dentro de este
+    pool** — el score resultante es comparable entre los jugadores pasados
+    en la misma llamada, no un valor absoluto entre llamadas distintas.
+
+    Definición de cada feature (razonada, no perfecta — ver TODOs):
+      - points_per_price: average_points / precio_en_millones. Usa el
+        promedio de puntos por jornada (no el total), para no penalizar a
+        quien lleva menos jornadas jugadas por lesión/fichaje tardío.
+      - trend: last_points - average_points. Positivo si el último
+        rendimiento fue mejor que su media de temporada (jugador "caliente"
+        ahora mismo), sin necesitar consultar el histórico completo.
+      - xg: xG por 90 minutos (xg / minutes_played * 90). Comparar xG total
+        penalizaría a quien ha jugado menos minutos sin ser peor jugador.
+        TODO: usar percentil por posición en vez de por todo el pool —
+        un delantero y un defensa no son comparables en xG90 crudo.
+      - minutes_played_ratio: minutes_played / (games * 90). Mide qué
+        fracción de cada partido en que apareció jugó completo (titular vs
+        suplente de pocos minutos), NO qué fracción de los partidos totales
+        de su equipo — un jugador con 3 lesiones y 100% de minutos en los
+        partidos que sí jugó saldría con ratio alto pese a haber jugado
+        poco en total. TODO: si hace falta distinguir esto, habría que
+        guardar el nº total de partidos de cada equipo (disponible en
+        `laliga_stats_client.get_league_data()["teams"][id]["history"]`) y
+        usar minutes_played / (partidos_del_equipo * 90).
+    """
+    points_per_price, trend, xg90, minutes_ratio = [], [], [], []
+
+    for p in raw_players:
+        price = p.get("price") or 0
+        avg_points = p.get("average_points") or 0
+        points_per_price.append(avg_points / (price / 1_000_000) if price > 0 else 0)
+
+        last_points = p.get("last_points")
+        trend.append((last_points if last_points is not None else avg_points) - avg_points)
+
+        minutes = p.get("minutes_played") or 0
+        xg = p.get("xg") or 0
+        xg90.append(xg / minutes * 90 if minutes > 0 else 0)
+
+        games = p.get("games") or 0
+        minutes_ratio.append(minutes / (games * 90) if games > 0 else 0)
+
+    norm_ppp = _minmax_normalize(points_per_price)
+    norm_trend = _minmax_normalize(trend)
+    norm_xg90 = _minmax_normalize(xg90)
+    norm_minutes = _minmax_normalize(minutes_ratio)
+
+    normalized = []
+    for i, p in enumerate(raw_players):
+        normalized.append(
+            {
+                **p,
+                "points_per_price": norm_ppp[i],
+                "trend": norm_trend[i],
+                "xg": norm_xg90[i],
+                "minutes_played_ratio": norm_minutes[i],
+                "is_injured_or_doubtful": p.get("status") in COMUNIO_INJURY_STATUSES,
+            }
+        )
+    return normalized
+
+
+def evaluate_players(raw_players: list[dict]) -> list[dict]:
+    """Atajo: normaliza y puntúa en un solo paso (normalize_pool + rank_players)."""
+    return rank_players(normalize_pool(raw_players))
