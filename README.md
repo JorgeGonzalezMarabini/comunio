@@ -16,7 +16,7 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. Probado de punta a punta con un `ComunioClient` simulado
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%
-- [x] Jobs y scheduler en GitHub Actions — YAMLs listos en modo manual (`workflow_dispatch`), cron comentado hasta tener credenciales
+- [~] Jobs y scheduler en GitHub Actions — `schedule:` ya activado en los 3 YAMLs + persistencia de `db/comunio.db` entre ejecuciones (commit automático, antes faltaba); **pendiente**: push a GitHub (sin acceso desde este entorno) y configurar Secrets/Variables reales en el repo (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`)
 
 ## Endpoints reales de Comunio (capturados 2026-08-15)
@@ -192,6 +192,31 @@ pip install -r requirements.txt
 cp .env.example .env   # y rellenar credenciales
 python -m db.models    # crea db/comunio.db con el esquema
 ```
+
+## Activar el cron en GitHub Actions
+
+`.env` es SOLO para ejecuciones locales — GitHub Actions no lo lee. El cron
+necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
+
+1. **Secrets** (`Settings → Secrets and variables → Actions → Secrets`,
+   cifrados, nunca visibles en logs): `COMUNIO_EMAIL`, `COMUNIO_PASSWORD`,
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+2. **Variables** (misma sección, pestaña `Variables` — no son secretas, solo
+   IDs): `COMUNIO_COMMUNITY_ID`, `COMUNIO_USER_ID`. Para la liga de pruebas:
+   `5243734` / `21161679` (capturados durante la sesión).
+3. Hacer `git push` de este repo a `origin` (el agente que escribió este
+   código no tiene acceso de push desde este entorno — hace falta hacerlo
+   manualmente o darle acceso).
+4. Los 3 workflows (`sync_data` cada hora, `run_market` 2x/día, `set_lineup`
+   viernes 18:00 UTC) ya tienen el `schedule:` activado — correrán solos en
+   cuanto 1-3 estén hechos. Cada uno comitea `db/comunio.db`/`logs/` de
+   vuelta al repo al terminar (si no, cada ejecución perdería lo
+   sincronizado en la anterior).
+
+**Antes de apuntar esto a una liga real** (no la de pruebas): revisar unos
+días de ejecución en la de pruebas primero, y tener en cuenta que
+`ENABLE_LINEUP_AUTO_SUBMIT=true` por defecto — el bot escribirá de verdad,
+sin confirmación manual, en cuanto el cron esté activo.
 
 ## Estructura
 

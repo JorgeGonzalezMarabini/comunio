@@ -2,9 +2,11 @@ name: run_market
 
 on:
   workflow_dispatch: {}
-  # Descomentar cuando la estrategia de pujas esté validada:
-  # schedule:
-  #   - cron: "0 8,20 * * *"  # ajustar a horario de cierre de mercado real
+  schedule:
+    - cron: "0 8,20 * * *"  # dos veces al día; ajustar al horario real de cierre de mercado
+
+permissions:
+  contents: write
 
 jobs:
   bid:
@@ -19,5 +21,16 @@ jobs:
         env:
           COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
           COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
+          COMUNIO_COMMUNITY_ID: ${{ vars.COMUNIO_COMMUNITY_ID }}
+          COMUNIO_USER_ID: ${{ vars.COMUNIO_USER_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # bids queda registrado en db/comunio.db (auditoría) — sin este paso
+      # se perdería al terminar el run. Ver nota en sync_data.yml.
+      - name: Commit BD actualizada
+        run: |
+          git config user.name "comunio-bot"
+          git config user.email "actions@github.com"
+          git add db/comunio.db logs/
+          git diff --staged --quiet || git commit -m "run_market: actualiza BD [skip ci]"
+          git push

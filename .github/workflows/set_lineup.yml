@@ -2,9 +2,11 @@ name: set_lineup
 
 on:
   workflow_dispatch: {}
-  # Descomentar y ajustar al cierre real de jornada (antes del primer partido):
-  # schedule:
-  #   - cron: "0 18 * * 5"  # viernes 18:00 UTC, ejemplo
+  schedule:
+    - cron: "0 18 * * 5"  # viernes 18:00 UTC; ajustar al cierre real de jornada (antes del primer partido)
+
+permissions:
+  contents: write
 
 jobs:
   lineup:
@@ -19,5 +21,16 @@ jobs:
         env:
           COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
           COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
+          COMUNIO_COMMUNITY_ID: ${{ vars.COMUNIO_COMMUNITY_ID }}
+          COMUNIO_USER_ID: ${{ vars.COMUNIO_USER_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # lineup_decisions queda registrado en db/comunio.db (auditoría) — sin
+      # este paso se perdería al terminar el run. Ver nota en sync_data.yml.
+      - name: Commit BD actualizada
+        run: |
+          git config user.name "comunio-bot"
+          git config user.email "actions@github.com"
+          git add db/comunio.db logs/
+          git diff --staged --quiet || git commit -m "set_lineup: actualiza BD [skip ci]"
+          git push

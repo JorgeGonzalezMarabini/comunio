@@ -2,9 +2,11 @@ name: sync_data
 
 on:
   workflow_dispatch: {}
-  # Descomentar cuando los clientes reales estén implementados:
-  # schedule:
-  #   - cron: "0 * * * *"  # cada hora
+  schedule:
+    - cron: "0 * * * *"  # cada hora
+
+permissions:
+  contents: write
 
 jobs:
   sync:
@@ -19,5 +21,17 @@ jobs:
         env:
           COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
           COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
+          COMUNIO_COMMUNITY_ID: ${{ vars.COMUNIO_COMMUNITY_ID }}
+          COMUNIO_USER_ID: ${{ vars.COMUNIO_USER_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # db/comunio.db está versionado a propósito (ver README) — sin este
+      # paso, cada ejecución partiría del último commit y perdería todo lo
+      # sincronizado en el run anterior.
+      - name: Commit BD actualizada
+        run: |
+          git config user.name "comunio-bot"
+          git config user.email "actions@github.com"
+          git add db/comunio.db logs/
+          git diff --staged --quiet || git commit -m "sync_data: actualiza BD [skip ci]"
+          git push
