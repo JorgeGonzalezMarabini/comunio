@@ -134,6 +134,33 @@ COMUNIO_POSITION_MAP = {
 COMUNIO_INJURY_STATUSES = {"INJURED", "WEAKENED"}
 
 
+def total_pending_purchase_amount(offers_response: dict) -> int:
+    """
+    Suma el importe de tus ofertas de COMPRA pendientes sin resolver, a
+    partir de la respuesta real de ComunioClient.get_offers().
+
+    Es la fuente de verdad para saber cuánto dinero está ya comprometido
+    pero todavía NO descontado de "credit" — Comunio no descuenta el saldo
+    hasta que una oferta se ejecuta al cerrar el periodo de transferencias
+    (que puede durar más de un día). Sin esto, engine.bidding_strategy
+    podría comprometer más dinero del que el saldo soporta si varias
+    ofertas de días distintos se ejecutan a la vez, dejando saldo negativo
+    — y saldo negativo al cierre de jornada son 0 puntos esa jornada
+    entera (regla oficial de Comunio, ver README).
+
+    Filtra por state == "PENDING" y type == "PURCHASE" (confirmado por
+    captura real de una oferta propia); no se ha visto un "type" distinto
+    en la muestra real (p.ej. para ofertas de venta), pero se filtra
+    explícito por si acaso, para no sumar por error algo que no sea una
+    salida de dinero nuestra.
+    """
+    return sum(
+        item.get("price", 0)
+        for item in offers_response.get("items", [])
+        if item.get("state") == "PENDING" and item.get("type") == "PURCHASE"
+    )
+
+
 class ComunioClient:
     def __init__(self, email: str = None, password: str = None, community_id: str = None):
         self.email = email or config.COMUNIO_EMAIL
@@ -241,6 +268,15 @@ class ComunioClient:
         Ofertas/pujas activas propias. El query param "?current" es
         OBLIGATORIO (sin él la API responde 500 "An error occurred.").
         Respuesta real: {"credit": ..., "items": [...], "hasMore": ..., "_links": {...}}
+
+        OJO — regla de negocio crítica confirmada (FAQ oficial de Comunio,
+        2026-08-16): "credit" es tu saldo actual, pero Comunio NO lo
+        descuenta al colocar una oferta, solo cuando se EJECUTA al cerrar
+        el periodo de transferencias (que puede durar más de un día). Para
+        saber cuánto está realmente comprometido (y no arriesgar más de lo
+        que el saldo soporta si varias ofertas pendientes se ejecutan a la
+        vez), usar total_pending_purchase_amount() sobre este resultado —
+        ver también engine.bidding_strategy.decide_bid.
         """
         return self._get(f"/communities/{self.community_id}/users/{self.user_id}/offers", params={"current": ""})
 

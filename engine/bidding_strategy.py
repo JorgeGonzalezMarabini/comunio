@@ -16,16 +16,32 @@ class BudgetExceededError(Exception):
     """Una decisión intentó saltarse un límite de seguridad configurado."""
 
 
-def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int) -> int:
+def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int, pending_committed: int = 0) -> int:
     """
     Calcula el máximo que se puede pujar ahora mismo respetando:
       - el tope absoluto por jugador
       - el % máximo de presupuesto arriesgable en la jornada
       - la reserva mínima que nunca se toca
+      - el dinero YA comprometido en ofertas pendientes sin resolver
+
+    `pending_committed`: suma de TODAS tus ofertas de compra todavía
+    pendientes en Comunio (sin resolver), sea de hoy o de días anteriores
+    — ver db.models.get_player_features / clients.comunio_client.get_offers.
+    Regla de negocio real y crítica (confirmada en la FAQ oficial de
+    Comunio, 2026-08-16): Comunio NO descuenta el saldo (`credit`) cuando
+    colocas una oferta, solo cuando se EJECUTA al cerrar el mercado — y el
+    periodo de transferencias puede durar más de un día. Si no se resta
+    aquí, el bot podría acumular más compromiso del que su saldo real
+    soporta (varias ofertas pendientes de días distintos ejecutándose a la
+    vez), dejando el saldo EN NEGATIVO — y la regla de Comunio es tajante:
+    saldo negativo al cierre de una jornada = **0 puntos esa jornada
+    entera**, sea cual sea la alineación. Por eso se resta antes que
+    ninguna otra cosa, no solo como un límite más entre varios.
     """
     limits = config.BIDDING_SAFETY_LIMITS
 
-    usable_budget = max(0, remaining_budget - limits["min_budget_reserve"])
+    truly_available = max(0, remaining_budget - pending_committed)
+    usable_budget = max(0, truly_available - limits["min_budget_reserve"])
     matchday_cap = int(usable_budget * limits["max_budget_risk_per_matchday_pct"])
     matchday_remaining = max(0, matchday_cap - already_risked_this_matchday)
 
@@ -70,6 +86,7 @@ def decide_bid(
     remaining_budget: int,
     already_risked_this_matchday: int,
     min_score_threshold: float = None,
+    pending_committed: int = 0,
 ) -> dict | None:
     """
     Decide si pujar por `player` (debe incluir "id", "score" de
@@ -88,6 +105,10 @@ def decide_bid(
     y "base_score"), la razón auditada deja constancia de si el score ya
     incluye el boost por posición en riesgo — para poder revisar después
     por qué se pujó por ese jugador en concreto.
+
+    `pending_committed`: ver max_biddable_amount() — dinero ya comprometido
+    en ofertas pendientes sin resolver (regla crítica: saldo negativo al
+    cierre de jornada = 0 puntos esa jornada, ver README).
 
     Devuelve None si no se debe pujar, o un dict:
         {"player_id": ..., "amount": ..., "score": ..., "reason": "..."}
@@ -108,7 +129,7 @@ def decide_bid(
     premium_pct = max(0.0, score) * config.BIDDING_SAFETY_LIMITS["max_premium_over_price_pct"]
     desired_amount = int(price * (1 + premium_pct))
 
-    cap = max_biddable_amount(remaining_budget, already_risked_this_matchday)
+    cap = max_biddable_amount(remaining_budget, already_risked_this_matchday, pending_committed)
     if cap <= 0:
         return None
 
@@ -148,6 +169,7 @@ def decide_bids_for_market(
     already_risked_this_matchday: int = 0,
     min_score_threshold: float = None,
     max_bids: int = None,
+    pending_committed: int = 0,
 ) -> list[dict]:
     """
     Recorre `ranked_candidates` (ya ordenados por score descendente, ver
@@ -155,18 +177,27 @@ def decide_bids_for_market(
     cada uno mientras haya margen de seguridad.
 
     `already_risked_this_matchday`: importe ya arriesgado ANTES de esta
-    llamada (p.ej. pujas de ejecuciones anteriores del cron en la misma
-    jornada — ver db.models.get_bids_risked_today). Se acumula además el
+    llamada dentro del ritmo de gasto por jornada (pacing, no protección de
+    saldo — ver db.models.get_bids_risked_today). Se acumula además el
     riesgo de las pujas decididas en esta misma pasada, así que ni una sola
     llamada ni varias llamadas en la misma jornada pueden superar el límite
     configurado entre todas.
+
+    `pending_committed`: la protección de saldo real — suma de TODAS las
+    ofertas de compra pendientes sin resolver en Comunio ahora mismo (ver
+    clients.comunio_client.ComunioClient.get_offers(), no solo las de hoy).
+    Se pasa tal cual a cada decide_bid(): Comunio no descuenta el saldo
+    hasta que una oferta se ejecuta, así que ignorar esto podría dejar
+    saldo negativo si varias ofertas pendientes de días distintos se
+    ejecutan a la vez — y saldo negativo al cierre de jornada son 0 puntos
+    esa jornada entera (regla oficial de Comunio, ver README).
     """
     decisions = []
     risked = already_risked_this_matchday
     for player in ranked_candidates:
         if max_bids is not None and len(decisions) >= max_bids:
             break
-        decision = decide_bid(player, remaining_budget, risked, min_score_threshold)
+        decision = decide_bid(player, remaining_budget, risked, min_score_threshold, pending_committed=pending_committed)
         if decision is None:
             continue
         decisions.append(decision)

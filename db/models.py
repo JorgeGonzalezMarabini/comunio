@@ -162,6 +162,16 @@ def get_bids_risked_today() -> int:
     engine.bidding_strategy.decide_bids_for_market en cada ejecución del
     cron, para que varias ejecuciones el mismo día no acumulen más riesgo
     del permitido entre todas.
+
+    OJO: esto es solo el RITMO de gasto por jornada (un límite
+    autoimpuesto, conservador), NO la protección real de saldo — para eso
+    hace falta `pending_committed` (ver clients.comunio_client.
+    total_pending_purchase_amount y jobs/run_market.py), que suma TODAS
+    las ofertas pendientes sin resolver en Comunio, no solo las de hoy.
+    Esta función solo mira la tabla `bids` local (nuestra propia auditoría
+    del día), así que una oferta pendiente de AYER que Comunio todavía no
+    haya resuelto no aparece aquí — por eso no basta sola para evitar
+    saldo negativo si el mercado dura más de un día.
     """
     from datetime import datetime, timezone
 

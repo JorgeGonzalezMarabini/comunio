@@ -11,7 +11,7 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
-- [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe se ancla al VM/precio real del jugador + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; **bug real corregido** (visto en producción): el cap de seguridad podía recortar el importe por debajo del precio del jugador y Comunio rechazaba la puja — ahora `decide_bid()` no puja si el cap no llega al precio, en vez de mandar una oferta condenada a fallar; `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada
+- [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe se ancla al VM/precio real del jugador + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; **dos bugs reales corregidos**: (1) el cap de seguridad podía recortar el importe por debajo del precio del jugador y Comunio rechazaba la puja — `decide_bid()` ya no puja si el cap no llega al precio; (2) **el más grave** — el bot no restaba las ofertas de compra pendientes sin resolver de días anteriores, pudiendo comprometer más saldo del real y dejarlo en negativo (ver sección dedicada más abajo: saldo negativo = **0 puntos toda la jornada**, regla oficial de Comunio); `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada, ahora también priorizando posiciones en riesgo de plantilla (`apply_position_priority()`)
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
 - [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py` implementado y probado con datos sintéticos que replican las formas reales capturadas (login real pendiente de probar en este entorno, no hay credenciales cargadas)
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. **Corrido de verdad en producción** (2026-08-16, cron real vía GitHub Actions): pujó por 4 jugadores reales tras el fix del bug de `on_market`
@@ -179,6 +179,48 @@ depender de una tercera fuente. Cada jugador de `squad`/`market` trae
 de sanción en esta muestra) + `statusInfo` en texto libre (ej. "Lesión
 muscular", "Fractura de peroné") — ya mapeado en `db/models.py`
 (`comunio_snapshots.status`/`status_info`).
+
+## Economía de Comunio: sin ingreso pasivo, y saldo negativo = 0 puntos
+
+Investigado (2026-08-16, con fuentes) al preguntarnos cuál es la
+estrategia ganadora en Comunio, porque afecta directamente al diseño de
+seguridad del bot:
+
+- **No hay ingreso pasivo**: la única forma de ganar dinero es vendiendo
+  jugadores ([FAQ oficial](https://magazine.comunio.es/faq-comunio-10-dudas-muy-frecuentes-entre-los-managers/)).
+  La estrategia clásica es especular con el valor de mercado (que fluctúa
+  como una bolsa: oferta/demanda + rendimiento reciente, máx. ±15%/día o
+  ±250k si el jugador vale <1,6M — [ComunioMagazine](https://magazine.comunio.es/los-valores-de-mercado-en-comunio-como-funcionan/)):
+  comprar barato/infravalorado, esperar a que suba, vender con beneficio
+  ([Comuniate](https://www.comuniate.com/noticias/251/como-funcionan-las-variaciones-de-precio-en-comunio-incluye-video-explicativo)).
+  El bot de momento solo compra (no vende) — vender para financiar más
+  fichajes queda fuera del alcance actual, apuntado como posible trabajo
+  futuro.
+- **Regla crítica de seguridad**: según la misma FAQ oficial, **si tu
+  saldo está en negativo al cerrar una jornada, no puntúas esa jornada
+  entera (0 puntos)**, sea cual sea tu alineación. Esto es más grave que
+  cualquier otro límite de seguridad ya implementado.
+
+**Bug real corregido a raíz de esto**: Comunio no descuenta el saldo
+(`credit`) al colocar una oferta de compra, solo cuando se EJECUTA al
+cerrar el periodo de transferencias — que puede durar más de un día (visto
+en la UI: "Desde 15.08 · Hasta 16.08"). El bot solo restaba
+`get_bids_risked_today()` (lo arriesgado HOY según nuestra propia BD) del
+presupuesto disponible, así que una oferta pendiente de un día anterior
+sin resolver todavía no se tenía en cuenta — el bot podía comprometer más
+dinero del que el saldo real soportaba si varias ofertas de días distintos
+se ejecutaban a la vez, dejando el saldo en negativo.
+
+Corregido con `clients.comunio_client.total_pending_purchase_amount()`,
+que suma TODAS las ofertas de compra pendientes sin resolver directamente
+desde `get_offers()` (la fuente de verdad real de Comunio, no una
+aproximación local) y se resta del presupuesto ANTES que cualquier otro
+límite, en `engine.bidding_strategy.max_biddable_amount()`. Demostrado con
+un escenario límite (17,5M ya comprometidos de 20M de saldo): sin el fix,
+el peor caso dejaba el saldo en -2,9M; con el fix, se queda en +2,35M pase
+lo que pase. `get_bids_risked_today()` sigue existiendo, pero ahora solo
+como ritmo de gasto por jornada (autoimpuesto), no como protección de
+saldo — esa responsabilidad es de `total_pending_purchase_amount()`.
 
 ## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
 

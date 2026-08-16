@@ -15,6 +15,17 @@ apply_position_priority) — sin dejar de respetar el umbral mínimo de score
 ni los límites de seguridad, solo da ventaja frente a un candidato de
 score similar en una posición ya cubierta.
 
+Regla de negocio CRÍTICA (confirmada en la FAQ oficial de Comunio,
+2026-08-16): Comunio no descuenta el saldo (`credit`) al colocar una
+oferta, solo cuando se EJECUTA al cerrar el periodo de transferencias (que
+puede durar más de un día) — y **saldo negativo al cierre de jornada son
+0 puntos esa jornada entera**, sea cual sea la alineación. Por eso el
+presupuesto disponible se calcula restando TODAS las ofertas pendientes
+sin resolver (clients.comunio_client.total_pending_purchase_amount, la
+fuente de verdad real de Comunio), no solo lo arriesgado hoy según nuestra
+propia BD — eso último (`get_bids_risked_today`) sigue usándose, pero solo
+como ritmo de gasto por jornada, no como protección de saldo.
+
 place_bid() está **100% confirmado** (ver clients/comunio_client.py) —
 puede fallar por HTTP (requests.RequestException) o por rechazo de negocio
 con HTTP 200 (ComunioOfferError, ej. el jugador ya no está en el mercado);
@@ -26,7 +37,7 @@ from datetime import datetime, timezone
 import requests
 
 import config
-from clients.comunio_client import ComunioClient, ComunioOfferError
+from clients.comunio_client import ComunioClient, ComunioOfferError, total_pending_purchase_amount
 from db.models import get_connection, get_bids_risked_today, get_player_features
 from engine.bidding_strategy import apply_position_priority, decide_bids_for_market
 from engine.evaluator import evaluate_players
@@ -75,13 +86,17 @@ def run():
     offers = client.get_offers()
     remaining_budget = offers.get("credit", 0)
     already_risked = get_bids_risked_today()
+    pending_committed = total_pending_purchase_amount(offers)
 
-    decisions = decide_bids_for_market(prioritized, remaining_budget, already_risked)
+    decisions = decide_bids_for_market(
+        prioritized, remaining_budget, already_risked, pending_committed=pending_committed
+    )
 
     if not decisions:
         notify(
-            f"run_market: sin pujas esta ejecución (presupuesto={remaining_budget}, "
-            f"ya arriesgado hoy={already_risked}, candidatos evaluados={len(ranked)})."
+            f"run_market: sin pujas esta ejecución (saldo={remaining_budget}, "
+            f"comprometido en ofertas pendientes={pending_committed}, ya arriesgado hoy={already_risked}, "
+            f"candidatos evaluados={len(ranked)})."
         )
         return
 
@@ -109,6 +124,8 @@ def run():
     if risk_warnings:
         summary.append("⚠️ Riesgo de plantilla detectado (priorizado al pujar):")
         summary.extend(f"  - {w}" for w in risk_warnings)
+    if pending_committed:
+        summary.append(f"(comprometido en ofertas pendientes sin resolver: {pending_committed})")
 
     notify("\n".join(summary))
 
