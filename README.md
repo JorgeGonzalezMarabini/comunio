@@ -259,6 +259,24 @@ decide vender si la plusvalía supera `config.SELLING_MIN_PROFIT_PCT`
 (10% por defecto, sin calibrar todavía) — nunca se fuerza la venta de un
 jugador sin precio de compra real conocido.
 
+**Bloqueo duro de riesgo de plantilla** (encontrado al preguntarnos si la
+venta tenía en cuenta quedarte sin cubrir una posición — no lo tenía):
+vender es tan capaz de dejarte una posición sin cobertura (-4 puntos) como
+que te "clausulen" a alguien, con la diferencia de que esta la causa el
+propio bot y es 100% evitable. `decide_sales()` reutiliza
+`engine.squad_risk.assess_squad_depth()` y **nunca vende** un jugador si
+eso deja su posición sin margen de suplentes sanos, por rentable que sea
+la operación — a diferencia del empujón blando de `apply_position_priority()`
+en las pujas, aquí es un bloqueo duro: ninguna plusvalía compensa quedarte
+con un hueco en la alineación. Si hay varios candidatos rentables en la
+misma posición y no hay margen para vender a todos, se prioriza al de
+mayor plusvalía. Un jugador lesionado/sancionado rentable sí se puede
+vender sin restricción (no contaba como "disponible" para cubrir la
+posición de todos modos). Probado en los 4 casos: venta bloqueada (único
+sano de su posición), prioridad entre dos candidatos por la misma
+posición con margen para solo uno, venta libre en posición con sobra, y
+venta de un lesionado rentable.
+
 ## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
 
 Comunio permite (si la liga lo activa) que **cualquier manager fiche un
