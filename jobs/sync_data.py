@@ -7,13 +7,45 @@ Mapeo Comunio -> BD confirmado por fetch autenticado real 2026-08-15 (ver
 clients/comunio_client.py para el detalle completo de cada campo). Lo único
 que sigue pendiente de esa fuente es dónde vienen community_id/user_id en
 la respuesta de login (de momento configurables a mano).
+
+También reconcilia el estado de nuestras propias pujas (tabla `bids`): nada
+más las marca -- ninguna otra parte del bot actualiza 'placed' a 'won'/
+'lost' después de colocarlas (ver README, es solo un registro de
+auditoría, no la fuente de verdad de si una puja se ganó o no).
 """
 from datetime import datetime, timezone
 
 from clients.comunio_client import ComunioClient, COMUNIO_POSITION_MAP
 from clients.laliga_stats_client import get_league_data_with_fallback, index_players_by_name
-from db.models import init_db, get_connection
+from db.models import init_db, get_connection, get_open_bids, update_bid_status
 from notifier import notify
+
+
+def _reconcile_bids(squad_player_ids: set, pending_offer_ids: set) -> dict:
+    """
+    Para cada puja que seguimos creyendo pendiente (status='placed' en
+    nuestra BD), comprueba si Comunio ya la resolvió: si su
+    `comunio_offer_id` ya no está entre las ofertas pendientes reales
+    (`get_offers()`), es que se resolvió de un modo u otro desde la
+    última vez que miramos.
+
+    No podemos distinguir "perdida frente a otro manager" de "retirada a
+    mano" con los datos que da la API (get_offers?current solo devuelve
+    las PENDIENTES, no un histórico con el motivo de cierre) — por eso el
+    criterio es indirecto: si el jugador apareció en tu plantilla, la
+    puja se dio por ganada ('won'); si no, se da por perdida ('lost')
+    aunque en realidad pudiera haber sido una retirada manual.
+
+    Devuelve {'won': n, 'lost': n} para poder resumirlo en la notificación.
+    """
+    counts = {"won": 0, "lost": 0}
+    for bid in get_open_bids():
+        if bid["comunio_offer_id"] in pending_offer_ids:
+            continue  # sigue pendiente, nada que reconciliar todavía
+        new_status = "won" if bid["player_id"] in squad_player_ids else "lost"
+        update_bid_status(bid["id"], new_status)
+        counts[new_status] += 1
+    return counts
 
 
 def _parse_int(value) -> int | None:
@@ -174,11 +206,24 @@ def run():
                 _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
                 matched += 1
 
+    # Reconciliar el estado de nuestras propias pujas (ver docstring de
+    # _reconcile_bids): ninguna otra parte del bot actualiza 'placed' a
+    # 'won'/'lost' después de colocarlas.
+    offers = client.get_offers()
+    pending_offer_ids = {
+        item.get("id") for item in offers.get("items", []) if item.get("state") == "PENDING" and item.get("type") == "PURCHASE"
+    }
+    squad_player_ids = {str(p["id"]) for p in squad_players}
+    reconciled = _reconcile_bids(squad_player_ids, pending_offer_ids)
+
     total = len(squad_players) + len(market_players)
-    notify(
+    message = [
         f"sync_data: {len(squad_players)} en plantilla, {len(market_players)} en mercado, "
         f"{matched}/{total} cruzados con Understat."
-    )
+    ]
+    if reconciled["won"] or reconciled["lost"]:
+        message.append(f"Pujas resueltas desde el último sync: {reconciled['won']} ganada(s), {reconciled['lost']} perdida(s).")
+    notify(" ".join(message))
 
 
 if __name__ == "__main__":

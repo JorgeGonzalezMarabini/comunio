@@ -184,6 +184,28 @@ def get_bids_risked_today() -> int:
         return row["total"]
 
 
+def get_open_bids() -> list[dict]:
+    """
+    Pujas que seguimos creyendo pendientes (status='placed') y de las que
+    sabemos el id real de la oferta en Comunio (comunio_offer_id — las que
+    fallaron al colocarse nunca tuvieron uno y no hay nada que reconciliar
+    en ellas). Pensado para jobs.sync_data._reconcile_bids(): comparar cada
+    una contra las ofertas pendientes reales (client.get_offers()) para
+    saber si ya se resolvió (ganada/perdida) desde la última vez.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, player_id, comunio_offer_id FROM bids WHERE status = 'placed' AND comunio_offer_id IS NOT NULL"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_bid_status(bid_id: int, status: str) -> None:
+    """Actualiza el status de una puja ya persistida (ver get_open_bids/reconciliación)."""
+    with get_connection() as conn:
+        conn.execute("UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
+
+
 if __name__ == "__main__":
     init_db()
     print(f"Base de datos inicializada en {config.DATABASE_PATH}")
