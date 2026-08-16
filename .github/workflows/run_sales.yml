@@ -1,0 +1,36 @@
+name: run_sales
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 9,21 * * *"  # dos veces al día, poco después de run_market
+
+permissions:
+  contents: write
+
+jobs:
+  sell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m jobs.run_sales
+        env:
+          COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
+          COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
+          COMUNIO_COMMUNITY_ID: ${{ vars.COMUNIO_COMMUNITY_ID }}
+          COMUNIO_USER_ID: ${{ vars.COMUNIO_USER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # sales queda registrado en db/comunio.db (auditoría) — sin este paso
+      # se perdería al terminar el run. Ver nota en sync_data.yml.
+      - name: Commit BD actualizada
+        run: |
+          git config user.name "comunio-bot"
+          git config user.email "actions@github.com"
+          git add db/comunio.db logs/
+          git diff --staged --quiet || git commit -m "run_sales: actualiza BD [skip ci]"
+          git push

@@ -17,8 +17,27 @@ from datetime import datetime, timezone
 
 from clients.comunio_client import ComunioClient, COMUNIO_POSITION_MAP
 from clients.laliga_stats_client import get_league_data_with_fallback, index_players_by_name
-from db.models import init_db, get_connection, get_open_bids, update_bid_status
+from db.models import init_db, get_connection, get_open_bids, update_bid_status, get_open_sales, update_sale_status
 from notifier import notify
+
+
+def _reconcile_sales(squad_player_ids: set) -> int:
+    """
+    Para cada venta que seguimos creyendo listada (status='listed'),
+    comprueba si el jugador ya no está en la plantilla — si no está, es
+    que alguien completó la compra, se marca 'sold'. Misma limitación que
+    _reconcile_bids: no hay forma de distinguir con los datos de la API
+    una venta real de una retirada manual del mercado sin vender.
+
+    Devuelve cuántas se han marcado 'sold' (para la notificación).
+    """
+    sold = 0
+    for sale in get_open_sales():
+        if sale["player_id"] in squad_player_ids:
+            continue  # sigue en la plantilla, la venta sigue listada
+        update_sale_status(sale["id"], "sold")
+        sold += 1
+    return sold
 
 
 def _reconcile_bids(squad_player_ids: set, pending_offer_ids: set) -> dict:
@@ -215,6 +234,7 @@ def run():
     }
     squad_player_ids = {str(p["id"]) for p in squad_players}
     reconciled = _reconcile_bids(squad_player_ids, pending_offer_ids)
+    sold = _reconcile_sales(squad_player_ids)
 
     total = len(squad_players) + len(market_players)
     message = [
@@ -223,6 +243,8 @@ def run():
     ]
     if reconciled["won"] or reconciled["lost"]:
         message.append(f"Pujas resueltas desde el último sync: {reconciled['won']} ganada(s), {reconciled['lost']} perdida(s).")
+    if sold:
+        message.append(f"Ventas completadas desde el último sync: {sold}.")
     notify(" ".join(message))
 
 

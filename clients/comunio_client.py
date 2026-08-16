@@ -56,6 +56,19 @@ permiso explícito del usuario):
       **PUT** (NO DELETE, como se asumía inicialmente) con body VACÍO:
         PUT /communities/{communityId}/users/{userId}/offers/{offerId}
         body: {}
+    - Poner en venta / quitar de la venta: **100% confirmado** (2026-08-16,
+      interceptando las llamadas reales del frontend en la pestaña
+      "Ventas" + réplica exacta). Poner en venta NO es instantáneo, solo
+      lista al jugador para que alguien lo compre después:
+        POST /communities/{communityId}/users/{userId}/exchangemarket/addplayer
+        body: {"items": [{"tradableId": player_id, "price": price}]}
+        respuesta: {"status": "OK", "notPlaced": [], "purchasePrices": {...}, "remaining": <int>}
+        POST /communities/{communityId}/users/{userId}/exchangemarket/removeplayer
+        body: {"tradableIds": [player_id]}
+      Confirmado también que `get_squad()` trae el precio real de compra
+      en `purchaseInfo.price` (null si el jugador no se compró vía puja,
+      p.ej. plantilla inicial) — necesario para calcular plusvalía, ver
+      engine/selling_strategy.py.
     - Guardar alineación: **100% confirmado** con una prueba real completa
       (2026-08-15, once completo de 11 jugadores + interceptación de la
       llamada XHR real del propio frontend + réplica exacta del body
@@ -335,6 +348,58 @@ class ComunioClient:
             "PUT",
             f"/communities/{self.community_id}/users/{self.user_id}/offers/{offer_id}",
             {},
+        )
+
+    def list_for_sale(self, player_id: int, price: int) -> dict:
+        """
+        Pone un jugador de tu plantilla en venta (visible para que otros
+        managers pujen por él). **100% confirmado** (2026-08-16,
+        interceptando la llamada POST real del frontend al pulsar "Añadir
+        al mercado" + réplica exacta).
+
+        NO es una venta instantánea: solo lo deja listado. La venta se
+        confirma más tarde, cuando alguien (otro manager o el "Computer")
+        complete una compra — no se ha podido confirmar cuánto tarda ni el
+        mecanismo exacto de esa parte; jobs/sync_data.py lo reconcilia
+        comparando la plantilla en cada sync (igual que con las pujas, ver
+        _reconcile_bids/_reconcile_sales).
+
+            POST /communities/{communityId}/users/{userId}/exchangemarket/addplayer
+            body: {"items": [{"tradableId": player_id, "price": price}]}
+            respuesta real: {"status": "OK", "notPlaced": [], "purchasePrices": {...}, "remaining": <int>}
+
+        "remaining" parece un límite diario de acciones de mercado (añadir/
+        quitar), sin confirmar el número exacto ni qué pasa al agotarlo.
+        "purchasePrices" trae un valor por jugador que no coincidía con el
+        precio pedido en la prueba real (180.000 pedido -> 199.500 en la
+        respuesta) — sin confirmar qué representa exactamente, así que no
+        se usa todavía para nada.
+
+        Lanza ComunioOfferError si el jugador aparece en "notPlaced".
+        """
+        result = self._write(
+            "POST",
+            f"/communities/{self.community_id}/users/{self.user_id}/exchangemarket/addplayer",
+            {"items": [{"tradableId": player_id, "price": price}]},
+        )
+        not_placed = {str(x) for x in result.get("notPlaced", [])}
+        if str(player_id) in not_placed:
+            raise ComunioOfferError(f"No se pudo poner en venta al jugador {player_id}: {result!r}")
+        return result
+
+    def delist_from_sale(self, player_id: int) -> dict:
+        """
+        Quita un jugador del mercado de ventas. **100% confirmado**
+        (2026-08-16, interceptando la llamada real del frontend + réplica
+        exacta devolviendo 200 "status": "OK").
+
+            POST /communities/{communityId}/users/{userId}/exchangemarket/removeplayer
+            body: {"tradableIds": [player_id]}
+        """
+        return self._write(
+            "POST",
+            f"/communities/{self.community_id}/users/{self.user_id}/exchangemarket/removeplayer",
+            {"tradableIds": [player_id]},
         )
 
     def set_lineup(self, tactic: str, lineup_by_slot: dict, substitutes: dict = None) -> dict:

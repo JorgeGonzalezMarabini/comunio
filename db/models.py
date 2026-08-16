@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS bids (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sales (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id       TEXT NOT NULL REFERENCES players(id),
+    asking_price    INTEGER NOT NULL,       -- precio pedido (quotedprice en el momento de listar)
+    purchase_price  INTEGER,                -- lo que pagamos por él (purchaseInfo.price de squad)
+    profit          INTEGER,                -- asking_price - purchase_price
+    profit_pct      REAL,
+    status          TEXT NOT NULL,          -- 'listed' | 'sold' | 'delisted' | 'failed'
+    reason          TEXT,
+    created_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS lineup_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     matchday        INTEGER,                -- NULL de momento: no hay endpoint de matchday actual implementado todavía
@@ -204,6 +216,27 @@ def update_bid_status(bid_id: int, status: str) -> None:
     """Actualiza el status de una puja ya persistida (ver get_open_bids/reconciliación)."""
     with get_connection() as conn:
         conn.execute("UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
+
+
+def get_open_sales() -> list[dict]:
+    """
+    Ventas que seguimos creyendo listadas (status='listed'). Pensado para
+    jobs.sync_data._reconcile_sales(): si el jugador ya no aparece en la
+    plantilla, es que alguien completó la compra -> 'sold'. No hay forma
+    de confirmar con los datos de la API si de verdad se vendió o si se
+    quitó manualmente del mercado sin vender (misma limitación que con las
+    pujas, ver get_open_bids) — mientras el jugador siga en la plantilla,
+    se asume que la venta sigue listada tal cual.
+    """
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, player_id FROM sales WHERE status = 'listed'").fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_sale_status(sale_id: int, status: str) -> None:
+    """Actualiza el status de una venta ya persistida (ver get_open_sales/reconciliación)."""
+    with get_connection() as conn:
+        conn.execute("UPDATE sales SET status = ? WHERE id = ?", (status, sale_id))
 
 
 if __name__ == "__main__":

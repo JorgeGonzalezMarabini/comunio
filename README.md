@@ -7,16 +7,17 @@ notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
 ## Estado actual
 
 - [x] Captura de endpoints reales de Comunio — hecha el 2026-08-15 con Chrome DevTools sobre una liga de prueba real
-- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **pujar, guardar alineación y retirar puja confirmados los tres al 100%** con pruebas reales (verbo y body exactos, ver abajo) — no queda ninguna escritura basada solo en inferencia
+- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **pujar, guardar alineación, retirar puja, poner en venta y quitar de la venta confirmados los cinco al 100%** con pruebas reales (verbo y body exactos, ver abajo) — no queda ninguna escritura basada solo en inferencia
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
 - [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
 - [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
 - [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe se ancla al VM/precio real del jugador + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; **dos bugs reales corregidos**: (1) el cap de seguridad podía recortar el importe por debajo del precio del jugador y Comunio rechazaba la puja — `decide_bid()` ya no puja si el cap no llega al precio; (2) **el más grave** — el bot no restaba las ofertas de compra pendientes sin resolver de días anteriores, pudiendo comprometer más saldo del real y dejarlo en negativo (ver sección dedicada más abajo: saldo negativo = **0 puntos toda la jornada**, regla oficial de Comunio); `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada, ahora también priorizando posiciones en riesgo de plantilla (`apply_position_priority()`)
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
-- [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py`, corrido de verdad en producción vía el cron. También **reconcilia el estado de las pujas** (`bids.status`: 'placed' -> 'won'/'lost') comparando `get_offers()` contra la plantilla actual — nada más lo hacía, así que sin esto la auditoría se quedaba congelada en 'placed' para siempre
+- [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py`, corrido de verdad en producción vía el cron. También **reconcilia el estado de pujas y ventas** (`bids.status`/`sales.status`: 'placed'/'listed' -> 'won'/'lost'/'sold') comparando `get_offers()` y la plantilla actual — nada más lo hacía, así que sin esto la auditoría se quedaba congelada para siempre
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. **Corrido de verdad en producción** (2026-08-16, cron real vía GitHub Actions): pujó por 4 jugadores reales tras el fix del bug de `on_market`
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%. Ahora también avisa de **riesgo de plantilla** (ver `engine/squad_risk.py` más abajo)
-- [~] Jobs y scheduler en GitHub Actions — `schedule:` ya activado en los 3 YAMLs + persistencia de `db/comunio.db` entre ejecuciones (commit automático, antes faltaba); **pendiente**: push a GitHub (sin acceso desde este entorno) y configurar Secrets/Variables reales en el repo (ver sección "Activar el cron")
+- [x] `jobs/run_sales.py` (nuevo) — identifica jugadores comprados por el bot con plusvalía suficiente (`engine/selling_strategy.py`, sobre `purchaseInfo.price` real de squad) y los pone en venta (`list_for_sale()`); único ingreso real del bot (ver sección dedicada más abajo)
+- [~] Jobs y scheduler en GitHub Actions — `schedule:` activado en los 4 YAMLs (incluido el nuevo `run_sales.yml`) + persistencia de `db/comunio.db` entre ejecuciones (commit automático); **pendiente**: configurar Secrets/Variables del nuevo job en GitHub (mismos que los demás, ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`)
 
 ## Endpoints reales de Comunio (capturados 2026-08-15)
@@ -193,9 +194,8 @@ seguridad del bot:
   ±250k si el jugador vale <1,6M — [ComunioMagazine](https://magazine.comunio.es/los-valores-de-mercado-en-comunio-como-funcionan/)):
   comprar barato/infravalorado, esperar a que suba, vender con beneficio
   ([Comuniate](https://www.comuniate.com/noticias/251/como-funcionan-las-variaciones-de-precio-en-comunio-incluye-video-explicativo)).
-  El bot de momento solo compra (no vende) — vender para financiar más
-  fichajes queda fuera del alcance actual, apuntado como posible trabajo
-  futuro.
+  **Ya implementado** en `engine/selling_strategy.py` + `jobs/run_sales.py`
+  (ver sección dedicada más abajo).
 - **Regla crítica de seguridad**: según la misma FAQ oficial, **si tu
   saldo está en negativo al cerrar una jornada, no puntúas esa jornada
   entera (0 puntos)**, sea cual sea tu alineación. Esto es más grave que
@@ -221,6 +221,43 @@ el peor caso dejaba el saldo en -2,9M; con el fix, se queda en +2,35M pase
 lo que pase. `get_bids_risked_today()` sigue existiendo, pero ahora solo
 como ritmo de gasto por jornada (autoimpuesto), no como protección de
 saldo — esa responsabilidad es de `total_pending_purchase_amount()`.
+
+## Vender jugadores (`engine/selling_strategy.py`, `jobs/run_sales.py`)
+
+**Poner en venta y quitar de la venta — CONFIRMADO AL 100%** (2026-08-16,
+interceptando las llamadas reales del frontend en la pestaña "Ventas" +
+réplica exacta):
+
+```
+POST /communities/{communityId}/users/{userId}/exchangemarket/addplayer
+body: {"items": [{"tradableId": <playerId>, "price": <asking_price>}]}
+respuesta real: {"status": "OK", "notPlaced": [], "purchasePrices": {...}, "remaining": <int>}
+
+POST /communities/{communityId}/users/{userId}/exchangemarket/removeplayer
+body: {"tradableIds": [<playerId>]}
+```
+
+**Importante — NO es venta instantánea**: poner en venta solo hace al
+jugador visible para que alguien (otro manager o el "Computer") lo compre
+después — el saldo no cambia al listar. `jobs/sync_data.py` reconcilia el
+resultado comparando la plantilla en cada sync (si el jugador ya no está,
+se marca `sales.status = 'sold'`) — misma limitación que con las pujas: no
+se puede distinguir con los datos de la API una venta real de una
+retirada manual sin vender.
+
+`"remaining"` en la respuesta parece un límite diario de acciones de
+mercado (añadir/quitar), sin confirmar el número exacto ni qué pasa al
+agotarlo. `"purchasePrices"` trajo un valor que no coincidía con el precio
+pedido en la prueba real (180.000 pedido -> 199.500 en la respuesta) —
+sin confirmar qué representa, no se usa todavía para nada.
+
+**Qué vender**: `get_squad()` trae el precio real de compra en
+`purchaseInfo.price` (confirmado por captura real; `null` si el jugador es
+de la plantilla inicial, nunca comprado por el bot). `decide_sales()`
+compara ese precio contra el valor de mercado actual (`quotedprice`) y
+decide vender si la plusvalía supera `config.SELLING_MIN_PROFIT_PCT`
+(10% por defecto, sin calibrar todavía) — nunca se fuerza la venta de un
+jugador sin precio de compra real conocido.
 
 ## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
 
@@ -300,11 +337,11 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
 3. Hacer `git push` de este repo a `origin` (el agente que escribió este
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
-4. Los 3 workflows (`sync_data` cada hora, `run_market` 2x/día, `set_lineup`
-   viernes 18:00 UTC) ya tienen el `schedule:` activado — correrán solos en
-   cuanto 1-3 estén hechos. Cada uno comitea `db/comunio.db`/`logs/` de
-   vuelta al repo al terminar (si no, cada ejecución perdería lo
-   sincronizado en la anterior).
+4. Los 4 workflows (`sync_data` cada hora, `run_market` y `run_sales`
+   2x/día, `set_lineup` viernes 18:00 UTC) ya tienen el `schedule:`
+   activado — correrán solos en cuanto 1-3 estén hechos. Cada uno comitea
+   `db/comunio.db`/`logs/` de vuelta al repo al terminar (si no, cada
+   ejecución perdería lo sincronizado en la anterior).
 
 **Antes de apuntar esto a una liga real** (no la de pruebas): revisar unos
 días de ejecución en la de pruebas primero, y tener en cuenta que
@@ -318,8 +355,8 @@ Ver el detalle de cada módulo en su propio docstring. Resumen:
 ```
 clients/    -> integraciones externas (Comunio, Understat)
 db/         -> esquema SQLite + conexión
-engine/     -> evaluator, bidding_strategy, lineup_optimizer
-jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, set_lineup)
+engine/     -> evaluator, bidding_strategy, lineup_optimizer, squad_risk, selling_strategy
+jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup)
 notifier.py -> resumen por Telegram tras cada job
 logs/       -> auditoría de decisiones
 ```

@@ -92,6 +92,15 @@ BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.
 # engine.bidding_strategy.apply_position_priority.
 BIDDING_POSITION_RISK_BOOST = float(os.getenv("BIDDING_POSITION_RISK_BOOST", "0.15"))
 
+# --- Venta de jugadores (engine/selling_strategy.py) ---
+# % mínimo de plusvalía (precio actual vs. precio de compra real,
+# "purchaseInfo.price" de squad) para considerar vender un jugador. Vender
+# es la ÚNICA fuente de ingresos en Comunio (no hay salario pasivo, ver
+# README) — la estrategia documentada es comprar barato y vender cuando
+# sube; con un máximo de ±15%/día de fluctuación, un 10% es un punto de
+# partida razonable, sin calibrar todavía con resultados reales.
+SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real del sitio (confirmado por captura): sin el "1-" del portero.
 DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
