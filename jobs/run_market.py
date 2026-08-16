@@ -7,6 +7,14 @@ Asume que jobs/sync_data.py ya corrió antes en el cron (así `players`/
 `comunio_snapshots`/`external_stats` están al día) — este job solo lee de
 la BD y decide, no vuelve a sincronizar stats.
 
+Antes de evaluar el mercado, calcula el riesgo de plantilla (ver
+engine/squad_risk.py: posiciones sin ningún suplente sano, donde un
+"clausulazo"/lesión/sanción más dejaría un hueco en la alineación y -4
+puntos) y prioriza esas posiciones al pujar (engine.bidding_strategy.
+apply_position_priority) — sin dejar de respetar el umbral mínimo de score
+ni los límites de seguridad, solo da ventaja frente a un candidato de
+score similar en una posición ya cubierta.
+
 place_bid() está **100% confirmado** (ver clients/comunio_client.py) —
 puede fallar por HTTP (requests.RequestException) o por rechazo de negocio
 con HTTP 200 (ComunioOfferError, ej. el jugador ya no está en el mercado);
@@ -17,10 +25,12 @@ from datetime import datetime, timezone
 
 import requests
 
+import config
 from clients.comunio_client import ComunioClient, ComunioOfferError
 from db.models import get_connection, get_bids_risked_today, get_player_features
-from engine.bidding_strategy import decide_bids_for_market
+from engine.bidding_strategy import apply_position_priority, decide_bids_for_market
 from engine.evaluator import evaluate_players
+from engine.squad_risk import assess_squad_depth, depth_warnings
 from notifier import notify
 
 
@@ -43,13 +53,30 @@ def run():
         notify("run_market: no hay candidatos en mercado en la BD (¿corrió sync_data antes?).")
         return
 
+    # Riesgo de plantilla: posiciones sin ningún suplente sano (ver
+    # engine/squad_risk.py). Necesita la plantilla propia, no solo el
+    # mercado -- se resuelve igual que en jobs/set_lineup.py.
+    squad_response = client.get_squad()
+    squad_ids = {str(p["id"]) for p in squad_response.get("items", [])}
+    all_players = get_player_features(only_on_market=False)
+    squad_raw = [p for p in all_players if p["id"] in squad_ids]
+
+    at_risk_positions = set()
+    if squad_raw:
+        depth = assess_squad_depth(squad_raw, formation=config.DEFAULT_FORMATION)
+        at_risk_positions = {pos for pos, info in depth.items() if info["at_risk"]}
+        risk_warnings = depth_warnings(depth)
+    else:
+        risk_warnings = []
+
     ranked = evaluate_players(raw_candidates)
+    prioritized = apply_position_priority(ranked, at_risk_positions)
 
     offers = client.get_offers()
     remaining_budget = offers.get("credit", 0)
     already_risked = get_bids_risked_today()
 
-    decisions = decide_bids_for_market(ranked, remaining_budget, already_risked)
+    decisions = decide_bids_for_market(prioritized, remaining_budget, already_risked)
 
     if not decisions:
         notify(
@@ -73,11 +100,15 @@ def run():
 
     summary = [f"run_market: {len(placed)} puja(s) realizada(s)."]
     for d in placed:
-        summary.append(f"  - jugador {d['player_id']}: {d['amount']} (score={d['score']:.3f})")
+        priority_tag = " [prioridad: posición en riesgo]" if d.get("position_at_risk") else ""
+        summary.append(f"  - jugador {d['player_id']}: {d['amount']} (score={d['score']:.3f}){priority_tag}")
     if failed:
         summary.append(f"{len(failed)} puja(s) fallida(s):")
         for d, err in failed:
             summary.append(f"  - jugador {d['player_id']}: {err}")
+    if risk_warnings:
+        summary.append("⚠️ Riesgo de plantilla detectado (priorizado al pujar):")
+        summary.extend(f"  - {w}" for w in risk_warnings)
 
     notify("\n".join(summary))
 

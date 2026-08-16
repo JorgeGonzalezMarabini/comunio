@@ -198,11 +198,17 @@ proyecto. **La liga real del usuario sí la tendrá activada.**
 cuántos jugadores disponibles (sin lesión/sanción) hay por encima de los
 titulares necesarios en `config.DEFAULT_FORMATION`. Si una posición se
 queda sin ningún suplente sano, perder a su único titular por cualquier
-motivo (cláusula, lesión, sanción) deja un hueco automático. `jobs/set_lineup.py`
-ya lo comprueba en cada ejecución y lo incluye en la notificación de
-Telegram — de momento solo avisa, no compra refuerzos automáticamente
-(pendiente: conectar esto a `bidding_strategy.py` para priorizar posiciones
-en riesgo al pujar).
+motivo (cláusula, lesión, sanción) deja un hueco automático.
+`jobs/set_lineup.py` lo comprueba en cada ejecución y lo incluye en la
+notificación de Telegram.
+
+**Ya conectado a las pujas**: `jobs/run_market.py` calcula el mismo riesgo
+sobre tu plantilla antes de evaluar el mercado y usa
+`engine.bidding_strategy.apply_position_priority()` para subir el score de
+los candidatos en posiciones en riesgo (`config.BIDDING_POSITION_RISK_BOOST`,
+aditivo — no fuerza la puja de un candidato malo, solo le da ventaja frente
+a otro de score similar en una posición ya cubierta). La auditoría en
+`bids.reason` deja constancia de cuándo una puja vino priorizada así.
 
 TODO cuando se active en la liga real: si la API expone el importe exacto
 de la cláusula por jugador (probable — el campo `hasAcceptedBuyoutClauseOffer`

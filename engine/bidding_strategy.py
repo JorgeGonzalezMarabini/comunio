@@ -32,6 +32,39 @@ def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int
     return min(limits["max_spend_per_player"], matchday_remaining, usable_budget)
 
 
+def apply_position_priority(candidates: list[dict], at_risk_positions: set, boost: float = None) -> list[dict]:
+    """
+    Da prioridad a los candidatos de mercado en posiciones con riesgo de
+    plantilla (ver engine.squad_risk.assess_squad_depth: posiciones sin
+    ningún suplente sano, donde perder un titular más dejaría un hueco en
+    la alineación y -4 puntos, ver README). Sube el score de esos
+    candidatos un `boost` fijo (config.BIDDING_POSITION_RISK_BOOST) antes
+    de decidir pujas, para que reforzar una posición en riesgo compita
+    mejor frente a otro candidato de score similar en una posición ya
+    cubierta — sin llegar a forzar la puja si el candidato es realmente
+    malo (el boost es aditivo, no multiplica ni ignora el umbral mínimo).
+
+    Guarda el score original en "base_score" (para la auditoría) y marca
+    "position_at_risk": bool en cada candidato. Devuelve la lista
+    reordenada por score ajustado (mayor primero) — decide_bids_for_market
+    espera la lista ya en este orden.
+    """
+    boost = config.BIDDING_POSITION_RISK_BOOST if boost is None else boost
+    adjusted = []
+    for c in candidates:
+        base_score = c.get("score", 0.0)
+        is_at_risk = c.get("position") in at_risk_positions
+        adjusted.append(
+            {
+                **c,
+                "base_score": base_score,
+                "score": base_score + boost if is_at_risk else base_score,
+                "position_at_risk": is_at_risk,
+            }
+        )
+    return sorted(adjusted, key=lambda p: p["score"], reverse=True)
+
+
 def decide_bid(
     player: dict,
     remaining_budget: int,
@@ -50,6 +83,11 @@ def decide_bid(
     topado siempre por max_biddable_amount(). Un jugador con score 0 no se
     puja por encima de su VM; uno con score 1.0 se puja hasta el máximo de
     prima configurado.
+
+    Si `player` viene de apply_position_priority() (tiene "position_at_risk"
+    y "base_score"), la razón auditada deja constancia de si el score ya
+    incluye el boost por posición en riesgo — para poder revisar después
+    por qué se pujó por ese jugador en concreto.
 
     Devuelve None si no se debe pujar, o un dict:
         {"player_id": ..., "amount": ..., "score": ..., "reason": "..."}
@@ -86,12 +124,18 @@ def decide_bid(
     if amount < price:
         return None
 
+    if player.get("position_at_risk"):
+        score_note = f"score={score:.3f} (base={player.get('base_score', score):.3f} + prioridad riesgo de plantilla)"
+    else:
+        score_note = f"score={score:.3f}"
+
     return {
         "player_id": player["id"],
         "amount": amount,
         "score": score,
+        "position_at_risk": bool(player.get("position_at_risk")),
         "reason": (
-            f"score={score:.3f} >= umbral={min_score_threshold}; "
+            f"{score_note} >= umbral={min_score_threshold}; "
             f"precio_base={price}, prima={premium_pct:.1%} -> deseado={desired_amount}; "
             f"cap_seguro={cap} -> puja_final={amount}"
         ),

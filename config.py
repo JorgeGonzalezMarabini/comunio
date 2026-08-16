@@ -83,6 +83,15 @@ BIDDING_SAFETY_LIMITS = {
 # un jugador. Punto de partida sin calibrar con datos reales todavía.
 BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.15"))
 
+# Cuánto sube el score de un candidato de mercado si su posición tiene
+# riesgo de plantilla (ver engine.squad_risk.assess_squad_depth: sin
+# ningún suplente sano, un "clausulazo"/lesión/sanción más dejaría un
+# hueco en la alineación, -4 puntos). Aditivo, no multiplicativo — no
+# fuerza la puja de un candidato realmente malo, solo le da ventaja frente
+# a otro de score similar en una posición ya cubierta. Ver
+# engine.bidding_strategy.apply_position_priority.
+BIDDING_POSITION_RISK_BOOST = float(os.getenv("BIDDING_POSITION_RISK_BOOST", "0.15"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real del sitio (confirmado por captura): sin el "1-" del portero.
 DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
