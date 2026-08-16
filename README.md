@@ -341,6 +341,26 @@ cp .env.example .env   # y rellenar credenciales
 python -m db.models    # crea db/comunio.db con el esquema
 ```
 
+## Tests
+
+Batería de tests con `pytest` (74 tests) — cubre `engine/`, `clients/`,
+`db/models.py` y los 4 jobs, incluida una regresión por cada bug real
+encontrado durante el desarrollo (el de `on_market`, el de pujas por
+debajo de precio, el de saldo negativo por ofertas pendientes sin
+resolver, el sesgo de precio en `LINEUP_EVALUATOR_WEIGHTS`, el bloqueo de
+ventas que dejan una posición sin cubrir...). Nunca toca la red real ni
+Telegram real (`tests/conftest.py::no_real_telegram` es `autouse=True` a
+propósito, después de que un script de prueba mandara sin querer una
+notificación real durante el desarrollo — ver historial de commits) ni
+`db/comunio.db` (cada test usa una BD SQLite temporal aislada,
+`tests/conftest.py::tmp_db`).
+
+```bash
+pip install -r requirements-dev.txt   # añade pytest sobre requirements.txt
+pytest                                 # corre todo salvo el test marcado @pytest.mark.network
+pytest -m network                      # opcional: confirma que Understat sigue respondiendo de verdad
+```
+
 ## Activar el cron en GitHub Actions
 
 `.env` es SOLO para ejecuciones locales — GitHub Actions no lo lee. El cron
@@ -375,6 +395,7 @@ clients/    -> integraciones externas (Comunio, Understat)
 db/         -> esquema SQLite + conexión
 engine/     -> evaluator, bidding_strategy, lineup_optimizer, squad_risk, selling_strategy
 jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup)
+tests/      -> batería pytest (ver sección "Tests" más arriba)
 notifier.py -> resumen por Telegram tras cada job
 logs/       -> auditoría de decisiones
 ```

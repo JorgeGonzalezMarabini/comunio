@@ -1,0 +1,4 @@
+# Dependencias solo para desarrollo/tests -- no hacen falta en producción
+# (GitHub Actions no instala esto, solo requirements.txt).
+-r requirements.txt
+pytest>=8.0
