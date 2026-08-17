@@ -34,11 +34,12 @@ de las dos basta (ver engine.lineup_optimizer.build_substitution_changes()):
   2. clients.football_lineups_client.find_players_confirmed_out_of_real_lineup()
      — un titular SANO que no aparece en el once REAL de su equipo hoy
      (rotación, decisión táctica del entrenador real, no solo lesión — el
-     caso más frecuente en la práctica, ver README). Detrás de
-     config.ENABLE_REAL_LINEUP_CHECK (False por defecto: requiere
-     config.API_FOOTBALL_KEY y todavía sin confirmar con una llamada real,
-     ver docstring del propio cliente) — si está desactivado, este job se
-     comporta exactamente igual que antes de que existiera esta fuente.
+     caso más frecuente en la práctica, ver README). Vía Fotmob (API no
+     oficial, gratis, sin key — ver docstring del propio cliente para las
+     otras tres fuentes descartadas antes de llegar a esta). Detrás de
+     config.ENABLE_REAL_LINEUP_CHECK (False por defecto) — si está
+     desactivado, este job se comporta exactamente igual que antes de que
+     existiera esta fuente.
 
 Sigue detrás de config.ENABLE_SUBSTITUTE_AUTO_SUBMIT (por defecto False,
 más conservador que ENABLE_LINEUP_AUTO_SUBMIT): build_substitution_changes()
@@ -81,16 +82,14 @@ def run():
     confirmed_out_ids = set()
     if config.ENABLE_REAL_LINEUP_CHECK:
         # Solo hace falta comprobar los equipos de nuestros TITULARES actuales,
-        # no toda la plantilla -- ahorra presupuesto de API-Football (ver
-        # docstring del propio cliente, límite de 100 peticiones/día).
+        # no toda la plantilla -- menos llamadas a Fotmob de las necesarias.
         from clients.football_lineups_client import find_players_confirmed_out_of_real_lineup
-        from clients.laliga_stats_client import current_season
 
         starters_by_id = {pid: players_by_id[pid] for pid in current_lineup_by_position.values() if pid in players_by_id}
         try:
-            confirmed_out_ids = find_players_confirmed_out_of_real_lineup(starters_by_id, current_season())
+            confirmed_out_ids = find_players_confirmed_out_of_real_lineup(starters_by_id)
         except Exception as e:  # noqa: BLE001 -- un fallo de esta fuente extra no debe tumbar la comprobación por lesión
-            notify(f"manage_substitutes: fallo consultando alineaciones reales (API-Football), sigo solo con is_injury_status: {e}")
+            notify(f"manage_substitutes: fallo consultando alineaciones reales (Fotmob), sigo solo con is_injury_status: {e}")
 
     changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids)
     if not changes:

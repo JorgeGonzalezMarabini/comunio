@@ -44,28 +44,27 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # --- Base de datos ---
 DATABASE_PATH = os.getenv("DATABASE_PATH", "db/futmondo.db")
 
-# --- Alineaciones reales (clients/football_lineups_client.py, API-Football) ---
+# --- Alineaciones reales (clients/football_lineups_client.py, Fotmob) ---
 # Decisión del usuario (2026-08-17, ver conversación): fuente elegida para
 # detectar cuándo un titular SANO no está en el once real de su equipo (no
-# solo lesión/duda, ver is_injury_status()) -- API-Football tiene una API
-# pública documentada y estable, a cambio de gestionar una API key gratuita
-# (no de pago, pero SÍ una cuenta/rate limit nuevos, ver README).
+# solo lesión/duda, ver is_injury_status()). Fotmob es la CUARTA fuente
+# probada ese mismo día -- las tres anteriores (API-Football plan gratuito,
+# SofaScore, TheSportsDB) se descartaron por bloqueo o mala calidad de
+# datos, todo confirmado con llamadas reales, ver docstring completo de
+# clients/football_lineups_client.py y README ("Banquillo/suplentes").
 #
-# **Todavía SIN CONFIRMAR con una llamada real** (a diferencia del resto de
-# clientes de este proyecto): sin una API key propia con la que probarlo
-# todavía. Ver docstring de clients/football_lineups_client.py para el TODO
-# completo antes de confiar en esto en producción.
-API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
-API_FOOTBALL_BASE_URL = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
+# Fotmob NO requiere API key ni cuenta -- por eso no hay nada equivalente a
+# API_FOOTBALL_KEY que configurar aquí.
+FOTMOB_BASE_URL = os.getenv("FOTMOB_BASE_URL", "https://www.fotmob.com/api/data")
 
-# League id de LaLiga en API-Football: 140 según su documentación pública y
-# múltiples fuentes de terceros, pero sin confirmar todavía con una llamada
-# propia (ver TODO en clients/football_lineups_client.py).
-API_FOOTBALL_LALIGA_LEAGUE_ID = int(os.getenv("API_FOOTBALL_LALIGA_LEAGUE_ID", "140"))
+# League id de LaLiga en Fotmob: 87, CONFIRMADO en vivo el 2026-08-17
+# (GET /matches?date=... devolvió los partidos reales de LaLiga bajo ese id).
+FOTMOB_LALIGA_LEAGUE_ID = int(os.getenv("FOTMOB_LALIGA_LEAGUE_ID", "87"))
 
 # Apaga/enciende la comprobación de alineación real por completo -- False
 # por defecto (más conservador todavía que ENABLE_SUBSTITUTE_AUTO_SUBMIT):
-# sin API_FOOTBALL_KEY configurada esto no debe intentar llamar a nada.
+# aunque Fotmob no exige credenciales, sigue siendo una API no oficial sin
+# contrato ni SLA (ver TODO en clients/football_lineups_client.py) --
 # jobs/manage_substitutes.py comprueba este flag antes de importar/usar
 # clients/football_lineups_client.py.
 ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower() == "true"

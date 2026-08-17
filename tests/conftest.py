@@ -47,15 +47,15 @@ def no_real_futmondo_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_real_api_football_network(monkeypatch):
+def no_real_lineup_network(monkeypatch):
     """
     Misma idea que no_real_futmondo_network pero para
-    clients/football_lineups_client.py (API-Football): sin key y con el
-    flag apagado por defecto en todo test, aunque el `.env` local tenga una
-    key real rellena -- cualquier test que quiera ejercitar esta rama debe
-    reactivarlo explícitamente (y mockear la red igualmente).
+    clients/football_lineups_client.py (Fotmob): flag apagado por defecto
+    en todo test, aunque el `.env` local lo tenga activado -- cualquier
+    test que quiera ejercitar esta rama debe reactivarlo explícitamente (y
+    mockear la red igualmente). Fotmob no exige key, así que no hay
+    credencial que anular aquí (a diferencia de no_real_futmondo_network).
     """
-    monkeypatch.setattr(config, "API_FOOTBALL_KEY", None)
     monkeypatch.setattr(config, "ENABLE_REAL_LINEUP_CHECK", False)
 
 

@@ -28,7 +28,7 @@ seguir siendo válido, no por descuido.
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
 - [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); detrás de `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` (**false por defecto**, sin confirmar todavía con una sustitución real)
-- [ ] Cliente de alineaciones reales (`clients/football_lineups_client.py`, API-Football) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); **BLOQUEADO, confirmado el 2026-08-17 con dos fuentes gratuitas probadas en vivo**: el plan GRATUITO de API-Football no da acceso a la temporada en curso (solo 2022-2024), y SofaScore devuelve 403 en toda la web/API (bloqueo de bot a nivel de borde, igual que FBref) — sin un plan de pago esto no puede funcionar en producción (ver sección "Banquillo/suplentes")
+- [x] Cliente de alineaciones reales (`clients/football_lineups_client.py`, Fotmob) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); Fotmob elegida tras descartar en vivo API-Football (plan gratuito sin acceso a temporada en curso), SofaScore (403 en todo, bloqueo de bot a nivel de borde igual que FBref), ESPN (403 Akamai) y TheSportsDB (datos de alineación corruptos); detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**, sin key ni cuenta que configurar) — ver sección "Banquillo/suplentes" para el TODO pendiente (timing exacto de confirmación, estabilidad a medio plazo de una API no oficial)
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
 
@@ -184,7 +184,7 @@ no queda ningún sano disponible en esa posición (mejor cubrir el hueco que
 dejarlo vacío, mismo criterio que `engine/squad_risk.py`).
 
 **"No juega" es más amplio que "lesionado" — fuente de alineaciones reales
-(API-Football)** (añadido 2026-08-17, a petición del usuario, ver
+(Fotmob)** (añadido 2026-08-17, a petición del usuario, ver
 `clients/football_lineups_client.py`): `build_substitution_changes()`
 detectaba como "confirmado fuera" solo a quien tuviera un `status` de
 lesión/duda (`is_injury_status()`). Pero el entrenador automático real de
@@ -194,74 +194,80 @@ sino que el entrenador del equipo real simplemente no lo pone esa jornada
 (rotación, decisión táctica, sanción no reflejada como "lesión" en
 `status`...).
 
-`clients/football_lineups_client.find_players_confirmed_out_of_real_lineup()`
-cubre esto: para cada equipo de nuestros titulares actuales, consulta si
-juega hoy (`GET /fixtures`) y, si la alineación real ya se publicó
-(`GET /fixtures/lineups`, normalmente ~1h antes del partido), cruza el once
-real contra nuestra plantilla (reutilizando la misma cascada de nombres de
-`clients/laliga_stats_client.py`: exacto -> apellido+equipo -> apellido
-único -> fuzzy) — cualquier titular nuestro que no aparezca ahí, esté sano
-o no, se trata igual que uno lesionado en
-`build_substitution_changes(..., confirmed_out_ids=...)`. Cachea el
-resultado por (equipo, día) en `real_lineup_checks` para no agotar el
-límite de 100 peticiones/día del plan gratuito con las llamadas repetidas
-de `manage_substitutes.py` a lo largo del día.
+**Cuatro fuentes gratuitas probadas en vivo el mismo día, en este orden,
+cada una descartada por un motivo real distinto antes de llegar a la que
+sí funciona:**
 
-Detrás de `config.ENABLE_REAL_LINEUP_CHECK` y `config.API_FOOTBALL_KEY`.
-
-**BLOQUEADO — CONFIRMADO el 2026-08-17 con una API key real que el plan
-GRATUITO no sirve para esto**: `GET /teams` y `GET /fixtures` con la
-temporada en curso (2026) devuelven `results: 0` y `"errors": {"plan":
-"Free plans do not have access to this season, try from 2022 to 2024."}`
-— el plan gratuito de API-Football solo da acceso a temporadas HISTÓRICAS
-(2022-2024), no a la actual. Sin eso, `/fixtures` nunca encuentra el
-partido de hoy y este cliente no puede funcionar en producción con un plan
-gratuito — no es un límite de volumen (100 peticiones/día), es un bloqueo
-total de acceso a los datos que hacen falta. Confirmado también, con
-`season=2023` (dentro del rango permitido): el league id de LaLiga (140)
-sí es correcto — devolvió los 20 equipos reales de esa temporada, incluido
-Barcelona con id 529.
-
-Como la API devuelve HTTP 200 con el error dentro del cuerpo (no un 4xx),
-`_get()` ahora comprueba explícitamente el campo `errors` y lanza
-`ApiFootballPlanError` en vez de tratarlo como "sin datos" — sin este
-arreglo (bug real encontrado en esta misma sesión de prueba),
-`find_players_confirmed_out_of_real_lineup()` se habría quedado sin
-sustituir a nadie SIEMPRE, sin avisar nunca de que la causa era un
-problema de plan y no que nadie estuviera confirmado fuera.
-
-**SofaScore, valorada a continuación, también descartada — y peor
-todavía** (probado el mismo día): `api.sofascore.com` Y
-`www.sofascore.com` devuelven **403 Forbidden en TODO**, ni siquiera la
-portada de la web carga — protección de borde vía Fastly, probada con
-User-Agent de navegador real, `Referer`/`Origin` y una sesión que visita
-antes la portada para conseguir cookies; ninguna variante lo esquiva.
-Descartado que fuera un problema de red local (`understat.com`,
-`api-football.com` y `google.com` sí responden 200 desde la misma
-máquina). Mismo patrón que FBref/Cloudflare, ya documentado más abajo en
-este README — un bloqueo de bots a nivel de borde, no arreglable con
-cabeceras, y que probablemente bloquearía igual (o peor) desde un runner
-de GitHub Actions. No se implementó ningún cliente contra esta fuente:
-sería código muerto contra un servicio confirmado inalcanzable.
+1. **API-Football (plan gratuito)** — BLOQUEADO: con una API key real,
+   `GET /teams`/`GET /fixtures` con la temporada en curso (2026) devuelven
+   `"errors": {"plan": "Free plans do not have access to this season, try
+   from 2022 to 2024."}` — el plan gratuito solo da temporadas históricas
+   (2022-2024), nunca la actual. No es un límite de volumen (100
+   peticiones/día), es un bloqueo total de acceso a los datos que hacen
+   falta. Confirmado de paso, con `season=2023` (dentro del rango
+   permitido): el league id de LaLiga (140) sí era correcto.
+2. **SofaScore** — BLOQUEADO más duro todavía: `api.sofascore.com` Y
+   `www.sofascore.com` (la web entera) devuelven 403 en TODO, incluida la
+   ruta interna que usa el propio frontend. Confirmado que es una huella
+   de conexión (TLS/HTTP) y no cabeceras: la MISMA URL responde 200 desde
+   un navegador Chrome real (probado con Claude in Chrome) y 403 desde
+   curl/`requests` con cualquier User-Agent/Referer/sesión. Automatizarlo
+   exigiría un navegador headless camuflado para pasar por humano ante un
+   sistema anti-bot que activamente intenta impedirlo — un bypass
+   deliberado que este proyecto no construye.
+3. **ESPN** (`site.api.espn.com`) — BLOQUEADO igual (403 Akamai).
+4. **TheSportsDB** (key de prueba pública `"3"`) — responde SIN bloqueo,
+   pero la alineación de un partido real ya jugado (Espanyol 3-0 Levante,
+   2026-08-16) vino con jugadores de OTROS equipos/temporadas mezclados
+   (`strTeam: "Lille"`, `"Hellas Verona"`, `"_Retired Soccer"` en un
+   partido de LaLiga) — descartada por integridad de datos, no por acceso.
 
 También descartado **football-data.org**: su plan gratuito no incluye
 alineaciones (`lineups`/`substitutions`/`cards` quedan fuera del free
 tier según su propia documentación de precios) — solo fixtures/resultados.
 
-**Pendiente de decisión del usuario** antes de poder tener alineaciones
-reales en producción: pasar a un plan de pago de API-Football (Pro,
-~$19/mes en el momento de este hallazgo, con acceso a la temporada en
-curso y 7500 peticiones/día — el resto del diseño, caché incluida, sigue
-siendo válido tal cual), buscar otra alternativa de pago (ej. Sportmonks,
-~€29/mes), o quedarse con el mecanismo manual (`is_injury_status()`
-solamente, coste 0, cero riesgo de bloqueo). Mientras tanto,
-`ENABLE_REAL_LINEUP_CHECK=true` con el plan gratuito de API-Football
-activado no rompe nada (el fallo se audita/notifica igual que cualquier
-otro, ver abajo), pero tampoco aporta nada.
+**Fotmob (`www.fotmob.com`) es la elegida**: la única de las cinco que
+combina acceso sin bloqueo Y datos correctos, ambas cosas confirmadas con
+llamadas reales:
 
-Un fallo de esta fuente extra (el bloqueo de plan de arriba, red, key
-inválida...) no tumba la comprobación por lesión — `manage_substitutes.py`
-avisa por Telegram y sigue solo con `is_injury_status()`.
+```
+GET https://www.fotmob.com/api/data/matches?date=YYYYMMDD
+    -> 200 sin ninguna protección anti-bot, sin key ni cuenta
+    -> {"leagues": [{"id": 87, "name": "LaLiga",
+                      "matches": [{"id": ..., "home": {"id","name"}, "away": {...}}]}]}
+
+GET https://www.fotmob.com/api/data/matchDetails?matchId=...
+    -> content.lineup: {"lineupType": "predicted" | "standard",
+        "homeTeam": {"id","name","starters":[{"id","name",...}]}, "awayTeam": {...}}
+```
+
+`lineupType` distingue estimación (`"predicted"`, antes del partido) de
+alineación REAL (`"standard"`) — confirmado comparando contra un partido
+ya jugado (Espanyol 3-0 Levante): `lineupType` era `"standard"` y los
+titulares listados eran correctos, sin mezclar jugadores de otros equipos
+(justo lo que sí falló en TheSportsDB). `find_players_confirmed_out_of_real_lineup()`
+cruza el once real contra nuestra plantilla (reutilizando la misma cascada
+de nombres de `clients/laliga_stats_client.py`: exacto -> apellido+equipo
+-> apellido único -> fuzzy) — cualquier titular nuestro que no aparezca
+ahí, esté sano o no, se trata igual que uno lesionado en
+`build_substitution_changes(..., confirmed_out_ids=...)`. Cachea el
+resultado por (equipo, día) en `real_lineup_checks` para no abusar de un
+servicio gratuito de terceros sin necesidad (Fotmob no publica un límite
+de peticiones/día, a diferencia de API-Football).
+
+Detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**) — sin
+key ni cuenta que configurar, a diferencia de API-Football.
+
+**TODO sin confirmar todavía**: el momento EXACTO en que `lineupType` pasa
+de `"predicted"` a `"standard"` antes del pitido inicial (documentado en
+otras fuentes como ~1h antes, pero no observado en vivo aquí — el partido
+más cercano al pitido que se probó seguía en `"predicted"` con 2h20min por
+delante); y la estabilidad a medio plazo de Fotmob, una API no oficial sin
+contrato ni SLA igual que SofaScore — hoy responde sin bloqueo, pero
+podría empezar a bloquear sin aviso en cualquier momento. Un fallo de esta
+fuente extra (eso, red, cambio de forma de la respuesta...) no tumba la
+comprobación por lesión — `manage_substitutes.py` avisa por Telegram y
+sigue solo con `is_injury_status()`.
 
 **IMPORTANTE — el suplente colocado no hace nada por sí solo**: según la
 [FAQ oficial](https://help.futmondo.com/article/159-entrenador-automatico),
@@ -285,7 +291,7 @@ corre con más frecuencia (pensado para varias veces al día en días de
 partido, ver `manage_substitutes.yml`) y, en cada pasada, revisa la
 alineación YA guardada en Futmondo — si algún titular aparece con `status`
 de lesión/duda (`is_injury_status()`), o (con `config.ENABLE_REAL_LINEUP_CHECK`
-activo) no aparece en el once real de su equipo hoy según API-Football (ver
+activo) no aparece en el once real de su equipo hoy según Fotmob (ver
 sección anterior), y su posición tiene un suplente disponible (sano y
 también presente en el once real) asignado en el banquillo, genera la
 pareja de `changes` que los intercambia
@@ -518,10 +524,9 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
 
 1. **Secrets** (`Settings → Secrets and variables → Actions → Secrets`,
    cifrados, nunca visibles en logs): `FUTMONDO_TOKEN`, `FUTMONDO_USER_ID`,
-   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Opcional (ver "Banquillo/
-   suplentes"): `API_FOOTBALL_KEY` — solo hace falta si se activa
-   `ENABLE_REAL_LINEUP_CHECK`, sin ella este job funciona igual sin esa
-   señal extra.
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Nada que añadir para la
+   fuente de alineaciones reales (Fotmob, ver "Banquillo/suplentes") — no
+   exige key ni cuenta.
 2. **Variables** (misma sección, pestaña `Variables` — no son secretas, solo
    IDs): `FUTMONDO_CHAMPIONSHIP_ID`, `FUTMONDO_USERTEAM_ID`. Opcional:
    `ENABLE_REAL_LINEUP_CHECK=true` (por defecto `false`, no hace falta
