@@ -28,7 +28,7 @@ seguir siendo válido, no por descuido.
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
 - [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); detrás de `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` (**false por defecto**, sin confirmar todavía con una sustitución real)
-- [ ] Cliente de alineaciones reales (`clients/football_lineups_client.py`, API-Football) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); escrito contra la documentación pública v3, **sin confirmar todavía con una llamada real** (sin API key propia, ver TODO en el propio módulo); detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**)
+- [ ] Cliente de alineaciones reales (`clients/football_lineups_client.py`, API-Football) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); **BLOQUEADO, confirmado el 2026-08-17**: el plan GRATUITO de API-Football no da acceso a la temporada en curso, solo a 2022-2024 — sin plan de pago (~$19/mes) esto no puede funcionar en producción (ver sección "Banquillo/suplentes")
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
 
@@ -207,14 +207,39 @@ resultado por (equipo, día) en `real_lineup_checks` para no agotar el
 límite de 100 peticiones/día del plan gratuito con las llamadas repetidas
 de `manage_substitutes.py` a lo largo del día.
 
-Detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**) y
-`config.API_FOOTBALL_KEY` — **todavía SIN CONFIRMAR con una llamada
-real**, a diferencia del resto de clientes de este proyecto: escrito
-contra la documentación pública v3 de API-Football sin tener todavía una
-API key propia con la que probarlo en vivo (ver el TODO completo en el
-docstring del módulo — league id de LaLiga sin confirmar, forma exacta de
-"alineación no publicada todavía" sin confirmar, consumo real de
-peticiones/día sin medir). Un fallo de esta fuente extra (red, key
+Detrás de `config.ENABLE_REAL_LINEUP_CHECK` y `config.API_FOOTBALL_KEY`.
+
+**BLOQUEADO — CONFIRMADO el 2026-08-17 con una API key real que el plan
+GRATUITO no sirve para esto**: `GET /teams` y `GET /fixtures` con la
+temporada en curso (2026) devuelven `results: 0` y `"errors": {"plan":
+"Free plans do not have access to this season, try from 2022 to 2024."}`
+— el plan gratuito de API-Football solo da acceso a temporadas HISTÓRICAS
+(2022-2024), no a la actual. Sin eso, `/fixtures` nunca encuentra el
+partido de hoy y este cliente no puede funcionar en producción con un plan
+gratuito — no es un límite de volumen (100 peticiones/día), es un bloqueo
+total de acceso a los datos que hacen falta. Confirmado también, con
+`season=2023` (dentro del rango permitido): el league id de LaLiga (140)
+sí es correcto — devolvió los 20 equipos reales de esa temporada, incluido
+Barcelona con id 529.
+
+Como la API devuelve HTTP 200 con el error dentro del cuerpo (no un 4xx),
+`_get()` ahora comprueba explícitamente el campo `errors` y lanza
+`ApiFootballPlanError` en vez de tratarlo como "sin datos" — sin este
+arreglo (bug real encontrado en esta misma sesión de prueba),
+`find_players_confirmed_out_of_real_lineup()` se habría quedado sin
+sustituir a nadie SIEMPRE, sin avisar nunca de que la causa era un
+problema de plan y no que nadie estuviera confirmado fuera.
+
+**Pendiente de decisión del usuario** antes de poder usar esto de verdad:
+pasar a un plan de pago de API-Football (Pro, ~$19/mes en el momento de
+este hallazgo, con acceso a la temporada en curso y 7500 peticiones/día —
+el resto del diseño, caché incluida, sigue siendo válido tal cual), volver
+a valorar SofaScore, o quedarse con el mecanismo manual. Mientras tanto,
+`ENABLE_REAL_LINEUP_CHECK=true` con el plan gratuito activado no rompe
+nada (el fallo se audita/notifica igual que cualquier otro, ver abajo),
+pero tampoco aporta nada.
+
+Un fallo de esta fuente extra (el bloqueo de plan de arriba, red, key
 inválida...) no tumba la comprobación por lesión — `manage_substitutes.py`
 avisa por Telegram y sigue solo con `is_injury_status()`.
 

@@ -4,17 +4,39 @@ sin API key) -- este cliente no tiene todavía un test @pytest.mark.network
 como laliga_stats_client.py porque no hay una API_FOOTBALL_KEY real con la
 que probarlo en vivo (ver TODO en el docstring del propio módulo).
 """
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import config
 import clients.football_lineups_client as football_lineups_client
-from clients.football_lineups_client import real_starters_for_team
+from clients.football_lineups_client import ApiFootballPlanError, real_starters_for_team
 
 
 def setup_function(_):
     # get_team_ids() cachea en un global de módulo -- limpiar entre tests
     # para que uno no contamine al siguiente.
     football_lineups_client._team_ids_cache = None
+
+
+def test_get_raises_plan_error_instead_of_silently_returning_empty_response():
+    """
+    Regresión de un fallo real encontrado el 2026-08-17 (ver docstring del
+    módulo): API-Football devuelve HTTP 200 con `errors` relleno para
+    fallos de plan (ej. plan gratuito sin acceso a la temporada en curso).
+    Sin esta comprobación, _get() lo trataría como "sin datos" en vez de
+    como el fallo real que es.
+    """
+    fake_http_response = Mock()
+    fake_http_response.json.return_value = {
+        "errors": {"plan": "Free plans do not have access to this season, try from 2022 to 2024."},
+        "results": 0,
+        "response": [],
+    }
+    with patch("clients.football_lineups_client.requests.get", return_value=fake_http_response):
+        try:
+            football_lineups_client._get("/teams", {"league": 140, "season": "2026"})
+            assert False, "debía lanzar ApiFootballPlanError"
+        except ApiFootballPlanError as e:
+            assert "plan" in str(e).lower()
 
 
 def test_get_team_ids_indexes_by_normalized_name():

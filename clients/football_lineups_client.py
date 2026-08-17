@@ -15,26 +15,53 @@ API key gratuita (el README asumía "coste 0: sin APIs de pago" -- esta key
 es gratuita, no de pago, pero SÍ es una cuenta/rate limit nuevos a
 mantener, aceptado explícitamente por el usuario).
 
-**IMPORTANTE -- todavía SIN CONFIRMAR con una llamada real**, a diferencia
-del resto de clientes de este proyecto (que solo se dan por buenos tras una
-captura real, ver README): este módulo se escribió contra la documentación
-pública v3 de API-Football (fixtures, fixtures/lineups, teams) y
-conocimiento general de esa API, sin tener todavía una API key propia con
-la que probarlo en vivo. TODO antes de confiar en él en producción:
+**BLOQUEADO -- CONFIRMADO el 2026-08-17 con una API key real que el plan
+GRATUITO no sirve para este caso de uso**: `GET /teams` y `GET /fixtures`
+con `season` = temporada en curso (2026) devuelven `results: 0` y
+`"errors": {"plan": "Free plans do not have access to this season, try
+from 2022 to 2024."}` -- el plan gratuito de API-Football solo da acceso a
+temporadas HISTÓRICAS (2022-2024), no a la temporada en curso. Sin acceso a
+la temporada en curso, `/fixtures` nunca encuentra el partido de hoy y
+`/fixtures/lineups` nunca tiene nada que consultar -- **este cliente no
+puede funcionar en producción con un plan gratuito**, no es un límite de
+volumen (100 peticiones/día) sino un bloqueo total de acceso a los datos
+que hacen falta.
 
-  1. Crear una cuenta gratuita en https://www.api-football.com/ (o
-     https://dashboard.api-football.com/) y rellenar config.API_FOOTBALL_KEY.
-  2. Confirmar el league id de LaLiga (config.API_FOOTBALL_LALIGA_LEAGUE_ID,
-     140 por defecto según documentación pública y múltiples fuentes de
-     terceros, pero sin verificar con una llamada propia).
-  3. Confirmar que GET /fixtures/lineups devuelve `response: []` de verdad
-     hasta que la alineación se hace pública (según la propia documentación
-     de API-Football, normalmente ~1h antes del partido) y no algún otro
-     shape para "pendiente".
-  4. Medir el consumo real de peticiones/día contra el límite de 100 del
-     plan gratuito con el volumen real de equipos de la plantilla -- ver
-     find_players_confirmed_out_of_real_lineup() más abajo para el diseño
-     de caché pensado para no agotarlo, pero sin confirmar en producción.
+Confirmado también, con `season=2023` (dentro del rango permitido): el
+league id de LaLiga (config.API_FOOTBALL_LALIGA_LEAGUE_ID) SÍ es 140 --
+`GET /teams?league=140&season=2023` devolvió los 20 equipos reales de esa
+temporada (incluido Barcelona, id 529) sin error.
+
+TODO real antes de poder usar esto en producción -- decisión pendiente del
+usuario, ver conversación 2026-08-17 tras este hallazgo:
+  1. Pasar a un plan de pago de API-Football (Pro, ~$19/mes según su
+     página de precios en el momento de este hallazgo, con acceso a la
+     temporada en curso y 7500 peticiones/día) -- el resto del diseño de
+     este módulo (caché, cascada de nombres) sigue siendo válido tal cual,
+     solo falta la key de pago.
+  2. Cambiar de fuente (ej. SofaScore, descartado inicialmente por no tener
+     una API documentada -- ver conversación 2026-08-17 sobre las opciones
+     valoradas).
+  3. Volver al mecanismo manual (descartado inicialmente por el mismo
+     motivo).
+
+Con el plan gratuito activado tal cual (`ENABLE_REAL_LINEUP_CHECK=true`
+pero sin plan de pago), `find_players_confirmed_out_of_real_lineup()` no
+lanza (el error de plan queda dentro de una respuesta 200 válida, `_get()`
+no lo detecta como fallo HTTP) pero tampoco encuentra nunca ningún partido
+-- se comporta como si ningún equipo jugara nunca, sin avisar de que en
+realidad es un problema de plan. Ver TODO en find_players_confirmed_out_of_real_lineup()
+más abajo.
+
+Puntos menores todavía sin confirmar (secundarios al bloqueo de arriba):
+  - Que GET /fixtures/lineups devuelva `response: []` de verdad hasta que
+    la alineación se hace pública (según la documentación de API-Football,
+    normalmente ~1h antes del partido) y no algún otro shape para
+    "pendiente" -- no se ha podido probar contra un fixture de la
+    temporada en curso.
+  - Consumo real de peticiones/día una vez haya un plan que sí dé acceso a
+    la temporada en curso -- ver find_players_confirmed_out_of_real_lineup()
+    para el diseño de caché pensado para no agotarlo, sin medir todavía.
 
 Endpoints usados (documentación v3, acceso directo sin RapidAPI):
 
@@ -80,6 +107,22 @@ from clients.laliga_stats_client import build_player_index, match_player
 _team_ids_cache: dict[str, int] | None = None
 
 
+class ApiFootballPlanError(Exception):
+    """
+    La API devolvió HTTP 200 con el campo `errors` relleno -- API-Football
+    usa esto para errores de PLAN (ej. "Free plans do not have access to
+    this season"), no solo `response.raise_for_status()` como el resto de
+    fallos HTTP. CONFIRMADO en vivo el 2026-08-17: con el plan gratuito,
+    GET /teams y GET /fixtures con la temporada en curso devuelven
+    `results: 0` y este error dentro de una respuesta 200 -- sin esta
+    comprobación, _get() lo trataría como "sin datos" (p.ej. "ese equipo no
+    juega hoy") en vez de como el fallo de plan que realmente es, y
+    find_players_confirmed_out_of_real_lineup() se quedaría sin sustituir a
+    nadie SIEMPRE, sin avisar nunca de la causa real. Ver docstring del
+    módulo para el hallazgo completo y las opciones para resolverlo.
+    """
+
+
 def _normalize(text: str | None) -> str:
     """Minúsculas, sin acentos/diacríticos -- mismo criterio que clients/laliga_stats_client.py."""
     nfkd = unicodedata.normalize("NFKD", text or "")
@@ -94,7 +137,13 @@ def _headers() -> dict:
 def _get(path: str, params: dict) -> dict:
     response = requests.get(f"{config.API_FOOTBALL_BASE_URL}{path}", headers=_headers(), params=params, timeout=15)
     response.raise_for_status()
-    return response.json()
+    data = response.json()
+    errors = data.get("errors")
+    # `errors` viene como dict {"campo": "mensaje"} cuando hay error, lista
+    # vacía [] cuando no lo hay -- ambas formas vistas en respuestas reales.
+    if errors:
+        raise ApiFootballPlanError(f"{path} devolvió errors: {errors}")
+    return data
 
 
 def get_team_ids(season: str) -> dict[str, int]:
