@@ -113,23 +113,131 @@ def get_league_data_with_fallback(league: str = "La_liga", season: str = None) -
     return fallback_data, previous_season, True
 
 
-def index_players_by_name(league_data: dict) -> dict:
-    """
-    Indexa `league_data["players"]` por nombre normalizado (minúsculas, sin
-    acentos) para poder cruzarlo con los nombres que devuelve Futmondo.
-
-    TODO: el cruce por nombre es frágil (acentos, apodos, "Álvaro" vs
-    "Alvaro Garcia" vs "A. Garcia"...). Si da muchos fallos de match en la
-    práctica, considerar mapear por equipo+posición como desempate, o
-    mantener a mano un `db.models` de alias jugador Futmondo -> id Understat.
-    """
+def _normalize(text: str) -> str:
+    """Minúsculas, sin acentos/diacríticos, espacios repetidos colapsados."""
     import unicodedata
 
-    def normalize(name: str) -> str:
-        nfkd = unicodedata.normalize("NFKD", name)
-        return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
+    nfkd = unicodedata.normalize("NFKD", text or "")
+    stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return " ".join(stripped.lower().split())
 
-    return {normalize(p["player_name"]): p for p in league_data.get("players", [])}
+
+def index_players_by_name(league_data: dict) -> dict:
+    """
+    Indexa `league_data["players"]` por NOMBRE COMPLETO normalizado
+    (minúsculas, sin acentos). Cruce exacto simple, útil cuando la otra
+    fuente también muestra el nombre completo — para el caso, muy
+    frecuente en Futmondo, de mostrar solo el apellido ("Cairney" en vez de
+    "Tom Cairney") esto solo no basta, ver build_player_index()/
+    match_player() más abajo para el cruce robusto de verdad que usa
+    jobs/sync_data.py.
+    """
+    return {_normalize(p["player_name"]): p for p in league_data.get("players", [])}
+
+
+def build_player_index(league_data: dict) -> dict:
+    """
+    Índice de `league_data["players"]` pensado para match_player(): además
+    del nombre completo, indexa por (equipo, apellido) y por apellido a
+    secas, para poder cruzar con los nombres cortos que Futmondo usa a
+    menudo para jugadores conocidos (ver docstring de match_player()).
+
+    "Apellido" aquí es simplemente la última palabra del nombre completo
+    normalizado — una aproximación razonable (falla con apellidos
+    compuestos tipo "Van Dijk" o "De Jong", que quedarían como "dijk"/
+    "jong"), pero es exactamente el mismo criterio que ya usa Futmondo para
+    mostrar el nombre corto en esos casos en la práctica.
+    """
+    players = league_data.get("players", [])
+    by_full_name: dict[str, dict] = {}
+    by_team_and_surname: dict[tuple[str, str], list[dict]] = {}
+    by_surname: dict[str, list[dict]] = {}
+
+    for p in players:
+        full_name = _normalize(p.get("player_name", ""))
+        if not full_name:
+            continue
+        by_full_name.setdefault(full_name, p)
+
+        surname = full_name.split(" ")[-1]
+        team = _normalize(p.get("team_title", ""))
+        by_team_and_surname.setdefault((team, surname), []).append(p)
+        by_surname.setdefault(surname, []).append(p)
+
+    return {"by_full_name": by_full_name, "by_team_and_surname": by_team_and_surname, "by_surname": by_surname, "all": players}
+
+
+def match_player(name: str, team: str, index: dict, fuzzy_threshold: float = 0.75) -> tuple[dict | None, str]:
+    """
+    Busca el jugador de Understat que mejor corresponde a `name`/`team` (los
+    que devuelve Futmondo — ver jobs/sync_data.py), probando estrategias de
+    MÁS a MENOS fiable y parando en la primera que dé un resultado
+    inequívoco. Nunca "adivina" si hay ambigüedad real: mejor dejar a un
+    jugador sin cruzar (sus columnas de Understat quedan NULL esa sync) que
+    cruzarlo mal y contaminar su score con las stats de otro jugador.
+
+    Devuelve `(jugador_o_None, estrategia)` — la estrategia es solo para
+    poder auditar/loggear de qué nivel de confianza salió cada cruce (ver
+    el resumen de jobs/sync_data.py). Niveles, de más a menos fiable:
+
+      1. "exact": el nombre de Futmondo, normalizado, coincide tal cual con
+         el nombre completo de un jugador de Understat (Futmondo muestra el
+         nombre completo, ej. "Robert Lewandowski").
+      2. "surname+team": el nombre de Futmondo coincide con el APELLIDO
+         (última palabra del nombre completo) de un jugador de Understat Y
+         ambos juegan en el mismo equipo (nombre de equipo normalizado) —
+         cubre el caso más habitual: Futmondo mostrando solo el apellido de
+         un jugador conocido (ej. "Cairney" -> "Tom Cairney" del Fulham).
+      3. "surname_unique": igual que el anterior pero sin poder confirmar
+         equipo (los nombres de equipo de las dos fuentes no coinciden en
+         texto, o Futmondo no trae equipo) — solo se acepta si ese apellido
+         es único en TODA la liga, para no arriesgarse a mezclar a dos
+         jugadores homónimos de equipos distintos.
+      4. "fuzzy": similitud de texto (`difflib.SequenceMatcher`) contra los
+         jugadores del MISMO equipo — aceptado solo si el mejor candidato
+         supera `fuzzy_threshold` Y saca claramente más nota que el segundo
+         mejor candidato (margen >= 0.15), para no "adivinar" entre dos
+         apellidos parecidos del mismo equipo (ej. dos defensas con
+         apellido similar). Pensado para variantes menores de transcripción
+         (guiones, apóstrofes, orden nombre/apellido) que las estrategias
+         anteriores no cubren.
+
+    Si ninguna estrategia da un resultado inequívoco, devuelve
+    `(None, "sin_match")`.
+    """
+    import difflib
+
+    normalized_name = _normalize(name)
+    normalized_team = _normalize(team or "")
+    if not normalized_name:
+        return None, "sin_nombre"
+
+    exact = index["by_full_name"].get(normalized_name)
+    if exact:
+        return exact, "exact"
+
+    same_team_same_surname = index["by_team_and_surname"].get((normalized_team, normalized_name), [])
+    if len(same_team_same_surname) == 1:
+        return same_team_same_surname[0], "surname+team"
+
+    if not same_team_same_surname:
+        same_surname_anywhere = index["by_surname"].get(normalized_name, [])
+        if len(same_surname_anywhere) == 1:
+            return same_surname_anywhere[0], "surname_unique"
+
+    if normalized_team:
+        same_team_players = [p for p in index["all"] if _normalize(p.get("team_title", "")) == normalized_team]
+        if same_team_players:
+            def ratio(p: dict) -> float:
+                return difflib.SequenceMatcher(None, normalized_name, _normalize(p.get("player_name", ""))).ratio()
+
+            scored = sorted(same_team_players, key=ratio, reverse=True)
+            best_ratio = ratio(scored[0])
+            runner_up_ratio = ratio(scored[1]) if len(scored) > 1 else 0.0
+            if best_ratio >= fuzzy_threshold and (best_ratio - runner_up_ratio) >= 0.15:
+                return scored[0], "fuzzy"
+
+    return None, "sin_match"
 
 
 def team_fixture_difficulty(league_data: dict, team_title: str, upcoming_only: bool = True) -> list[dict]:

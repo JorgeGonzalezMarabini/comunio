@@ -9,10 +9,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clients.laliga_stats_client import (
+    build_player_index,
     current_season,
     get_league_data,
     get_league_data_with_fallback,
     index_players_by_name,
+    match_player,
     next_match_difficulty,
     team_fixture_difficulty,
 )
@@ -78,6 +80,91 @@ def test_index_players_by_name_normalizes_accents_and_case():
     index = index_players_by_name(league_data)
     assert "angel recio" in index
     assert "kylian mbappe-lottin" in index
+
+
+# --- match_player(): cruce robusto Futmondo <-> Understat ---
+#
+# Futmondo muestra a menudo solo el apellido de un jugador conocido
+# ("Cairney" en vez de "Tom Cairney") -- index_players_by_name() por sí
+# solo (cruce exacto de nombre completo) no basta para ese caso, que es el
+# más habitual en la práctica (ver captura real documentada en el README).
+
+_LEAGUE_DATA = {
+    "players": [
+        {"player_name": "Tom Cairney", "team_title": "Fulham", "id": "u1"},
+        {"player_name": "Sergio Ramos", "team_title": "Sevilla", "id": "u2"},
+        {"player_name": "Diego Garcia", "team_title": "Betis", "id": "u3"},  # apellido "Garcia" repetido en otro equipo
+        {"player_name": "Luis Garcia", "team_title": "Alaves", "id": "u4"},  # para forzar ambigüedad de apellido sin equipo
+        {"player_name": "Kylian Mbappe-Lottin", "team_title": "Real Madrid", "id": "u5"},
+    ]
+}
+
+
+def test_match_player_exact_full_name():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Sergio Ramos", "Sevilla", index)
+    assert strategy == "exact"
+    assert player["id"] == "u2"
+
+
+def test_match_player_surname_with_matching_team():
+    """Caso más habitual: Futmondo muestra solo el apellido de un jugador conocido."""
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Cairney", "Fulham", index)
+    assert strategy == "surname+team"
+    assert player["id"] == "u1"
+
+
+def test_match_player_surname_unique_when_team_names_dont_align():
+    """
+    Si el nombre de equipo de Futmondo no coincide en texto con el de
+    Understat (p.ej. abreviaturas distintas), pero el apellido es único en
+    toda la liga, se acepta igualmente -- sin equipo con el que
+    desambiguar, un apellido único en toda la liga sigue siendo una señal
+    fiable.
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Cairney", "Fulham FC", index)  # nombre de equipo no coincide
+    assert strategy == "surname_unique"
+    assert player["id"] == "u1"
+
+
+def test_match_player_ambiguous_surname_without_team_match_gives_up():
+    """
+    Dos jugadores distintos comparten apellido ("Garcia") en equipos
+    distintos -- sin poder confirmar equipo, no hay forma fiable de saber
+    cuál es. Mejor no cruzar que cruzar mal.
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Garcia", "Equipo Desconocido", index)
+    assert player is None
+    assert strategy == "sin_match"
+
+
+def test_match_player_fuzzy_catches_minor_spelling_variation():
+    """
+    Variante menor de transcripción (sin guion) del mismo jugador, en el
+    mismo equipo -- ninguna estrategia exacta la coge, pero la similitud de
+    texto sí, sin ambigüedad real (es el único jugador de ese equipo).
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Kylian Mbappe Lottin", "Real Madrid", index)
+    assert strategy == "fuzzy"
+    assert player["id"] == "u5"
+
+
+def test_match_player_no_match_returns_none():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Jugador Inexistente", "Equipo Inexistente", index)
+    assert player is None
+    assert strategy == "sin_match"
+
+
+def test_match_player_empty_name_does_not_crash():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("", "Fulham", index)
+    assert player is None
+    assert strategy == "sin_nombre"
 
 
 def test_team_fixture_difficulty_filters_by_team_and_upcoming():

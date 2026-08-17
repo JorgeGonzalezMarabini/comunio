@@ -23,7 +23,7 @@ seguir siendo válido, no por descuido.
 - [x] Motor de evaluación (`engine/evaluator.py`) — misma lógica que en la fase de Comunio (normaliza features 0..1 dentro del pool, pesos en `config.py`), adaptada a los nombres de columna nuevos
 - [x] Estrategia de pujas (`engine/bidding_strategy.py`) — misma lógica de seguridad (tope por jugador, % de presupuesto por jornada, reserva mínima, prima sobre el VM real) — la protección contra saldo negativo se mantiene por precaución aunque en Futmondo no se ha podido confirmar la regla exacta de penalización (ver sección dedicada)
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — **reescrito de cero**: Futmondo numera los slots de la alineación de forma totalmente distinta a Comunio (enteros 0..10 en vez de un string de posición + categoría de banquillo), confirmado solo para la formación 4-4-2 (ver TODO en el propio módulo)
-- [x] `jobs/sync_data.py` — mapeo real Futmondo + Understat -> `db/models.py`; reconcilia pujas/ventas comparando plantilla y mercado actuales (sin endpoint externo de "mis ofertas", a diferencia de Comunio — ver sección dedicada)
+- [x] `jobs/sync_data.py` — mapeo real Futmondo + Understat -> `db/models.py`; reconcilia pujas/ventas comparando plantilla y mercado actuales (sin endpoint externo de "mis ofertas", a diferencia de Comunio — ver sección dedicada); cruce con Understat por cascada de fiabilidad (nombre completo -> apellido+equipo -> apellido único -> similitud de texto), no solo nombre exacto — ver sección dedicada
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()` -> `change_lineup()` real. Por ahora solo manda el once titular, sin banquillo (ver TODO)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
@@ -150,6 +150,42 @@ Comunio sí, con valores `ACTIVE`/`WEAKENED`/`INJURED` reales) — Futmondo
 expone un campo `status` pero no se ha observado un valor de lesión real
 todavía (liga de prueba en pretemporada). Ver
 `clients/futmondo_client.py:is_injury_status()`.
+
+### Cruce de nombres Futmondo <-> Understat: cascada de fiabilidad decreciente
+
+El cruce por nombre completo exacto (`index_players_by_name()`) no bastaba
+en la práctica: Futmondo muestra a menudo solo el APELLIDO de un jugador
+conocido (así lo vimos en la captura real — "Cairney", "Konak", "Kamara"…),
+mientras que Understat siempre da el nombre completo ("Tom Cairney"). Un
+cruce solo por nombre completo se quedaba sin cruzar a la mayoría de la
+plantilla/mercado, dejando sus columnas de Understat (xG, minutos...) en
+NULL y penalizándolos de facto en el evaluador frente a los pocos
+jugadores con nombre completo mostrado.
+
+`build_player_index()` + `match_player()` prueban, en orden de más a menos
+fiable, y **paran en la primera que dé un resultado inequívoco**:
+
+1. **Nombre completo exacto** — Futmondo muestra el nombre completo.
+2. **Apellido + equipo** — el caso más habitual: apellido de Futmondo
+   coincide con la última palabra del nombre completo de Understat, ambos
+   en el mismo equipo.
+3. **Apellido único en toda la liga** — igual que (2) pero sin poder
+   confirmar equipo (nombres de equipo que no coinciden en texto entre las
+   dos fuentes); solo se acepta si ningún otro jugador de la liga comparte
+   ese apellido.
+4. **Similitud de texto** (`difflib`, solo contra jugadores del mismo
+   equipo) — para variantes menores de transcripción (guiones, apóstrofes)
+   que las anteriores no cubren; se exige una nota alta Y una diferencia
+   clara con el segundo mejor candidato, para no "adivinar" entre dos
+   apellidos parecidos del mismo equipo.
+
+Si ninguna da un resultado inequívoco, el jugador se queda sin cruzar esa
+sync (mejor eso que cruzarlo mal y contaminar su score con las stats de
+otro). `jobs/sync_data.py` cuenta cuántos cruces salieron de cada
+estrategia y lo incluye en el resumen de Telegram (ej. "142/150 cruzados
+con Understat (120 exact, 20 surname+team, 2 fuzzy)") — una proporción
+alta de `fuzzy`/`surname_unique` frente a `exact`/`surname+team` sería
+señal de revisarlo.
 
 ## Reconciliación de pujas y ventas (sin endpoint externo de "mis ofertas")
 

@@ -21,7 +21,7 @@ distinguir con los datos disponibles).
 from datetime import datetime, timezone
 
 from clients.futmondo_client import FutmondoClient, FUTMONDO_POSITION_MAP
-from clients.laliga_stats_client import get_league_data_with_fallback, index_players_by_name
+from clients.laliga_stats_client import build_player_index, get_league_data_with_fallback, match_player
 from db.models import init_db, get_connection, get_open_bids, update_bid_status, get_open_sales, update_sale_status
 from notifier import notify
 
@@ -166,13 +166,6 @@ def _upsert_external_stats(conn, player_id: str, understat_player: dict, season:
     )
 
 
-def _normalize_name(name: str) -> str:
-    import unicodedata
-
-    nfkd = unicodedata.normalize("NFKD", name)
-    return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
-
-
 def run():
     init_db()
 
@@ -186,37 +179,42 @@ def run():
         # Ni la temporada actual ni la anterior tienen datos -- caso
         # extremo, no visto en la práctica, pero no debe romper el sync.
         notify("sync_data: Understat sin datos ni para la temporada actual ni la anterior, se reintentará en el próximo sync.")
-        understat_by_name = {}
+        player_index = None
     else:
         if used_fallback:
             notify(
                 f"sync_data: Understat sin datos todavía para la temporada actual, "
                 f"usando temporada {season} (la anterior) como aproximación temporal."
             )
-        understat_by_name = index_players_by_name(league_data)
+        player_index = build_player_index(league_data)
 
     now = datetime.now(timezone.utc).isoformat()
 
     roster_players = roster.get("answer", [])
     market_players = market.get("answer", [])
 
-    matched = 0
+    # Cuenta de cuántos cruces salieron de cada nivel de confianza (ver
+    # clients.laliga_stats_client.match_player) — permite ver en la
+    # notificación si el cruce se está apoyando demasiado en las
+    # estrategias menos fiables, señal de que convendría revisarlo.
+    match_counts: dict[str, int] = {}
+
+    def _cross_with_understat(conn, player: dict) -> None:
+        if player_index is None:
+            return
+        understat_player, strategy = match_player(player.get("name", ""), player.get("team", ""), player_index)
+        match_counts[strategy] = match_counts.get(strategy, 0) + 1
+        if understat_player:
+            _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
+
     with get_connection() as conn:
         for player in roster_players:
             _upsert_player_and_snapshot(conn, player, now)  # on_market: usa el propio player["market"]
-
-            understat_player = understat_by_name.get(_normalize_name(player.get("name", "")))
-            if understat_player:
-                _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
-                matched += 1
+            _cross_with_understat(conn, player)
 
         for player in market_players:
             _upsert_player_and_snapshot(conn, player, now, on_market=True)  # siempre True: viene del listado de mercado
-
-            understat_player = understat_by_name.get(_normalize_name(player.get("name", "")))
-            if understat_player:
-                _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
-                matched += 1
+            _cross_with_understat(conn, player)
 
     # Reconciliar el estado de nuestras propias pujas (ver docstring de
     # _reconcile_bids): ninguna otra parte del bot actualiza 'placed' a
@@ -227,9 +225,11 @@ def run():
     sold = _reconcile_sales(roster_player_ids)
 
     total = len(roster_players) + len(market_players)
+    matched = total - match_counts.get("sin_match", 0) - match_counts.get("sin_nombre", 0)
+    breakdown = ", ".join(f"{n} {strategy}" for strategy, n in sorted(match_counts.items()) if strategy not in ("sin_match", "sin_nombre"))
     message = [
         f"sync_data: {len(roster_players)} en plantilla, {len(market_players)} en mercado, "
-        f"{matched}/{total} cruzados con Understat."
+        f"{matched}/{total} cruzados con Understat" + (f" ({breakdown})" if breakdown else "") + "."
     ]
     if reconciled["won"] or reconciled["lost"]:
         message.append(f"Pujas resueltas desde el último sync: {reconciled['won']} ganada(s), {reconciled['lost']} perdida(s).")

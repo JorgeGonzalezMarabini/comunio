@@ -117,3 +117,34 @@ def test_run_full_job_with_fake_client(tmp_db, roster_player_factory):
     assert "1 en plantilla" in captured[-1]
     features = get_player_features()
     assert len(features) == 1
+
+
+def test_run_crosses_with_understat_by_surname_and_reports_breakdown(tmp_db, roster_player_factory):
+    """
+    Caso real y habitual (ver README): Futmondo muestra solo el apellido de
+    un jugador conocido -- el cruce con Understat (nombre completo) debe
+    resolverlo por apellido+equipo, no solo por nombre exacto, y el resumen
+    de la notificación debe reflejar qué estrategia se usó.
+    """
+    roster_player = roster_player_factory(id=1001, name="Cairney", role="delantero", team="Fulham")
+    league_data = {"players": [{"player_name": "Tom Cairney", "team_title": "Fulham"}]}
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", False)):
+        sync_data.run()
+
+    assert "1/1 cruzados con Understat (1 surname+team)" in captured[-1]
+    features = get_player_features()
+    assert features[0]["xg"] is None  # el fixture de player_name no trae xG -- solo se comprueba que cruzó, no las stats
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM external_stats WHERE player_id = ?", ("1001",)).fetchone()
+    assert row["n"] == 1
