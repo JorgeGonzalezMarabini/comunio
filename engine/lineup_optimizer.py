@@ -166,10 +166,36 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
     return changes
 
 
+def _rank_healthy_first(candidates: list[dict]) -> list[dict]:
+    """
+    Ordena `candidates` por `expected_score` descendente, pero SIEMPRE
+    primero los sanos (`is_injury_status(status)` False) y solo después
+    los lesionados/en duda — cada grupo ordenado por score entre sí.
+
+    Por qué hace falta esto además de la penalización de
+    `config.EVALUATOR_WEIGHTS["injury_penalty"]`: esa penalización es
+    suave (resta hasta 0.10 sobre un score que puede llegar a ~0.90), así
+    que un lesionado con muy buenas stats previas puede seguir ganando en
+    score a un sano mediocre y colarse como titular o, peor todavía, como
+    EL suplente designado de su propia posición — inútil el día que de
+    verdad haga falta sustituir a alguien ahí (ver
+    `build_substitution_changes()`, que descarta al suplente asignado si
+    también está lesionado, sin sustituir a nadie en ese caso). Un
+    jugador lesionado/en duda solo se elige aquí si no queda NINGÚN sano
+    disponible en esa posición — mejor eso que dejar la posición sin
+    cobertura (mismo criterio conservador que `engine/squad_risk.py`).
+    """
+    healthy = [p for p in candidates if not is_injury_status(p.get("status"))]
+    injured = [p for p in candidates if is_injury_status(p.get("status"))]
+    by_score = lambda p: p["expected_score"]
+    return sorted(healthy, key=by_score, reverse=True) + sorted(injured, key=by_score, reverse=True)
+
+
 def pick_lineup(squad: list[dict], formation: str = None) -> dict:
     """
     Selecciona el once inicial de `squad` (lista de jugadores con al menos
-    "id", "position" y "expected_score") para `formation`.
+    "id", "position" y "expected_score", y opcionalmente "status") para
+    `formation`.
 
     Devuelve:
         {"formation": ..., "starters": [...ids...], "bench": [...ids...]}
@@ -177,6 +203,12 @@ def pick_lineup(squad: list[dict], formation: str = None) -> dict:
     `expected_score` se calcula fuera (evaluator.evaluate_players() +
     apply_fixture_difficulty() de este mismo módulo), no aquí — pick_lineup
     solo selecciona dado ese número ya calculado.
+
+    Por posición, se prefiere siempre a los jugadores sanos sobre los
+    lesionados/en duda (ver `_rank_healthy_first()`), y solo dentro de
+    cada grupo se ordena por `expected_score`; un lesionado solo entra de
+    titular si no hay suficientes sanos en esa posición para cubrir los
+    huecos de la formación.
     """
     formation = formation or config.DEFAULT_FORMATION
     slots = FORMATIONS.get(formation)
@@ -185,17 +217,13 @@ def pick_lineup(squad: list[dict], formation: str = None) -> dict:
 
     starters = []
     for position, count in slots.items():
-        candidates = sorted(
-            (p for p in squad if p["position"] == position),
-            key=lambda p: p["expected_score"],
-            reverse=True,
-        )
+        candidates = [p for p in squad if p["position"] == position]
         if len(candidates) < count:
             raise ValueError(
                 f"No hay suficientes jugadores en posición {position} "
                 f"para la formación {formation} (necesarios {count}, hay {len(candidates)})"
             )
-        starters.extend(candidates[:count])
+        starters.extend(_rank_healthy_first(candidates)[:count])
 
     starter_ids = {p["id"] for p in starters}
     bench = [p for p in squad if p["id"] not in starter_ids]
@@ -236,9 +264,18 @@ BENCH_SLOT_BY_POSITION = {"MED": 0, "DEL": 1, "POR": 2, "DEF": 3}
 def pick_substitutes(bench_players: list[dict]) -> dict:
     """
     Elige, de entre `bench_players` (los NO titulares de pick_lineup() —
-    con "id"/"position"/"expected_score"), el mejor suplente por categoría
-    de posición: Futmondo solo tiene UN slot de banquillo por posición
-    (ver BENCH_SLOT_BY_POSITION), no una lista donde meter a varios.
+    con "id"/"position"/"expected_score" y opcionalmente "status"), el
+    mejor suplente por categoría de posición: Futmondo solo tiene UN slot
+    de banquillo por posición (ver BENCH_SLOT_BY_POSITION), no una lista
+    donde meter a varios.
+
+    Igual que en pick_lineup(), se prefiere siempre a un sano sobre un
+    lesionado/en duda (ver `_rank_healthy_first()`) antes de mirar
+    `expected_score` — un suplente designado que está él mismo lesionado
+    no sirve de nada el día que haga falta usarlo (ver
+    `build_substitution_changes()`, que lo descarta en ese caso sin
+    sustituir a nadie). Solo se elige un lesionado si es el único
+    candidato que queda en esa posición.
 
     Devuelve {"POR": id_o_None, "DEF": ..., "MED": ..., "DEL": ...} — None
     si no queda ningún jugador de esa posición en el banquillo (normal:
@@ -247,12 +284,9 @@ def pick_substitutes(bench_players: list[dict]) -> dict:
     """
     substitutes = {}
     for position in BENCH_SLOT_BY_POSITION:
-        candidates = sorted(
-            (p for p in bench_players if p["position"] == position),
-            key=lambda p: p["expected_score"],
-            reverse=True,
-        )
-        substitutes[position] = candidates[0]["id"] if candidates else None
+        candidates = [p for p in bench_players if p["position"] == position]
+        ranked = _rank_healthy_first(candidates)
+        substitutes[position] = ranked[0]["id"] if ranked else None
     return substitutes
 
 

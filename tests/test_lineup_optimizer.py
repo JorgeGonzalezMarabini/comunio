@@ -35,6 +35,36 @@ def test_pick_lineup_selects_best_scored_per_position():
     assert "def_suplente" not in lineup["bench"]
 
 
+def test_pick_lineup_prefers_healthy_over_higher_scored_injured():
+    """
+    Un lesionado/en duda no debe entrar de titular si hay un sano
+    disponible en su posición, aunque el lesionado tenga mejor
+    expected_score -- la penalización de evaluator (injury_penalty) es
+    suave y no basta por sí sola para garantizar esto (ver
+    _rank_healthy_first()).
+    """
+    squad = _squad_442() + [
+        {"id": "del_lesionado", "position": "DEL", "expected_score": 0.99, "status": "injured"},
+    ]
+    lineup = pick_lineup(squad, formation="4-4-2")
+    assert "del_lesionado" not in lineup["starters"]
+    assert "del_lesionado" in lineup["bench"]
+
+
+def test_pick_lineup_falls_back_to_injured_when_no_healthy_left():
+    """Sin nadie sano en la posición, mejor un lesionado de titular que dejar el hueco sin cubrir."""
+    squad = [{"id": "por1", "position": "POR", "expected_score": 0.9}]
+    squad += [{"id": f"def{i}", "position": "DEF", "expected_score": 0.5 + i * 0.01} for i in range(4)]
+    squad += [{"id": f"med{i}", "position": "MED", "expected_score": 0.5 + i * 0.01} for i in range(4)]
+    # Ambos delanteros disponibles están lesionados/en duda -- no hay alternativa sana.
+    squad += [
+        {"id": "del0", "position": "DEL", "expected_score": 0.6, "status": "injured"},
+        {"id": "del1", "position": "DEL", "expected_score": 0.5, "status": "doubtful lesión"},
+    ]
+    lineup = pick_lineup(squad, formation="4-4-2")
+    assert set(pid for pid in lineup["starters"] if pid.startswith("del")) == {"del0", "del1"}
+
+
 def test_pick_lineup_raises_when_not_enough_players():
     squad = _squad_442()[:-1]  # falta un delantero
     with pytest.raises(ValueError):
@@ -196,6 +226,23 @@ def test_pick_substitutes_takes_best_scored_per_position():
     ]
     substitutes = pick_substitutes(bench)
     assert substitutes == {"POR": None, "DEF": "def_bueno", "MED": "med_unico", "DEL": None}
+
+
+def test_pick_substitutes_prefers_healthy_over_higher_scored_injured():
+    """Igual que en pick_lineup(): el suplente designado no debe ser un lesionado si hay un sano disponible."""
+    bench = [
+        {"id": "def_lesionado", "position": "DEF", "expected_score": 0.9, "status": "injured"},
+        {"id": "def_sano", "position": "DEF", "expected_score": 0.3},
+    ]
+    substitutes = pick_substitutes(bench)
+    assert substitutes["DEF"] == "def_sano"
+
+
+def test_pick_substitutes_falls_back_to_injured_when_no_healthy_left():
+    """Sin ningún sano en el banquillo para esa posición, mejor un suplente lesionado que ninguno."""
+    bench = [{"id": "def_lesionado", "position": "DEF", "expected_score": 0.9, "status": "injured"}]
+    substitutes = pick_substitutes(bench)
+    assert substitutes["DEF"] == "def_lesionado"
 
 
 def test_build_bench_changes_uses_fixed_slots_and_skips_missing_positions():

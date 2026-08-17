@@ -168,6 +168,35 @@ cambios ya aplicados que los titulares (ver arriba) — aunque ese criterio
 en concreto (sustituir un suplente ya puesto) no se ha probado en vivo
 específicamente para banquillo, solo para titulares.
 
+**Un lesionado/en duda no puede ser titular ni el suplente designado si
+hay un sano disponible en su posición** (`engine.lineup_optimizer.
+_rank_healthy_first()`, usado por `pick_lineup()` y `pick_substitutes()`,
+2026-08-17, a petición del usuario). Antes de esto, `is_injured_or_doubtful`
+solo restaba una penalización suave en el score
+(`config.EVALUATOR_WEIGHTS["injury_penalty"] = 0.10`), así que un
+lesionado con muy buenas stats previas podía seguir ganando en score a un
+sano mediocre — y colarse no solo de titular, sino como EL suplente
+designado de su propia posición, con lo que `build_substitution_changes()`
+lo descartaba al llegar el momento de usarlo y no sustituía a nadie. Ahora
+se prefiere siempre a un sano, y solo se recurre a un lesionado/en duda si
+no queda ningún sano disponible en esa posición (mejor cubrir el hueco que
+dejarlo vacío, mismo criterio que `engine/squad_risk.py`).
+
+**TODO sin resolver — "no juega" es más amplio que "lesionado" (pendiente
+de fuente de datos)**: `build_substitution_changes()` solo detecta como
+"confirmado fuera" a quien tenga un `status` de lesión/duda
+(`is_injury_status()`). Pero el entrenador automático real de Futmondo
+sustituye a cualquier titular con **0 minutos jugados**, sea cual sea el
+motivo — y en fútbol real la causa más frecuente no es la lesión, sino que
+el entrenador del equipo real simplemente no lo pone esa jornada (rotación,
+decisión táctica, sanción no reflejada como "lesión" en `status`...). Hoy
+no hay ninguna fuente en el proyecto que dé el once titular REAL de cada
+equipo antes de cada partido (Understat da fixtures/dificultad, no
+alineaciones; el `status` de Futmondo, sin confirmar todavía con un caso
+real, en el mejor de los casos solo cubriría lesión/duda). Sin esa fuente,
+un titular "sano" pero no convocado hoy por su equipo real seguirá
+apareciendo en la alineación sin que nada lo detecte ni lo sustituya.
+
 **IMPORTANTE — el suplente colocado no hace nada por sí solo**: según la
 [FAQ oficial](https://help.futmondo.com/article/159-entrenador-automatico),
 la sustitución real de un titular que no juega (0 minutos) por su suplente
