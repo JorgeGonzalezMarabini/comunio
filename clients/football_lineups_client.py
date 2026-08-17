@@ -32,18 +32,36 @@ league id de LaLiga (config.API_FOOTBALL_LALIGA_LEAGUE_ID) SÍ es 140 --
 `GET /teams?league=140&season=2023` devolvió los 20 equipos reales de esa
 temporada (incluido Barcelona, id 529) sin error.
 
-TODO real antes de poder usar esto en producción -- decisión pendiente del
-usuario, ver conversación 2026-08-17 tras este hallazgo:
+SofaScore (la alternativa que se valoró a continuación, ver conversación
+2026-08-17) también descartada, y peor todavía: `api.sofascore.com` Y
+`www.sofascore.com` devuelven **403 Forbidden en TODO** (ni siquiera la
+portada de la web carga), protección de borde vía Fastly -- probado con
+User-Agent de navegador real, `Referer`/`Origin`, y una sesión que visita
+antes la portada para conseguir cookies; ninguna variante lo esquiva.
+Descartado que fuera un problema de red local: `understat.com`,
+`api-football.com` y `google.com` sí responden 200 desde la misma
+máquina. Mismo patrón que FBref/Cloudflare (ver README) -- un bloqueo de
+bots a nivel de borde, no arreglable con cabeceras, y que muy
+probablemente bloquearía igual (o peor, IPs más vigiladas) desde un
+runner de GitHub Actions. No se implementa un cliente contra una fuente
+confirmada inalcanzable.
+
+TODO real antes de poder tener alineaciones reales en producción --
+decisión pendiente del usuario, ver conversación 2026-08-17 tras estos
+dos hallazgos:
   1. Pasar a un plan de pago de API-Football (Pro, ~$19/mes según su
      página de precios en el momento de este hallazgo, con acceso a la
      temporada en curso y 7500 peticiones/día) -- el resto del diseño de
      este módulo (caché, cascada de nombres) sigue siendo válido tal cual,
      solo falta la key de pago.
-  2. Cambiar de fuente (ej. SofaScore, descartado inicialmente por no tener
-     una API documentada -- ver conversación 2026-08-17 sobre las opciones
-     valoradas).
-  3. Volver al mecanismo manual (descartado inicialmente por el mismo
-     motivo).
+  2. Buscar otra alternativa de pago (ej. Sportmonks, ~€29/mes) --
+     football-data.org se descartó también: su plan gratuito no incluye
+     alineaciones ("lineups, substitutions and cards" fuera del free
+     tier, confirmado por su propia documentación de precios).
+  3. Volver al mecanismo manual (is_injury_status() solamente, sin esta
+     segunda señal) -- la opción de coste 0 y cero riesgo de bloqueo,
+     coherente con que las sustituciones ya se deciden a mano en esta
+     liga privada.
 
 Con el plan gratuito activado tal cual (`ENABLE_REAL_LINEUP_CHECK=true`
 pero sin plan de pago), `find_players_confirmed_out_of_real_lineup()` no

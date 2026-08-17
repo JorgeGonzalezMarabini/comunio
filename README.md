@@ -28,7 +28,7 @@ seguir siendo válido, no por descuido.
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
 - [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); detrás de `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` (**false por defecto**, sin confirmar todavía con una sustitución real)
-- [ ] Cliente de alineaciones reales (`clients/football_lineups_client.py`, API-Football) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); **BLOQUEADO, confirmado el 2026-08-17**: el plan GRATUITO de API-Football no da acceso a la temporada en curso, solo a 2022-2024 — sin plan de pago (~$19/mes) esto no puede funcionar en producción (ver sección "Banquillo/suplentes")
+- [ ] Cliente de alineaciones reales (`clients/football_lineups_client.py`, API-Football) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); **BLOQUEADO, confirmado el 2026-08-17 con dos fuentes gratuitas probadas en vivo**: el plan GRATUITO de API-Football no da acceso a la temporada en curso (solo 2022-2024), y SofaScore devuelve 403 en toda la web/API (bloqueo de bot a nivel de borde, igual que FBref) — sin un plan de pago esto no puede funcionar en producción (ver sección "Banquillo/suplentes")
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
 
@@ -230,14 +230,34 @@ arreglo (bug real encontrado en esta misma sesión de prueba),
 sustituir a nadie SIEMPRE, sin avisar nunca de que la causa era un
 problema de plan y no que nadie estuviera confirmado fuera.
 
-**Pendiente de decisión del usuario** antes de poder usar esto de verdad:
-pasar a un plan de pago de API-Football (Pro, ~$19/mes en el momento de
-este hallazgo, con acceso a la temporada en curso y 7500 peticiones/día —
-el resto del diseño, caché incluida, sigue siendo válido tal cual), volver
-a valorar SofaScore, o quedarse con el mecanismo manual. Mientras tanto,
-`ENABLE_REAL_LINEUP_CHECK=true` con el plan gratuito activado no rompe
-nada (el fallo se audita/notifica igual que cualquier otro, ver abajo),
-pero tampoco aporta nada.
+**SofaScore, valorada a continuación, también descartada — y peor
+todavía** (probado el mismo día): `api.sofascore.com` Y
+`www.sofascore.com` devuelven **403 Forbidden en TODO**, ni siquiera la
+portada de la web carga — protección de borde vía Fastly, probada con
+User-Agent de navegador real, `Referer`/`Origin` y una sesión que visita
+antes la portada para conseguir cookies; ninguna variante lo esquiva.
+Descartado que fuera un problema de red local (`understat.com`,
+`api-football.com` y `google.com` sí responden 200 desde la misma
+máquina). Mismo patrón que FBref/Cloudflare, ya documentado más abajo en
+este README — un bloqueo de bots a nivel de borde, no arreglable con
+cabeceras, y que probablemente bloquearía igual (o peor) desde un runner
+de GitHub Actions. No se implementó ningún cliente contra esta fuente:
+sería código muerto contra un servicio confirmado inalcanzable.
+
+También descartado **football-data.org**: su plan gratuito no incluye
+alineaciones (`lineups`/`substitutions`/`cards` quedan fuera del free
+tier según su propia documentación de precios) — solo fixtures/resultados.
+
+**Pendiente de decisión del usuario** antes de poder tener alineaciones
+reales en producción: pasar a un plan de pago de API-Football (Pro,
+~$19/mes en el momento de este hallazgo, con acceso a la temporada en
+curso y 7500 peticiones/día — el resto del diseño, caché incluida, sigue
+siendo válido tal cual), buscar otra alternativa de pago (ej. Sportmonks,
+~€29/mes), o quedarse con el mecanismo manual (`is_injury_status()`
+solamente, coste 0, cero riesgo de bloqueo). Mientras tanto,
+`ENABLE_REAL_LINEUP_CHECK=true` con el plan gratuito de API-Football
+activado no rompe nada (el fallo se audita/notifica igual que cualquier
+otro, ver abajo), pero tampoco aporta nada.
 
 Un fallo de esta fuente extra (el bloqueo de plan de arriba, red, key
 inválida...) no tumba la comprobación por lesión — `manage_substitutes.py`
