@@ -78,3 +78,56 @@ def depth_warnings(assessment: dict) -> list[str]:
                 f"dejaría un hueco en la alineación (-4 puntos por posición vacía)."
             )
     return warnings
+
+
+def weakest_starter_scores(squad_ranked: list[dict], formation: str = None) -> dict:
+    """
+    Score (con `config.LINEUP_EVALUATOR_WEIGHTS`, sin ajuste de rival) del
+    titular más flojo que hoy jugaría en cada posición dada la plantilla
+    actual — el listón que un candidato de MERCADO debe superar para ser
+    una mejora REAL del once, no solo tapar un hueco de banquillo (a
+    diferencia de `assess_squad_depth()`, que solo mira CANTIDAD de sanos,
+    nunca su calidad).
+
+    `squad_ranked`: la plantilla ya evaluada con
+    `engine.evaluator.evaluate_players(squad_raw, weights=config.
+    LINEUP_EVALUATOR_WEIGHTS)` — MISMOS pesos con los que de verdad se
+    decide la alineación (el precio no debe importar, un jugador de la
+    plantilla ya está comprado). Cada jugador necesita al menos
+    "position", "score" y "status".
+
+    Deliberadamente SIN `apply_fixture_difficulty()` (a diferencia de
+    `engine.lineup_optimizer.pick_lineup`): esto no elige el once de una
+    jornada concreta, compara el valor estructural del jugador para la
+    plantilla a medio plazo — mezclar la dificultad del próximo rival
+    haría que el listón subiera o bajara solo porque le toca un rival
+    distinto, sin que la plantilla haya cambiado en nada.
+
+    Mismo criterio sanos-antes-que-lesionados que
+    `engine.lineup_optimizer._rank_healthy_first()` (un lesionado con buen
+    score no debería fijar el listón si hay alternativas sanas disponibles).
+
+    Devuelve {position: score} con el score del titular menos valioso de
+    cada posición, o None si esa posición no tiene todavía ni un solo
+    jugador en plantilla (cualquier candidato de mercado sería
+    automáticamente una mejora).
+    """
+    formation = formation or config.DEFAULT_FORMATION
+    slots = FORMATIONS.get(formation)
+    if slots is None:
+        raise ValueError(f"Formación no soportada: {formation}")
+
+    thresholds = {}
+    for position, required in slots.items():
+        candidates = [p for p in squad_ranked if p.get("position") == position]
+        if not candidates:
+            thresholds[position] = None
+            continue
+        healthy = [p for p in candidates if not is_injury_status(p.get("status"))]
+        injured = [p for p in candidates if is_injury_status(p.get("status"))]
+        ordered = sorted(healthy, key=lambda p: p["score"], reverse=True) + sorted(
+            injured, key=lambda p: p["score"], reverse=True
+        )
+        starters = ordered[:required]
+        thresholds[position] = starters[-1]["score"] if starters else None
+    return thresholds

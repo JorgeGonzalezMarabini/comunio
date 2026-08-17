@@ -7,12 +7,19 @@ from db.models import get_connection
 NOW = "2026-08-16T18:00:00+00:00"
 
 
-def _seed_player(pid, position, price, points=10, on_market=1, status=""):
+def _seed_player(pid, position, price, points=10, on_market=1, status="", last_points=None, average_points=None):
+    """
+    `last_points`/`average_points`: por defecto ambos = `points` (sin
+    "trend", ver engine/evaluator.py) -- pásalos explícitamente para
+    simular forma reciente distinta de la media de temporada.
+    """
+    last_points = points if last_points is None else last_points
+    average_points = float(points) if average_points is None else average_points
     with get_connection() as conn:
         conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", (pid, f"J{pid}", "E", position, NOW))
         conn.execute(
             "INSERT INTO futmondo_snapshots (player_id, price, points, last_points, average_points, on_market, status, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
-            (pid, price, points, points, float(points), on_market, status, NOW),
+            (pid, price, points, last_points, average_points, on_market, status, NOW),
         )
 
 
@@ -176,3 +183,62 @@ def test_run_market_prioritizes_at_risk_position_over_higher_score(tmp_db):
     with get_connection() as conn:
         rows = {r["player_id"]: r["reason"] for r in conn.execute("SELECT player_id, reason FROM bids")}
     assert "prioridad" in rows.get("del1", "")
+
+
+def test_run_market_prioritizes_candidate_that_would_upgrade_lineup(tmp_db):
+    """
+    Un candidato que en forma reciente (trend, LINEUP_EVALUATOR_WEIGHTS)
+    supera al peor titular actual de su posición debe marcarse
+    "mejora el once titular", aunque esa posición no tenga ningún riesgo
+    de plantilla (banquillo de sobra) -- señal de CALIDAD, no de CANTIDAD.
+    """
+    # Plantilla: 5 MED con margen de sobra (4 titulares + 1 de banquillo,
+    # bench=1 -> NO en riesgo) y sin "trend" (last_points == average_points,
+    # todos empatan bajo LINEUP_EVALUATOR_WEIGHTS, que no pesa el precio) +
+    # resto de posiciones con margen también, para que ninguna quede en
+    # riesgo y así aislar la señal de "mejora del once".
+    for i in range(5):
+        _seed_player(f"med{i}", "MED", price=500_000, points=5, on_market=0)
+    for i in range(2):
+        _seed_player(f"por{i}", "POR", price=500_000, points=5, on_market=0)
+    for i in range(5):
+        _seed_player(f"def{i}", "DEF", price=500_000, points=5, on_market=0)
+    for i in range(3):
+        _seed_player(f"del{i}", "DEL", price=500_000, points=5, on_market=0)
+    squad_ids = [f"med{i}" for i in range(5)] + [f"por{i}" for i in range(2)] + [f"def{i}" for i in range(5)] + [f"del{i}" for i in range(3)]
+
+    # Mercado: un MED en gran forma reciente (last_points muy por encima de
+    # su media -> trend alto bajo LINEUP_EVALUATOR_WEIGHTS, supera al
+    # listón de los MED de plantilla, todos con trend=0) y un DEF con mejor
+    # relación puntos/precio (EVALUATOR_WEIGHTS, el que de verdad decide
+    # cuánto pujar) para comprobar que la prioridad viene del boost, no de
+    # que ya tuviera mejor score de puja.
+    _seed_player("med_upgrade", "MED", price=1_000_000, points=6, last_points=12, average_points=6.0)
+    _seed_player("def_normal", "DEF", price=1_000_000, points=12)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid, "status": ""} for pid in squad_ids]}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [
+                {"id": "med_upgrade", "slug": "jugador-med_upgrade", "value": 1_000_000},
+                {"id": "def_normal", "slug": "jugador-def_normal", "value": 1_000_000},
+            ]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    with get_connection() as conn:
+        rows = {r["player_id"]: r["reason"] for r in conn.execute("SELECT player_id, reason FROM bids")}
+    assert "mejora el once titular" in rows.get("med_upgrade", "")
+    assert "mejora el once titular" not in rows.get("def_normal", "")
+    # Ninguna posición estaba en riesgo de cantidad -- el boost es solo por calidad.
+    assert "prioridad riesgo de plantilla" not in rows.get("med_upgrade", "")

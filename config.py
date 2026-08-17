@@ -120,6 +120,16 @@ BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.
 # engine.bidding_strategy.apply_position_priority.
 BIDDING_POSITION_RISK_BOOST = float(os.getenv("BIDDING_POSITION_RISK_BOOST", "0.15"))
 
+# Cuánto sube el score de un candidato de mercado si superaría en score de
+# alineación (config.LINEUP_EVALUATOR_WEIGHTS, sin precio — coste hundido)
+# al titular más flojo de su posición HOY (ver
+# engine.squad_risk.weakest_starter_scores). Señal distinta de
+# BIDDING_POSITION_RISK_BOOST: esta es sobre CALIDAD del once real, no
+# sobre CANTIDAD de suplentes sanos — un candidato puede activar una,
+# ambas o ninguna. Aditivo, se suma al boost de riesgo si los dos aplican
+# a la vez. Ver engine.bidding_strategy.apply_position_priority.
+BIDDING_UPGRADE_BOOST = float(os.getenv("BIDDING_UPGRADE_BOOST", "0.15"))
+
 # --- Venta de jugadores (engine/selling_strategy.py) ---
 # % mínimo de plusvalía (precio actual vs. precio de referencia,
 # "buyPrice" de roster) para considerar vender un jugador. Vender es la

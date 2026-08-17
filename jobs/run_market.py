@@ -7,13 +7,27 @@ Asume que jobs/sync_data.py ya corrió antes en el cron (así `players`/
 `futmondo_snapshots`/`external_stats` están al día) — este job solo lee de
 la BD y decide, no vuelve a sincronizar stats.
 
-Antes de evaluar el mercado, calcula el riesgo de plantilla (ver
-engine/squad_risk.py: posiciones sin ningún suplente sano, donde un
-"clausulazo"/lesión/sanción más dejaría un hueco en la alineación) y
-prioriza esas posiciones al pujar (engine.bidding_strategy.
-apply_position_priority) — sin dejar de respetar el umbral mínimo de score
-ni los límites de seguridad, solo da ventaja frente a un candidato de
-score similar en una posición ya cubierta.
+Antes de evaluar el mercado, calcula dos señales de prioridad sobre la
+plantilla propia (ambas se suman si coinciden en el mismo candidato, ver
+engine.bidding_strategy.apply_position_priority — ninguna fuerza la puja
+de un candidato realmente malo, solo dan ventaja frente a otro de score
+similar):
+
+  1. Riesgo de plantilla (engine/squad_risk.py:assess_squad_depth):
+     posiciones sin ningún suplente sano, donde un "clausulazo"/lesión/
+     sanción más dejaría un hueco en la alineación. Señal de CANTIDAD.
+
+  2. Mejora del once (engine/squad_risk.py:weakest_starter_scores): el
+     candidato, evaluado con los MISMOS pesos con los que se elige la
+     alineación real (config.LINEUP_EVALUATOR_WEIGHTS — el precio no debe
+     importar), supera en calidad al titular más flojo de su posición
+     hoy. Señal de CALIDAD: aunque la posición ya tenga suplente de sobra,
+     fichar a alguien mejor que el peor titular actual sigue siendo una
+     mejora real del equipo que sale a jugar. Para comparar en igualdad de
+     condiciones, este score de alineación se calcula sobre plantilla +
+     mercado juntos en la misma llamada a evaluate_players() (normalizar
+     cada uno por separado los dejaría en escalas distintas, no
+     comparables entre sí — ver engine/evaluator.py:normalize_pool).
 
 El presupuesto disponible se calcula restando una aproximación a TODAS las
 pujas pendientes sin resolver (db.models.get_pending_bid_amount() — nuestra
@@ -36,7 +50,7 @@ from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection, get_bids_risked_today, get_pending_bid_amount, get_player_features
 from engine.bidding_strategy import apply_position_priority, decide_bids_for_market
 from engine.evaluator import evaluate_players
-from engine.squad_risk import assess_squad_depth, depth_warnings
+from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
 from notifier import notify
 
 
@@ -67,15 +81,31 @@ def run():
     squad_raw = [p for p in all_players if p["id"] in roster_ids]
 
     at_risk_positions = set()
+    upgrade_thresholds = {}
+    lineup_score_by_id = {}
     if squad_raw:
         depth = assess_squad_depth(squad_raw, formation=config.DEFAULT_FORMATION)
         at_risk_positions = {pos for pos, info in depth.items() if info["at_risk"]}
         risk_warnings = depth_warnings(depth)
+
+        # Score de alineación (LINEUP_EVALUATOR_WEIGHTS, sin precio) de
+        # plantilla + mercado EN LA MISMA llamada, para que sean
+        # comparables entre sí (ver docstring del módulo) -- de aquí sale
+        # tanto el listón (squad) como el "lineup_score" de cada candidato
+        # de mercado que se compara contra ese listón.
+        lineup_scored = evaluate_players(squad_raw + raw_candidates, weights=config.LINEUP_EVALUATOR_WEIGHTS)
+        lineup_score_by_id = {p["id"]: p["score"] for p in lineup_scored}
+        squad_ids = {p["id"] for p in squad_raw}
+        squad_lineup_ranked = [p for p in lineup_scored if p["id"] in squad_ids]
+        upgrade_thresholds = weakest_starter_scores(squad_lineup_ranked, formation=config.DEFAULT_FORMATION)
     else:
         risk_warnings = []
 
     ranked = evaluate_players(raw_candidates)
-    prioritized = apply_position_priority(ranked, at_risk_positions)
+    for p in ranked:
+        if p["id"] in lineup_score_by_id:
+            p["lineup_score"] = lineup_score_by_id[p["id"]]
+    prioritized = apply_position_priority(ranked, at_risk_positions, upgrade_thresholds=upgrade_thresholds)
 
     information = client.get_information()
     remaining_budget = information.get("answer", {}).get("budget", 0)
@@ -120,7 +150,12 @@ def run():
 
     summary = [f"run_market: {len(placed)} puja(s) realizada(s)."]
     for d in placed:
-        priority_tag = " [prioridad: posición en riesgo]" if d.get("position_at_risk") else ""
+        tags = []
+        if d.get("position_at_risk"):
+            tags.append("prioridad: posición en riesgo")
+        if d.get("would_upgrade_lineup"):
+            tags.append("mejora el once titular")
+        priority_tag = f" [{', '.join(tags)}]" if tags else ""
         summary.append(f"  - jugador {d['player_id']}: {d['amount']} (score={d['score']:.3f}){priority_tag}")
     if failed:
         summary.append(f"{len(failed)} puja(s) fallida(s):")

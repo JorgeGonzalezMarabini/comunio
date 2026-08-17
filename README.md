@@ -483,6 +483,25 @@ misma vigilancia de todos modos, por precaución conservadora: quedarte
 sin poder alinear a nadie en una posición nunca es deseable, confirmada o
 no la penalización exacta.
 
+## Fichajes que mejoran el once, no solo tapan huecos (`engine/squad_risk.weakest_starter_scores`)
+
+`assess_squad_depth()` (arriba) solo mira CANTIDAD: si una posición tiene
+algún suplente sano, no dice nada más, aunque ese suplente sea muy
+inferior al peor titular actual. `weakest_starter_scores()` añade la señal
+de CALIDAD que faltaba: calcula, con los mismos pesos con los que se
+decide la alineación real (`config.LINEUP_EVALUATOR_WEIGHTS` — el precio
+no debe importar, ya está comprado), el score del titular más flojo de
+cada posición hoy. `jobs/run_market.py` compara cada candidato de mercado
+contra ese listón (evaluando plantilla + mercado EN LA MISMA llamada a
+`evaluate_players()`, para que sean comparables entre sí — normalizar cada
+pool por separado los dejaría en escalas distintas) y, si lo supera, suma
+`config.BIDDING_UPGRADE_BOOST` a su score de puja
+(`engine.bidding_strategy.apply_position_priority`) — misma mecánica
+aditiva que el boost por riesgo de plantilla, señal distinta, se pueden
+sumar las dos en el mismo candidato. Igual que el resto de boosts de
+puja: nunca fuerza una puja mala, solo da ventaja frente a otro candidato
+de score similar que no mejoraría el once.
+
 ## Pujas vs. alineación: pesos distintos a propósito
 
 Igual que en la fase de Comunio: `engine/evaluator.py` acepta un

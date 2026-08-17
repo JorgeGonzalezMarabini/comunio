@@ -90,6 +90,65 @@ def test_decide_bid_reason_mentions_priority_when_boosted():
     assert "prioridad" in decision["reason"]
 
 
+def test_apply_position_priority_boosts_candidate_that_would_upgrade_lineup():
+    """
+    Un candidato que superaría en score de alineación al peor titular
+    actual de su posición debe marcarse would_upgrade_lineup y subir de
+    score, aunque esa posición no tenga ningún riesgo de plantilla (no está
+    en at_risk_positions) -- señal de CALIDAD, distinta de la de CANTIDAD.
+    """
+    candidates = [
+        {"id": "delantero_mejora", "position": "DEL", "score": 0.30, "lineup_score": 0.80},
+        {"id": "medio_normal", "position": "MED", "score": 0.35, "lineup_score": 0.10},
+    ]
+    prioritized = apply_position_priority(
+        candidates,
+        at_risk_positions=set(),  # ninguna posición en riesgo de cantidad
+        upgrade_thresholds={"DEL": 0.5, "MED": 0.5},
+        upgrade_boost=0.15,
+    )
+    assert prioritized[0]["id"] == "delantero_mejora"
+    assert prioritized[0]["would_upgrade_lineup"] is True
+    assert prioritized[0]["position_at_risk"] is False
+    assert prioritized[0]["score"] == 0.30 + 0.15
+    assert prioritized[1]["would_upgrade_lineup"] is False
+
+
+def test_apply_position_priority_treats_none_threshold_as_automatic_upgrade():
+    """threshold None (posición sin ningún jugador todavía en plantilla) -> cualquier candidato es mejora."""
+    candidates = [{"id": "1", "position": "POR", "score": 0.1, "lineup_score": 0.0}]
+    prioritized = apply_position_priority(candidates, at_risk_positions=set(), upgrade_thresholds={"POR": None})
+    assert prioritized[0]["would_upgrade_lineup"] is True
+
+
+def test_apply_position_priority_sums_both_boosts_when_candidate_hits_both():
+    candidates = [{"id": "1", "position": "DEF", "score": 0.2, "lineup_score": 0.9}]
+    prioritized = apply_position_priority(
+        candidates,
+        at_risk_positions={"DEF"},
+        upgrade_thresholds={"DEF": 0.5},
+        boost=0.15,
+        upgrade_boost=0.15,
+    )
+    assert prioritized[0]["position_at_risk"] is True
+    assert prioritized[0]["would_upgrade_lineup"] is True
+    assert prioritized[0]["score"] == 0.2 + 0.15 + 0.15
+
+
+def test_decide_bid_reason_mentions_lineup_upgrade_when_boosted():
+    player = {
+        "id": "1",
+        "score": 0.5,
+        "base_score": 0.35,
+        "would_upgrade_lineup": True,
+        "position_at_risk": False,
+        "price": 1_000_000,
+    }
+    decision = decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0)
+    assert decision["would_upgrade_lineup"] is True
+    assert "mejora el once titular" in decision["reason"]
+
+
 def test_decide_bids_for_market_accumulates_risk_across_pass():
     """
     Reproduce el comportamiento visto en producción: una primera puja

@@ -49,34 +49,75 @@ def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int
     return min(limits["max_spend_per_player"], matchday_remaining, usable_budget)
 
 
-def apply_position_priority(candidates: list[dict], at_risk_positions: set, boost: float = None) -> list[dict]:
+def apply_position_priority(
+    candidates: list[dict],
+    at_risk_positions: set,
+    boost: float = None,
+    upgrade_thresholds: dict = None,
+    upgrade_boost: float = None,
+) -> list[dict]:
     """
-    Da prioridad a los candidatos de mercado en posiciones con riesgo de
-    plantilla (ver engine.squad_risk.assess_squad_depth: posiciones sin
-    ningún suplente sano, donde perder un titular más dejaría un hueco en
-    la alineación y -4 puntos, ver README). Sube el score de esos
-    candidatos un `boost` fijo (config.BIDDING_POSITION_RISK_BOOST) antes
-    de decidir pujas, para que reforzar una posición en riesgo compita
-    mejor frente a otro candidato de score similar en una posición ya
-    cubierta — sin llegar a forzar la puja si el candidato es realmente
-    malo (el boost es aditivo, no multiplica ni ignora el umbral mínimo).
+    Da prioridad a los candidatos de mercado por dos señales distintas,
+    que pueden coincidir en el mismo candidato y sumarse:
+
+    1. Riesgo de plantilla (ver engine.squad_risk.assess_squad_depth):
+       posiciones sin ningún suplente sano, donde perder un titular más
+       dejaría un hueco en la alineación y -4 puntos (ver README). Sube el
+       score `boost` (config.BIDDING_POSITION_RISK_BOOST). Señal de
+       CANTIDAD: da igual lo bueno o malo que sea el titular actual, lo
+       que falta es un cuerpo de más en el banquillo.
+
+    2. Mejora del once (ver engine.squad_risk.weakest_starter_scores):
+       `upgrade_thresholds` es {position: score|None} con el score (con
+       config.LINEUP_EVALUATOR_WEIGHTS) del titular más flojo de cada
+       posición HOY. Cada candidato necesita también un campo
+       "lineup_score" — ese mismo candidato evaluado con esos MISMOS
+       pesos (no el "score" de puja que ya trae, que valora precio y no es
+       comparable: mezclar unidades distintas daría una comparación sin
+       sentido). Si `lineup_score` supera el listón (o el listón es None —
+       plantilla sin nadie todavía en esa posición), sube el score
+       `upgrade_boost` (config.BIDDING_UPGRADE_BOOST). Señal de CALIDAD:
+       el titular actual ya existe, pero fichar a este candidato y
+       sentarlo en el banquillo mejoraría el once real, no solo el margen
+       de suplentes.
+
+    Ninguna de las dos fuerza la puja de un candidato realmente malo (los
+    boosts son aditivos, no multiplican ni ignoran el umbral mínimo de
+    score) — solo dan ventaja frente a otro candidato de score similar en
+    una posición sin ese problema.
 
     Guarda el score original en "base_score" (para la auditoría) y marca
-    "position_at_risk": bool en cada candidato. Devuelve la lista
-    reordenada por score ajustado (mayor primero) — decide_bids_for_market
-    espera la lista ya en este orden.
+    "position_at_risk"/"would_upgrade_lineup": bool en cada candidato.
+    Devuelve la lista reordenada por score ajustado (mayor primero) —
+    decide_bids_for_market espera la lista ya en este orden.
     """
     boost = config.BIDDING_POSITION_RISK_BOOST if boost is None else boost
+    upgrade_boost = config.BIDDING_UPGRADE_BOOST if upgrade_boost is None else upgrade_boost
+    upgrade_thresholds = upgrade_thresholds or {}
+
     adjusted = []
     for c in candidates:
         base_score = c.get("score", 0.0)
         is_at_risk = c.get("position") in at_risk_positions
+
+        would_upgrade = False
+        if c.get("position") in upgrade_thresholds:
+            threshold = upgrade_thresholds[c["position"]]
+            would_upgrade = threshold is None or c.get("lineup_score", base_score) > threshold
+
+        score = base_score
+        if is_at_risk:
+            score += boost
+        if would_upgrade:
+            score += upgrade_boost
+
         adjusted.append(
             {
                 **c,
                 "base_score": base_score,
-                "score": base_score + boost if is_at_risk else base_score,
+                "score": score,
                 "position_at_risk": is_at_risk,
+                "would_upgrade_lineup": would_upgrade,
             }
         )
     return sorted(adjusted, key=lambda p: p["score"], reverse=True)
@@ -102,10 +143,10 @@ def decide_bid(
     puja por encima de su VM; uno con score 1.0 se puja hasta el máximo de
     prima configurado.
 
-    Si `player` viene de apply_position_priority() (tiene "position_at_risk"
-    y "base_score"), la razón auditada deja constancia de si el score ya
-    incluye el boost por posición en riesgo — para poder revisar después
-    por qué se pujó por ese jugador en concreto.
+    Si `player` viene de apply_position_priority() (tiene "position_at_risk"/
+    "would_upgrade_lineup" y "base_score"), la razón auditada deja
+    constancia de qué boost(s) ya incluye el score — para poder revisar
+    después por qué se pujó por ese jugador en concreto.
 
     `pending_committed`: ver max_biddable_amount() — dinero ya comprometido
     en pujas pendientes sin resolver (protección defensiva de saldo, ver
@@ -148,8 +189,14 @@ def decide_bid(
     if amount < price:
         return None
 
+    boosts_applied = []
     if player.get("position_at_risk"):
-        score_note = f"score={score:.3f} (base={player.get('base_score', score):.3f} + prioridad riesgo de plantilla)"
+        boosts_applied.append("prioridad riesgo de plantilla")
+    if player.get("would_upgrade_lineup"):
+        boosts_applied.append("mejora el once titular")
+
+    if boosts_applied:
+        score_note = f"score={score:.3f} (base={player.get('base_score', score):.3f} + " + " + ".join(boosts_applied) + ")"
     else:
         score_note = f"score={score:.3f}"
 
@@ -158,6 +205,7 @@ def decide_bid(
         "amount": amount,
         "score": score,
         "position_at_risk": bool(player.get("position_at_risk")),
+        "would_upgrade_lineup": bool(player.get("would_upgrade_lineup")),
         "reason": (
             f"{score_note} >= umbral={min_score_threshold}; "
             f"precio_base={price}, prima={premium_pct:.1%} -> deseado={desired_amount}; "
