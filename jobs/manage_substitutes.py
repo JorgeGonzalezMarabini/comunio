@@ -1,7 +1,8 @@
 """
 Job: sustituye a mano, dentro de la alineación YA guardada en Futmondo, a
-cualquier titular confirmado lesionado/en duda por el suplente de su misma
-posición ya asignado en el banquillo (ver
+cualquier titular confirmado FUERA (lesionado/en duda, o simplemente no
+incluido en el once real de su equipo hoy -- ver más abajo) por el
+suplente de su misma posición ya asignado en el banquillo (ver
 engine.lineup_optimizer.build_substitution_changes()).
 
 Por qué existe como job APARTE de jobs/set_lineup.py: set_lineup decide la
@@ -22,11 +23,22 @@ coloca set_lineup.py es decorativo. Este job es el sustituto manual de esa
 función para ligas donde no esté activada (como la liga privada de
 destino, ver conversación con el usuario 2026-08-17).
 
-Señal usada para "confirmado fuera": clients.futmondo_client.
-is_injury_status() sobre el campo `status` de Futmondo — la misma
-aproximación sin confirmar con un caso real que ya usa engine/squad_risk.py
-(ver TODO en clients/futmondo_client.py). Si Futmondo confirma valores
-exactos de `status` más adelante, actualizar ahí, no aquí.
+Señal usada para "confirmado fuera": DOS fuentes independientes, cualquiera
+de las dos basta (ver engine.lineup_optimizer.build_substitution_changes()):
+
+  1. clients.futmondo_client.is_injury_status() sobre el campo `status` de
+     Futmondo — la misma aproximación sin confirmar con un caso real que ya
+     usa engine/squad_risk.py (ver TODO en clients/futmondo_client.py). Si
+     Futmondo confirma valores exactos de `status` más adelante, actualizar
+     ahí, no aquí.
+  2. clients.football_lineups_client.find_players_confirmed_out_of_real_lineup()
+     — un titular SANO que no aparece en el once REAL de su equipo hoy
+     (rotación, decisión táctica del entrenador real, no solo lesión — el
+     caso más frecuente en la práctica, ver README). Detrás de
+     config.ENABLE_REAL_LINEUP_CHECK (False por defecto: requiere
+     config.API_FOOTBALL_KEY y todavía sin confirmar con una llamada real,
+     ver docstring del propio cliente) — si está desactivado, este job se
+     comporta exactamente igual que antes de que existiera esta fuente.
 
 Sigue detrás de config.ENABLE_SUBSTITUTE_AUTO_SUBMIT (por defecto False,
 más conservador que ENABLE_LINEUP_AUTO_SUBMIT): build_substitution_changes()
@@ -66,7 +78,21 @@ def run():
     all_players = get_player_features(only_on_market=False)
     players_by_id = {p["id"]: p for p in all_players}
 
-    changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
+    confirmed_out_ids = set()
+    if config.ENABLE_REAL_LINEUP_CHECK:
+        # Solo hace falta comprobar los equipos de nuestros TITULARES actuales,
+        # no toda la plantilla -- ahorra presupuesto de API-Football (ver
+        # docstring del propio cliente, límite de 100 peticiones/día).
+        from clients.football_lineups_client import find_players_confirmed_out_of_real_lineup
+        from clients.laliga_stats_client import current_season
+
+        starters_by_id = {pid: players_by_id[pid] for pid in current_lineup_by_position.values() if pid in players_by_id}
+        try:
+            confirmed_out_ids = find_players_confirmed_out_of_real_lineup(starters_by_id, current_season())
+        except Exception as e:  # noqa: BLE001 -- un fallo de esta fuente extra no debe tumbar la comprobación por lesión
+            notify(f"manage_substitutes: fallo consultando alineaciones reales (API-Football), sigo solo con is_injury_status: {e}")
+
+    changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids)
     if not changes:
         return  # nadie confirmado fuera con suplente disponible esta pasada -- ver docstring del módulo
 

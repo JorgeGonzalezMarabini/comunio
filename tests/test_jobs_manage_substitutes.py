@@ -157,6 +157,58 @@ def test_manage_substitutes_partial_failure_is_not_reported_as_fully_sent(tmp_db
     assert row["submitted_to_futmondo"] == 0  # a medias NO cuenta como enviada
 
 
+def test_manage_substitutes_uses_real_lineup_check_when_enabled(tmp_db, monkeypatch):
+    """
+    Con ENABLE_REAL_LINEUP_CHECK activo, un titular SANO (status vacío)
+    marcado como "confirmado fuera" por la fuente de alineación real debe
+    sustituirse igual que uno lesionado -- ver
+    engine.lineup_optimizer.build_substitution_changes().
+    """
+    monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", False)
+    monkeypatch.setattr(config, "ENABLE_REAL_LINEUP_CHECK", True)
+    with get_connection() as conn:
+        _seed_player(conn, "def_titular", "DEF", status="")  # sano según Futmondo
+        _seed_player(conn, "def_suplente", "DEF", status="")
+
+    class FakeClient(FutmondoClient):
+        def get_lineup(self):
+            return _lineup_answer([(6, "def_titular")], [(3, "def_suplente")])
+
+    captured = []
+    with patch("jobs.manage_substitutes.FutmondoClient", FakeClient), \
+         patch("clients.football_lineups_client.find_players_confirmed_out_of_real_lineup", return_value={"def_titular"}), \
+         patch("jobs.manage_substitutes.notify", side_effect=lambda m: captured.append(m)):
+        manage_substitutes.run()
+
+    assert "1 sustitución(es) decidida(s)" in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT starter_id, substitute_id FROM substitution_decisions").fetchone()
+    assert row["starter_id"] == "def_titular"
+    assert row["substitute_id"] == "def_suplente"
+
+
+def test_manage_substitutes_real_lineup_check_failure_falls_back_without_crashing(tmp_db, monkeypatch):
+    """Un fallo consultando API-Football no debe tumbar la comprobación por lesión -- solo se pierde esa señal extra."""
+    monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", False)
+    monkeypatch.setattr(config, "ENABLE_REAL_LINEUP_CHECK", True)
+    with get_connection() as conn:
+        _seed_player(conn, "def_titular", "DEF", status="lesionado")  # sigue detectable por is_injury_status
+        _seed_player(conn, "def_suplente", "DEF", status="")
+
+    class FakeClient(FutmondoClient):
+        def get_lineup(self):
+            return _lineup_answer([(6, "def_titular")], [(3, "def_suplente")])
+
+    captured = []
+    with patch("jobs.manage_substitutes.FutmondoClient", FakeClient), \
+         patch("clients.football_lineups_client.find_players_confirmed_out_of_real_lineup", side_effect=RuntimeError("timeout")), \
+         patch("jobs.manage_substitutes.notify", side_effect=lambda m: captured.append(m)):
+        manage_substitutes.run()  # no debe lanzar
+
+    assert any("fallo consultando alineaciones reales" in m for m in captured)
+    assert any("1 sustitución(es) decidida(s)" in m for m in captured)
+
+
 def test_manage_substitutes_submit_error_is_audited_without_crashing(tmp_db, monkeypatch):
     monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", True)
     with get_connection() as conn:

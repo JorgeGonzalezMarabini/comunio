@@ -330,16 +330,34 @@ def build_substitution_changes(
     players_by_id: dict,
     current_lineup_by_position: dict,
     current_bench_by_position: dict,
+    confirmed_out_ids: set = None,
 ) -> list[dict]:
     """
     Construye la lista `changes` (mismo shape que build_lineup_changes()/
     build_bench_changes()) para sustituir, dentro de la alineación YA
-    guardada en Futmondo, a cada titular confirmado lesionado/en duda (ver
-    clients.futmondo_client.is_injury_status()) por el suplente de su
-    misma posición ya asignado en el banquillo (BENCH_SLOT_BY_POSITION) —
-    pensado para jobs/manage_substitutes.py, NO para jobs/set_lineup.py
-    (que decide antes del cierre de jornada, sin saber todavía quién
-    estará confirmado fuera).
+    guardada en Futmondo, a cada titular "confirmado fuera" por el suplente
+    de su misma posición ya asignado en el banquillo
+    (BENCH_SLOT_BY_POSITION) — pensado para jobs/manage_substitutes.py, NO
+    para jobs/set_lineup.py (que decide antes del cierre de jornada, sin
+    saber todavía quién estará confirmado fuera).
+
+    "Confirmado fuera" cubre DOS señales independientes, cualquiera de las
+    dos basta:
+      1. `clients.futmondo_client.is_injury_status(starter["status"])` —
+         lesión/duda según el campo `status` de Futmondo.
+      2. `starter_id in confirmed_out_ids` (opcional) — el titular está sano
+         según Futmondo pero NO aparece en el once REAL de su equipo hoy,
+         según `clients.football_lineups_client.
+         find_players_confirmed_out_of_real_lineup()`. Cubre el caso más
+         frecuente en la práctica: rotación/decisión táctica del
+         entrenador real, no solo lesión — ver README, sección "Banquillo/
+         suplentes". `confirmed_out_ids=None` (o vacío) desactiva esta
+         segunda señal sin más (p.ej. si config.ENABLE_REAL_LINEUP_CHECK es
+         False) — el comportamiento queda igual que antes de que existiera.
+
+    La MISMA doble señal se aplica también al suplente que entraría: uno
+    confirmado fuera (lesionado o no incluido en el once real de SU equipo)
+    tampoco sirve, igual que ya pasaba solo con lesión.
 
     Por qué hace falta esto aparte de set_lineup.py: según la FAQ oficial
     (https://help.futmondo.com/article/159-entrenador-automatico, ver
@@ -393,11 +411,16 @@ def build_substitution_changes(
     asignado en el slot de banquillo de esa posición, o si el suplente
     asignado TAMBIÉN está lesionado/en duda (no hay a quién meter).
     """
+    confirmed_out_ids = confirmed_out_ids or set()
+
+    def _is_confirmed_out(player_id: str, player: dict | None) -> bool:
+        return (player is not None and is_injury_status(player.get("status"))) or player_id in confirmed_out_ids
+
     changes = []
     replaced_positions = set()
     for slot, starter_id in current_lineup_by_position.items():
         starter = players_by_id.get(starter_id)
-        if starter is None or not is_injury_status(starter.get("status")):
+        if starter is None or not _is_confirmed_out(starter_id, starter):
             continue
         position = starter["position"]
         if position in replaced_positions:
@@ -407,7 +430,7 @@ def build_substitution_changes(
         if substitute_id is None:
             continue  # sin suplente asignado para esta posición
         substitute = players_by_id.get(substitute_id)
-        if substitute is not None and is_injury_status(substitute.get("status")):
+        if _is_confirmed_out(substitute_id, substitute):
             continue  # el suplente asignado tampoco puede jugar
 
         changes.append(

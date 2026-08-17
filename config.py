@@ -44,6 +44,32 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # --- Base de datos ---
 DATABASE_PATH = os.getenv("DATABASE_PATH", "db/futmondo.db")
 
+# --- Alineaciones reales (clients/football_lineups_client.py, API-Football) ---
+# Decisión del usuario (2026-08-17, ver conversación): fuente elegida para
+# detectar cuándo un titular SANO no está en el once real de su equipo (no
+# solo lesión/duda, ver is_injury_status()) -- API-Football tiene una API
+# pública documentada y estable, a cambio de gestionar una API key gratuita
+# (no de pago, pero SÍ una cuenta/rate limit nuevos, ver README).
+#
+# **Todavía SIN CONFIRMAR con una llamada real** (a diferencia del resto de
+# clientes de este proyecto): sin una API key propia con la que probarlo
+# todavía. Ver docstring de clients/football_lineups_client.py para el TODO
+# completo antes de confiar en esto en producción.
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
+API_FOOTBALL_BASE_URL = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
+
+# League id de LaLiga en API-Football: 140 según su documentación pública y
+# múltiples fuentes de terceros, pero sin confirmar todavía con una llamada
+# propia (ver TODO en clients/football_lineups_client.py).
+API_FOOTBALL_LALIGA_LEAGUE_ID = int(os.getenv("API_FOOTBALL_LALIGA_LEAGUE_ID", "140"))
+
+# Apaga/enciende la comprobación de alineación real por completo -- False
+# por defecto (más conservador todavía que ENABLE_SUBSTITUTE_AUTO_SUBMIT):
+# sin API_FOOTBALL_KEY configurada esto no debe intentar llamar a nada.
+# jobs/manage_substitutes.py comprueba este flag antes de importar/usar
+# clients/football_lineups_client.py.
+ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower() == "true"
+
 # --- Pesos del evaluador (engine/evaluator.py) ---
 # Configurables para poder ajustarlos con el tiempo sin tocar código.
 # Para DECIDIR PUJAS: el precio importa (relación calidad/precio del

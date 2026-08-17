@@ -46,6 +46,19 @@ def no_real_futmondo_network(monkeypatch):
     monkeypatch.setattr(config, "FUTMONDO_USERTEAM_ID", None)
 
 
+@pytest.fixture(autouse=True)
+def no_real_api_football_network(monkeypatch):
+    """
+    Misma idea que no_real_futmondo_network pero para
+    clients/football_lineups_client.py (API-Football): sin key y con el
+    flag apagado por defecto en todo test, aunque el `.env` local tenga una
+    key real rellena -- cualquier test que quiera ejercitar esta rama debe
+    reactivarlo explícitamente (y mockear la red igualmente).
+    """
+    monkeypatch.setattr(config, "API_FOOTBALL_KEY", None)
+    monkeypatch.setattr(config, "ENABLE_REAL_LINEUP_CHECK", False)
+
+
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     """BD SQLite temporal y aislada por test, con el esquema ya creado."""

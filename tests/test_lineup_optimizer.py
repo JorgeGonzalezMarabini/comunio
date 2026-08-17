@@ -356,6 +356,50 @@ def test_build_substitution_changes_only_one_substitution_per_position():
     assert changes[0]["to"] == "def_suplente"
 
 
+# --- confirmed_out_ids: señal de alineación real (independiente de status) ---
+
+
+def test_build_substitution_changes_swaps_healthy_starter_missing_from_real_lineup():
+    """
+    Un titular SANO (status vacío) pero confirmado fuera del once real de
+    su equipo (rotación, no lesión -- ver
+    clients.football_lineups_client.find_players_confirmed_out_of_real_lineup())
+    debe sustituirse igual que uno lesionado.
+    """
+    players_by_id = _players_by_id([("def_titular", "DEF", ""), ("def_suplente", "DEF", "")])
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {3: "def_suplente"}
+
+    changes = build_substitution_changes(
+        players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids={"def_titular"}
+    )
+
+    assert len(changes) == 2
+    assert changes[0]["to"] == "def_suplente"
+    assert changes[1]["to"] == "def_titular"
+
+
+def test_build_substitution_changes_skips_when_substitute_confirmed_out_of_real_lineup():
+    """El suplente asignado tampoco sirve si ÉL está confirmado fuera del once real, aunque esté sano según status."""
+    players_by_id = _players_by_id([("def_titular", "DEF", "lesionado"), ("def_suplente", "DEF", "")])
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {3: "def_suplente"}
+
+    changes = build_substitution_changes(
+        players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids={"def_suplente"}
+    )
+    assert changes == []
+
+
+def test_build_substitution_changes_confirmed_out_ids_none_behaves_like_before():
+    """confirmed_out_ids=None (valor por defecto) no debe cambiar nada frente al comportamiento previo."""
+    players_by_id = _players_by_id([("def_titular", "DEF", ""), ("def_suplente", "DEF", "")])
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {3: "def_suplente"}
+
+    assert build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position) == []
+
+
 def test_build_substitution_changes_handles_multiple_positions_independently():
     players_by_id = _players_by_id(
         [

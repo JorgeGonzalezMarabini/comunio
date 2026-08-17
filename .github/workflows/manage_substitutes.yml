@@ -29,6 +29,12 @@ jobs:
           FUTMONDO_USERTEAM_ID: ${{ vars.FUTMONDO_USERTEAM_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Opcional -- ver config.ENABLE_REAL_LINEUP_CHECK (false por
+          # defecto en config.py si no se define como Variable aquí). Sin
+          # rellenar el Secret, este job se comporta igual que sin esta
+          # fuente (solo is_injury_status()).
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          ENABLE_REAL_LINEUP_CHECK: ${{ vars.ENABLE_REAL_LINEUP_CHECK }}
       # substitution_decisions queda registrado en db/futmondo.db (auditoría) --
       # sin este paso se perdería al terminar el run. Ver nota en sync_data.yml.
       - name: Commit BD actualizada

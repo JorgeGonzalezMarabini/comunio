@@ -125,6 +125,23 @@ CREATE TABLE IF NOT EXISTS substitution_decisions (
     reason          TEXT,
     created_at      TEXT NOT NULL
 );
+
+-- Cache de un día de duración de la comprobación de alineación REAL
+-- (clients/football_lineups_client.py, API-Football) por equipo: evita
+-- repetir llamadas contra el límite de 100/día del plan gratuito en cada
+-- pasada de jobs/manage_substitutes.py (varias veces al día, ver
+-- manage_substitutes.yml). Una fila por (team, match_date); se sobreescribe
+-- si se vuelve a consultar el mismo día (lineup_published pasa de 0 a 1
+-- cuando la alineación real se publica, normalmente ~1h antes del partido).
+CREATE TABLE IF NOT EXISTS real_lineup_checks (
+    team                TEXT NOT NULL,      -- nombre de equipo tal cual en players.team
+    match_date          TEXT NOT NULL,      -- fecha UTC YYYY-MM-DD del partido consultado
+    fixture_id          INTEGER,            -- id de partido en API-Football, NULL si ese equipo no juega ese día
+    lineup_published    INTEGER NOT NULL DEFAULT 0,  -- 0/1: si /fixtures/lineups ya devolvió el once real
+    starting_player_ids TEXT,               -- JSON list de ids (Futmondo) de NUESTROS jugadores de ese equipo confirmados en el once real -- solo tiene sentido si lineup_published=1
+    checked_at          TEXT NOT NULL,
+    PRIMARY KEY (team, match_date)
+);
 """
 
 
@@ -275,6 +292,45 @@ def update_sale_status(sale_id: int, status: str) -> None:
     """Actualiza el status de una venta ya persistida (ver get_open_sales/reconciliación)."""
     with get_connection() as conn:
         conn.execute("UPDATE sales SET status = ? WHERE id = ?", (status, sale_id))
+
+
+def get_real_lineup_check(team: str, match_date: str) -> dict | None:
+    """
+    Lee la comprobación de alineación real ya cacheada para (team, match_date)
+    -- ver save_real_lineup_check() y clients/football_lineups_client.py.
+    None si nunca se consultó ese equipo ese día (no confundir con
+    lineup_published=0, que significa "se consultó pero Futmondo/API-Football
+    todavía no había publicado la alineación real").
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM real_lineup_checks WHERE team = ? AND match_date = ?", (team, match_date)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def save_real_lineup_check(
+    team: str, match_date: str, fixture_id: int | None, lineup_published: bool, starting_player_ids: list[str], checked_at: str
+) -> None:
+    """
+    Guarda/sobreescribe (INSERT OR REPLACE, clave (team, match_date)) el
+    resultado de consultar la alineación real de `team` para `match_date` --
+    ver get_real_lineup_check(). `starting_player_ids` se serializa a JSON
+    (lista de ids Futmondo de NUESTROS jugadores de ese equipo confirmados en
+    el once real; vacía si lineup_published=False, todavía no hay nada que
+    guardar).
+    """
+    import json
+
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO real_lineup_checks
+                (team, match_date, fixture_id, lineup_published, starting_player_ids, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (team, match_date, fixture_id, 1 if lineup_published else 0, json.dumps(starting_player_ids), checked_at),
+        )
 
 
 if __name__ == "__main__":

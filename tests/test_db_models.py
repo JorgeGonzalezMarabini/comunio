@@ -7,6 +7,8 @@ from db.models import (
     get_open_sales,
     get_pending_bid_amount,
     get_player_features,
+    get_real_lineup_check,
+    save_real_lineup_check,
     update_bid_status,
     update_sale_status,
 )
@@ -144,3 +146,32 @@ def test_get_open_sales_and_update_status_roundtrip(tmp_db):
 
     update_sale_status(open_sales[0]["id"], "sold")
     assert get_open_sales() == []
+
+
+def test_get_real_lineup_check_returns_none_when_never_checked(tmp_db):
+    assert get_real_lineup_check("Athletic Club", "2026-08-17") is None
+
+
+def test_save_and_get_real_lineup_check_roundtrip(tmp_db):
+    save_real_lineup_check("Athletic Club", "2026-08-17", 555, True, ["p1", "p2"], NOW)
+    check = get_real_lineup_check("Athletic Club", "2026-08-17")
+
+    assert check["fixture_id"] == 555
+    assert check["lineup_published"] == 1
+    assert check["starting_player_ids"] == '["p1", "p2"]'
+
+
+def test_save_real_lineup_check_overwrites_same_team_and_date(tmp_db):
+    """Clave (team, match_date): una segunda consulta el mismo día sobreescribe, no duplica."""
+    save_real_lineup_check("Athletic Club", "2026-08-17", None, False, [], NOW)
+    save_real_lineup_check("Athletic Club", "2026-08-17", 555, True, ["p1"], NOW)
+
+    check = get_real_lineup_check("Athletic Club", "2026-08-17")
+    assert check["lineup_published"] == 1
+    assert check["fixture_id"] == 555
+
+    with get_connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM real_lineup_checks WHERE team = ? AND match_date = ?", ("Athletic Club", "2026-08-17")
+        ).fetchone()[0]
+    assert count == 1
