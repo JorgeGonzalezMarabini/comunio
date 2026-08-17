@@ -89,28 +89,63 @@ def get_league_data(league: str = "La_liga", season: str = None) -> dict:
     return resp.json()
 
 
-def get_league_data_with_fallback(league: str = "La_liga", season: str = None) -> tuple[dict, str, bool]:
+def get_league_data_with_fallback(league: str = "La_liga", season: str = None) -> tuple[dict, str, dict[str, str]]:
     """
-    Como get_league_data(), pero si la temporada pedida (por defecto
-    current_season()) todavía no tiene datos en Understat (normal las
-    primeras jornadas de cada temporada nueva, confirmado en la práctica:
-    0 jugadores para "2026" con la 2025/26 recién terminada dando 600),
-    cae a la temporada anterior como aproximación temporal en vez de dejar
-    a todos los jugadores sin stats externas durante ese hueco.
+    Como get_league_data(), pero con fallback GRANULAR por equipo: si algún
+    equipo de la temporada actual todavía no tiene ningún jugador con datos
+    en Understat (normal en las primeras jornadas -- Understat tarda unos
+    días en procesar cada partido, ver current_season()), se completan SOLO
+    los jugadores de esos equipos con los de la temporada anterior, en vez
+    de (a) dejarlos sin stats externas hasta que Understat los publique, o
+    (b) tirar TODA la liga a la temporada anterior aunque la mayoría de
+    equipos ya tengan datos frescos (comportamiento anterior de esta
+    función -- caso real detectado 2026-08-17, jornada 1: solo 8 de 20
+    equipos de LaLiga con datos en Understat, el resto injustamente sin
+    stats externas hasta que se procesaran todos).
 
-    Devuelve (league_data, season_usada, es_fallback). `season_usada` debe
-    guardarse tal cual en external_stats.season (ver jobs/sync_data.py) para
-    que quede claro en la BD que esos datos son de la temporada anterior,
-    no inventados ni de la actual.
+    Cada jugador que sale de la temporada anterior lleva marcado
+    `_source_season` -- jobs/sync_data.py debe usar ese campo (con
+    `season` como respaldo) al guardar cada fila en external_stats.season,
+    porque con fallback parcial NO todos los jugadores devueltos comparten
+    la misma temporada.
+
+    Devuelve (league_data, season_actual, fallback_por_equipo):
+    `fallback_por_equipo` es {team_title: temporada_usada}, solo para los
+    equipos completados desde la temporada anterior -- vacío si ninguno lo
+    necesitó.
     """
     season = season or current_season()
-    league_data = get_league_data(league, season)
-    if league_data.get("players"):
-        return league_data, season, False
-
     previous_season = str(int(season) - 1)
-    fallback_data = get_league_data(league, previous_season)
-    return fallback_data, previous_season, True
+
+    current_data = get_league_data(league, season)
+    current_players = current_data.setdefault("players", [])
+    for p in current_players:
+        p["_source_season"] = season
+
+    current_teams = {p.get("team_title") for p in current_players}
+    known_teams = {t.get("title") for t in current_data.get("teams", {}).values()}
+
+    if known_teams:
+        missing_teams = known_teams - current_teams
+        previous_data = get_league_data(league, previous_season) if missing_teams else None
+    else:
+        # Understat ni siquiera lista los equipos todavía (arranque de
+        # temporada muy temprano) -- sin ese listado no hay forma de saber
+        # qué equipos faltan por diferencia de conjuntos, así que se
+        # completa la liga entera desde la temporada anterior (fallback
+        # total, como hacía la versión previa de esta función).
+        previous_data = get_league_data(league, previous_season)
+        missing_teams = {p.get("team_title") for p in previous_data.get("players", [])} - current_teams
+
+    fallback_by_team: dict[str, str] = {}
+    if previous_data:
+        for p in previous_data.get("players", []):
+            if p.get("team_title") in missing_teams:
+                p["_source_season"] = previous_season
+                current_players.append(p)
+                fallback_by_team[p.get("team_title")] = previous_season
+
+    return current_data, season, fallback_by_team
 
 
 def _normalize(text: str) -> str:

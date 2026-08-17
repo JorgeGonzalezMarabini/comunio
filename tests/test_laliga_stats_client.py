@@ -36,19 +36,33 @@ def test_current_season_from_july_is_current_year():
         assert current_season() == "2026"
 
 
-def _fake_get_league_data(players_by_season):
+def _fake_get_league_data(players_by_season, teams_by_season=None):
+    """
+    `teams_by_season`, si se pasa, fija explícitamente el registro de
+    equipos conocidos de esa temporada (simula el listado de equipos que
+    Understat ya tiene aunque aún no les haya procesado ningún partido).
+    Si no se pasa para una temporada dada, se derivan los equipos de sus
+    propios jugadores -- suficiente para los tests que no necesitan
+    distinguir "equipo sin datos" de "equipo inexistente".
+    """
     def fake(league="La_liga", season=None):
-        return {"players": players_by_season.get(season, []), "teams": {}, "dates": []}
+        players = players_by_season.get(season, [])
+        teams = (teams_by_season or {}).get(season)
+        if teams is None:
+            teams = {p["team_title"]: {"title": p["team_title"]} for p in players if "team_title" in p}
+        return {"players": players, "teams": teams, "dates": []}
 
     return fake
 
 
 def test_get_league_data_with_fallback_uses_current_season_when_available():
-    with patch("clients.laliga_stats_client.get_league_data", side_effect=_fake_get_league_data({"2025": [{"player_name": "X"}]})), \
-         patch("clients.laliga_stats_client.current_season", return_value="2025"):
-        data, season, used_fallback = get_league_data_with_fallback()
+    with patch(
+        "clients.laliga_stats_client.get_league_data",
+        side_effect=_fake_get_league_data({"2025": [{"player_name": "X", "team_title": "Equipo"}]}),
+    ), patch("clients.laliga_stats_client.current_season", return_value="2025"):
+        data, season, fallback_by_team = get_league_data_with_fallback()
     assert season == "2025"
-    assert used_fallback is False
+    assert fallback_by_team == {}
     assert len(data["players"]) == 1
 
 
@@ -56,23 +70,62 @@ def test_get_league_data_with_fallback_falls_back_when_current_season_empty():
     """
     Regresión del caso real visto en producción (2026-08-16): la temporada
     recién empezada todavía no tiene datos en Understat -- debe caer a la
-    anterior en vez de dejar el sync sin ninguna stat externa.
+    anterior en vez de dejar el sync sin ninguna stat externa. Aquí ni
+    siquiera hay listado de equipos para la temporada actual (fallback
+    total, no se puede diferenciar por equipo).
     """
-    players_by_season = {"2026": [], "2025": [{"player_name": "Mbappe"}] * 600}
-    with patch("clients.laliga_stats_client.get_league_data", side_effect=_fake_get_league_data(players_by_season)), \
-         patch("clients.laliga_stats_client.current_season", return_value="2026"):
-        data, season, used_fallback = get_league_data_with_fallback()
-    assert season == "2025"
-    assert used_fallback is True
+    players_by_season = {"2026": [], "2025": [{"player_name": "Mbappe", "team_title": "Equipo"}] * 600}
+    with patch(
+        "clients.laliga_stats_client.get_league_data",
+        side_effect=_fake_get_league_data(players_by_season, teams_by_season={"2026": {}}),
+    ), patch("clients.laliga_stats_client.current_season", return_value="2026"):
+        data, season, fallback_by_team = get_league_data_with_fallback()
+    assert season == "2026"  # la temporada real sigue siendo la actual, no la de fallback
+    assert fallback_by_team == {"Equipo": "2025"}
     assert len(data["players"]) == 600
+    assert all(p["_source_season"] == "2025" for p in data["players"])
+
+
+def test_get_league_data_with_fallback_fills_missing_teams_only():
+    """
+    Caso real detectado en producción (2026-08-17, jornada 1 de LaLiga):
+    la temporada actual ya tiene datos para algunos equipos pero otros
+    todavía no han sido procesados por Understat -- solo esos equipos
+    deben completarse con la temporada anterior, sin tocar los que ya
+    están al día (y sin colar datos viejos de un equipo que ya tiene
+    datos frescos).
+    """
+    current_players = [{"player_name": "Jugador Sevilla", "team_title": "Sevilla"}]
+    previous_players = [
+        {"player_name": "Jugador Athletic", "team_title": "Athletic Club"},
+        {"player_name": "Jugador Sevilla Viejo", "team_title": "Sevilla"},  # equipo ya al día -- no debe colarse
+    ]
+    teams_by_season = {"2026": {"1": {"title": "Sevilla"}, "2": {"title": "Athletic Club"}}}
+    with patch(
+        "clients.laliga_stats_client.get_league_data",
+        side_effect=_fake_get_league_data(
+            {"2026": current_players, "2025": previous_players}, teams_by_season=teams_by_season
+        ),
+    ), patch("clients.laliga_stats_client.current_season", return_value="2026"):
+        data, season, fallback_by_team = get_league_data_with_fallback()
+
+    assert season == "2026"
+    assert fallback_by_team == {"Athletic Club": "2025"}
+    names = {p["player_name"] for p in data["players"]}
+    assert names == {"Jugador Sevilla", "Jugador Athletic"}  # NO "Jugador Sevilla Viejo"
+
+    sevilla_player = next(p for p in data["players"] if p["team_title"] == "Sevilla")
+    assert sevilla_player["_source_season"] == "2026"
+    athletic_player = next(p for p in data["players"] if p["team_title"] == "Athletic Club")
+    assert athletic_player["_source_season"] == "2025"
 
 
 def test_get_league_data_with_fallback_no_data_anywhere():
     with patch("clients.laliga_stats_client.get_league_data", side_effect=_fake_get_league_data({})), \
          patch("clients.laliga_stats_client.current_season", return_value="2026"):
-        data, season, used_fallback = get_league_data_with_fallback()
+        data, season, fallback_by_team = get_league_data_with_fallback()
     assert data["players"] == []
-    assert used_fallback is True  # sí intentó caer a la anterior, aunque tampoco tuviera datos
+    assert fallback_by_team == {}  # intentó caer a la anterior, pero tampoco tenía nada que ofrecer
 
 
 def test_index_players_by_name_normalizes_accents_and_case():

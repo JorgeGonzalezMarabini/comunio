@@ -179,17 +179,20 @@ def run():
     roster = client.get_roster()
     market = client.get_market()
 
-    league_data, season, used_fallback = get_league_data_with_fallback()
+    league_data, season, fallback_by_team = get_league_data_with_fallback()
     if not league_data.get("players"):
         # Ni la temporada actual ni la anterior tienen datos -- caso
         # extremo, no visto en la práctica, pero no debe romper el sync.
         notify("sync_data: Understat sin datos ni para la temporada actual ni la anterior, se reintentará en el próximo sync.")
         player_index = None
     else:
-        if used_fallback:
+        if fallback_by_team:
+            equipos = ", ".join(sorted(fallback_by_team))
+            temporadas = sorted(set(fallback_by_team.values()))
+            temporada_txt = temporadas[0] if len(temporadas) == 1 else "/".join(temporadas)
             notify(
-                f"sync_data: Understat sin datos todavía para la temporada actual, "
-                f"usando temporada {season} (la anterior) como aproximación temporal."
+                f"sync_data: {len(fallback_by_team)} equipo(s) sin datos todavía en Understat para la temporada {season}, "
+                f"usando temporada {temporada_txt} como aproximación temporal para: {equipos}."
             )
         player_index = build_player_index(league_data)
 
@@ -211,7 +214,10 @@ def run():
         understat_player, strategy = match_player(player.get("name", ""), player.get("team", ""), player_index, position=position)
         match_counts[strategy] = match_counts.get(strategy, 0) + 1
         if understat_player:
-            _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
+            # Con fallback parcial no todos los jugadores del índice
+            # comparten temporada -- ver get_league_data_with_fallback().
+            player_season = understat_player.get("_source_season", season)
+            _upsert_external_stats(conn, str(player["id"]), understat_player, player_season, now)
 
     with get_connection() as conn:
         for player in roster_players:

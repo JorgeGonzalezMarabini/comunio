@@ -111,7 +111,7 @@ def test_run_full_job_with_fake_client(tmp_db, roster_player_factory):
     captured = []
     with patch("jobs.sync_data.FutmondoClient", FakeClient), \
          patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
-         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", True)):
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", {})):
         sync_data.run()
 
     assert len(captured) >= 1
@@ -140,7 +140,7 @@ def test_run_crosses_with_understat_by_surname_and_reports_breakdown(tmp_db, ros
     captured = []
     with patch("jobs.sync_data.FutmondoClient", FakeClient), \
          patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
-         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", False)):
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", {})):
         sync_data.run()
 
     assert "1/1 cruzados con Understat (1 surname+team)" in captured[-1]
