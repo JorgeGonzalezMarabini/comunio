@@ -135,12 +135,21 @@ la web** — los tres documentados con detalle en el docstring de
    antes de recolocarlo, pero eso depende de la numeración de slots del
    banquillo, sin confirmar (ver más abajo).
 
-**No probado con
-ninguna formación distinta de 4-4-2** — `engine/lineup_optimizer.py`
-generaliza el mismo criterio (numeración consecutiva, portero al final)
-para el resto de formaciones de `config.py`, pero es una extrapolación
-razonada, no una confirmación. Tampoco se ha probado el banquillo/
-suplentes: `jobs/set_lineup.py` de momento solo manda el once titular.
+**Solo se soporta 4-4-2** (`engine/lineup_optimizer.FORMATIONS`): es la
+única formación gratis y siempre disponible en Futmondo, confirmado en su
+[FAQ oficial](https://help.futmondo.com/article/160-que-son-las-formaciones-extra-y-como-puedo-activarlas).
+Futmondo sí ofrece "formaciones extra" de pago — **4-2-4, 3-6-1, 3-3-4,
+4-6-0, 5-2-3** — pero contratadas por jornada suelta vuelven solas a
+4-4-2 al terminar esa jornada (mal encaje para un bot automatizado que no
+gestiona "mondos"), y su numeración de slots no está confirmada con
+ninguna prueba real (la de `build_lineup_changes()` solo se verificó para
+4-4-2) — no se añaden a `FORMATIONS` hasta que alguna se necesite de
+verdad y se confirme igual que se hizo con 4-4-2. (Nota: `FORMATIONS`
+tenía antes `4-3-3`/`3-4-3`/`5-3-2`, heredadas sin querer de la fase de
+Comunio — ninguna de esas tres existe en Futmondo.)
+
+Tampoco se ha probado el banquillo/suplentes: `jobs/set_lineup.py` de
+momento solo manda el once titular.
 
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en

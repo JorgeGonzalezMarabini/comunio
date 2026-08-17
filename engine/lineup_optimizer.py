@@ -11,11 +11,21 @@ next_match_difficulty(), basado en el forecast de Understat).
 import config
 
 # formación -> nº de jugadores por posición (sin contar portero, que es fijo).
+#
+# Solo 4-4-2: es la ÚNICA formación gratis y siempre disponible en
+# Futmondo (confirmado en la FAQ oficial, https://help.futmondo.com/article/160).
+# El resto de "formaciones extra" reales que ofrece Futmondo —
+# 4-2-4, 3-6-1, 3-3-4, 4-6-0, 5-2-3 (ninguna coincide con las que tenía
+# esta constante heredadas sin querer de la fase de Comunio: 4-3-3/3-4-3/
+# 5-3-2, que NO existen en Futmondo) — son de pago (200 mondos/jornada o
+# 4.000 mondos/temporada, gratis en modo PRO) y, contratadas por jornada,
+# **vuelven solas a 4-4-2 al terminar esa jornada** — mal encaje para un
+# bot automatizado que no gestiona mondos. No se añaden aquí hasta que
+# alguna se necesite de verdad Y se confirme su numeración de slots con
+# una prueba real (la de build_lineup_changes() solo está verificada para
+# 4-4-2, ver más abajo).
 FORMATIONS = {
     "4-4-2": {"POR": 1, "DEF": 4, "MED": 4, "DEL": 2},
-    "4-3-3": {"POR": 1, "DEF": 4, "MED": 3, "DEL": 3},
-    "3-4-3": {"POR": 1, "DEF": 3, "MED": 4, "DEL": 3},
-    "5-3-2": {"POR": 1, "DEF": 5, "MED": 3, "DEL": 2},
 }
 
 
@@ -52,16 +62,17 @@ def apply_fixture_difficulty(
 # titulares). Confirmado en la prueba real: Tzolakis (portero) -> 10,
 # Calafiori/Struijk/(cuarto defensa) (defensas) -> 6, 7, 8(, 9).
 #
-# TODO sin confirmar: para otras formaciones (4-3-3, 3-4-3, 5-3-2) se
-# GENERALIZA este mismo criterio (numeración consecutiva por el orden de
-# LINEUP_SLOT_POSITION_ORDER, portero siempre el último índice) porque es
-# lo más simple consistente con lo observado, pero no se ha probado con
-# una formación distinta de 4-4-2 — si Futmondo usara en realidad una
-# tabla de slots fija por posición (p.ej. delantero siempre 0-1 aunque
-# haya 3), esta generalización sería incorrecta para 4-3-3/3-4-3. Antes de
-# activar config.ENABLE_LINEUP_AUTO_SUBMIT con una formación distinta de
-# 4-4-2 en una liga real, conviene confirmarlo con una prueba igual que se
-# hizo aquí.
+# TODO sin confirmar: si algún día se añade a FORMATIONS alguna de las
+# "formaciones extra" reales de Futmondo (4-2-4, 3-6-1, 3-3-4, 4-6-0,
+# 5-2-3 — ver FORMATIONS más arriba), este mismo criterio (numeración
+# consecutiva por el orden de LINEUP_SLOT_POSITION_ORDER, portero siempre
+# el último índice) es la generalización más simple consistente con lo
+# observado, pero NO está probado con ninguna formación distinta de
+# 4-4-2 — si Futmondo usara en realidad una tabla de slots fija por
+# posición (p.ej. delantero siempre 0-1 aunque haya 4 en un 4-6-0), esta
+# generalización sería incorrecta. Confirmarlo con una prueba real igual
+# que se hizo para 4-4-2 antes de activar config.ENABLE_LINEUP_AUTO_SUBMIT
+# con otra formación.
 LINEUP_SLOT_POSITION_ORDER = ["DEL", "MED", "DEF", "POR"]
 
 
