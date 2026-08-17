@@ -91,10 +91,26 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     """
     Convierte una lista de jugadores con columnas crudas (la forma que
     devuelve `db.models.get_player_features()`: price, points, last_points,
-    average_points, status, xg, minutes_played, games...) en la forma que
-    espera `score_player`, normalizando cada feature 0..1 **dentro de este
-    pool** — el score resultante es comparable entre los jugadores pasados
-    en la misma llamada, no un valor absoluto entre llamadas distintas.
+    average_points, status, xg, minutes_played, games, position...) en la
+    forma que espera `score_player`, normalizando cada feature 0..1
+    **dentro de su propio grupo de posición** (POR/DEF/MED/DEL) — el score
+    resultante es comparable entre los jugadores pasados en la misma
+    llamada, no un valor absoluto entre llamadas distintas.
+
+    Normalizar por posición (y no contra todo el pool mezclado, como se
+    hacía antes) importa de verdad: la fórmula de puntos real de Futmondo
+    premia cosas distintas según la posición (porteros/defensas ganan por
+    portería a cero, delanteros/centrocampistas por goles/asistencias), y
+    el xG de Understat mide amenaza ofensiva — un buen central tiene un xG
+    casi 0 no porque rinda mal, sino porque no es su función. Normalizar
+    contra todo el pool mezclado hacía que un central top saliera siempre
+    con "xg" normalizado cerca de 0 frente a cualquier delantero mediocre,
+    sesgando sistemáticamente a la baja a porteros/defensas — más grave
+    todavía en `config.LINEUP_EVALUATOR_WEIGHTS` (peso de "xg" 0.40, el
+    más alto de los cuatro, precisamente porque excluye el precio). Un
+    jugador sin `position` (no debería pasar con datos reales de Futmondo,
+    ya mapeados por `FUTMONDO_POSITION_MAP`) se agrupa aparte, con los
+    demás jugadores sin posición conocida — nunca junto a un grupo real.
 
     Definición de cada feature (razonada, no perfecta — ver TODOs):
       - points_per_price: average_points / precio_en_millones. Usa el
@@ -105,8 +121,6 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         ahora mismo), sin necesitar consultar el histórico completo.
       - xg: xG por 90 minutos (xg / minutes_played * 90). Comparar xG total
         penalizaría a quien ha jugado menos minutos sin ser peor jugador.
-        TODO: usar percentil por posición en vez de por todo el pool —
-        un delantero y un defensa no son comparables en xG90 crudo.
       - minutes_played_ratio: minutes_played / (games * 90). Mide qué
         fracción de cada partido en que apareció jugó completo (titular vs
         suplente de pocos minutos), NO qué fracción de los partidos totales
@@ -117,27 +131,46 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         `laliga_stats_client.get_league_data()["teams"][id]["history"]`) y
         usar minutes_played / (partidos_del_equipo * 90).
     """
-    points_per_price, trend, xg90, minutes_ratio = [], [], [], []
+    n = len(raw_players)
+    points_per_price = [0.0] * n
+    trend = [0.0] * n
+    xg90 = [0.0] * n
+    minutes_ratio = [0.0] * n
 
-    for p in raw_players:
+    for i, p in enumerate(raw_players):
         price = p.get("price") or 0
         avg_points = p.get("average_points") or 0
-        points_per_price.append(avg_points / (price / 1_000_000) if price > 0 else 0)
+        points_per_price[i] = avg_points / (price / 1_000_000) if price > 0 else 0
 
         last_points = p.get("last_points")
-        trend.append((last_points if last_points is not None else avg_points) - avg_points)
+        trend[i] = (last_points if last_points is not None else avg_points) - avg_points
 
         minutes = p.get("minutes_played") or 0
         xg = p.get("xg") or 0
-        xg90.append(xg / minutes * 90 if minutes > 0 else 0)
+        xg90[i] = xg / minutes * 90 if minutes > 0 else 0
 
         games = p.get("games") or 0
-        minutes_ratio.append(minutes / (games * 90) if games > 0 else 0)
+        minutes_ratio[i] = minutes / (games * 90) if games > 0 else 0
 
-    norm_ppp = _minmax_normalize(points_per_price)
-    norm_trend = _minmax_normalize(trend)
-    norm_xg90 = _minmax_normalize(xg90)
-    norm_minutes = _minmax_normalize(minutes_ratio)
+    groups_idx: dict = {}
+    for i, p in enumerate(raw_players):
+        groups_idx.setdefault(p.get("position"), []).append(i)
+
+    norm_ppp = [0.0] * n
+    norm_trend = [0.0] * n
+    norm_xg90 = [0.0] * n
+    norm_minutes = [0.0] * n
+
+    for idxs in groups_idx.values():
+        group_ppp = _minmax_normalize([points_per_price[i] for i in idxs])
+        group_trend = _minmax_normalize([trend[i] for i in idxs])
+        group_xg90 = _minmax_normalize([xg90[i] for i in idxs])
+        group_minutes = _minmax_normalize([minutes_ratio[i] for i in idxs])
+        for j, i in enumerate(idxs):
+            norm_ppp[i] = group_ppp[j]
+            norm_trend[i] = group_trend[j]
+            norm_xg90[i] = group_xg90[j]
+            norm_minutes[i] = group_minutes[j]
 
     normalized = []
     for i, p in enumerate(raw_players):

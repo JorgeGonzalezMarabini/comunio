@@ -289,6 +289,29 @@ elegir alineación (el precio de un jugador ya en tu plantilla es coste
 hundido, no debe influir en quién juega) — ver `config.EVALUATOR_WEIGHTS`
 vs `config.LINEUP_EVALUATOR_WEIGHTS`.
 
+## La posición sí importa al puntuar: xG se normaliza por posición
+
+Arreglado 2026-08-17 (ya estaba señalado como TODO desde el principio,
+nunca se había corregido): la fórmula de puntos real de Futmondo premia
+cosas distintas según la posición — porteros/defensas ganan por portería
+a cero, delanteros/centrocampistas por goles/asistencias. El xG de
+Understat mide amenaza ofensiva, así que un central top tiene un xG casi
+0 no porque rinda mal, sino porque no es su función.
+
+`engine/evaluator.py:normalize_pool()` normalizaba xG (y el resto de
+features) contra **todo el pool mezclado** — porteros, defensas, medios y
+delanteros juntos —, así que un buen central siempre salía con "xg"
+normalizado cerca de 0 frente a cualquier delantero mediocre, sesgando
+sistemáticamente a la baja a defensas/porteros. Más grave todavía en
+`config.LINEUP_EVALUATOR_WEIGHTS` (peso de "xg" 0.40, el más alto de los
+cuatro, precisamente porque ahí se excluye el precio) — para decidir
+quién juega, el bot favorecía atacantes sobre defensas/porteros de forma
+artificial, no por rendimiento real.
+
+Corregido normalizando cada feature (xG, tendencia, puntos/precio,
+minutos) **dentro de su propio grupo de posición** (POR/DEF/MED/DEL) — un
+central ahora compite contra otros centrales, no contra delanteros.
+
 ## Setup local
 
 Requiere Python 3.11+ (el `venv/` de este repo, gestionado por PyCharm, usa 3.14).

@@ -53,6 +53,34 @@ def test_normalize_pool_minmax_and_injury_flag():
     assert by_id["caro"]["is_injured_or_doubtful"] is False
 
 
+def test_normalize_pool_normalizes_xg_within_position_group_not_whole_pool():
+    """
+    Regresión del sesgo real señalado en el propio TODO del código
+    (arreglado 2026-08-17): comparar xG de un defensa contra el de un
+    delantero en crudo penalizaba siempre a defensas/porteros (su xG real
+    es casi 0 aunque rindan de maravilla en su rol) frente a cualquier
+    delantero mediocre. Ahora cada posición se normaliza contra sus
+    propios compañeros de posición, no contra todo el mercado mezclado.
+    """
+    raw = [
+        # Dos delanteros con xG alto -- entre ellos, uno claramente mejor.
+        {"id": "del_bueno", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 12.0, "minutes_played": 900, "games": 10},
+        {"id": "del_flojo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 3.0, "minutes_played": 900, "games": 10},
+        # Dos defensas con xG mínimo (normal en su posición) -- entre ellos, uno claramente mejor.
+        {"id": "def_bueno", "position": "DEF", "price": 1_000_000, "average_points": 5.0, "xg": 0.3, "minutes_played": 900, "games": 10},
+        {"id": "def_flojo", "position": "DEF", "price": 1_000_000, "average_points": 5.0, "xg": 0.05, "minutes_played": 900, "games": 10},
+    ]
+    normalized = normalize_pool(raw)
+    by_id = {p["id"]: p for p in normalized}
+
+    # Dentro de su propio grupo, el mejor de cada posición normaliza a 1.0 -- ya
+    # no se queda aplastado cerca de 0 solo por compartir pool con delanteros.
+    assert by_id["del_bueno"]["xg"] == 1.0
+    assert by_id["del_flojo"]["xg"] == 0.0
+    assert by_id["def_bueno"]["xg"] == 1.0
+    assert by_id["def_flojo"]["xg"] == 0.0
+
+
 def test_normalize_pool_handles_tied_values_without_crash():
     # Rango 0 en todas las features -> no debe dividir por cero
     raw = [{"id": "a", "price": 1_000_000, "average_points": 5.0}, {"id": "b", "price": 1_000_000, "average_points": 5.0}]
