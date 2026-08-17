@@ -16,7 +16,7 @@ seguir siendo válido, no por descuido.
 
 ## Estado actual
 
-- [x] Captura de endpoints reales de Futmondo — hecha el 2026-08-17 con Chrome DevTools sobre una liga de prueba real ("Liga de prueba bot", modo Social, creada para la propia sesión de captura)
+- [x] Captura de endpoints reales de Futmondo — hecha el 2026-08-17 con Chrome DevTools sobre una liga de prueba real ("Liga de prueba bot", modo Social, creada para la propia sesión de captura). **Ojo**: la plantilla de esa liga de prueba resultó ser toda de equipos de Premier League (confirmado el mismo día revisando `players.team` en la BD), no de LaLiga — irrelevante para todo lo que ya usa `league="La_liga"` (Understat, Fotmob) mientras la liga REAL de destino sea LaLiga (confirmado con el usuario), pero explica por qué una prueba en vivo de `manage_substitutes.py` contra esta liga de prueba no encuentra nunca partidos de LaLiga para estos jugadores.
 - [x] Cliente de Futmondo (`clients/futmondo_client.py`) — lectura (plantilla/mercado/alineación/ficha de jugador) y escritura (pujar, poner en venta, cambiar alineación) contra endpoints reales, cada uno marcado explícitamente como confirmado con captura propia o heredado sin verificar de la referencia comunitaria (ver detalle abajo)
 - [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — sin cambios frente a la fase de Comunio: Understat contra su endpoint JSON real; FBref descartado (bloquea con Cloudflare)
 - [x] Esquema de base de datos (`db/models.py`) — reescrito para los campos reales de Futmondo (`value`/`buyPrice`/`role` en vez de `quotedprice`/`purchaseInfo`/posición en inglés)
@@ -258,15 +258,37 @@ de peticiones/día, a diferencia de API-Football).
 Detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**) — sin
 key ni cuenta que configurar, a diferencia de API-Football.
 
-**TODO sin confirmar todavía**: el momento EXACTO en que `lineupType` pasa
-de `"predicted"` a `"standard"` antes del pitido inicial (documentado en
-otras fuentes como ~1h antes, pero no observado en vivo aquí — el partido
-más cercano al pitido que se probó seguía en `"predicted"` con 2h20min por
-delante); y la estabilidad a medio plazo de Fotmob, una API no oficial sin
-contrato ni SLA igual que SofaScore — hoy responde sin bloqueo, pero
-podría empezar a bloquear sin aviso en cualquier momento. Un fallo de esta
-fuente extra (eso, red, cambio de forma de la respuesta...) no tumba la
-comprobación por lesión — `manage_substitutes.py` avisa por Telegram y
+**CONFIRMADO en vivo el mismo día (2026-08-17)**, con un monitor que
+consultó `matchDetails` cada 5 min hasta el pitido: para Deportivo A
+Coruña vs Elche (19:00 UTC), `lineupType` pasó de `"predicted"` a
+`"standard"` a las **18:19 UTC — 41 minutos antes del pitido**. En ese
+momento se ejecutó `jobs/manage_substitutes.py` de verdad (con
+`ENABLE_SUBSTITUTE_AUTO_SUBMIT=false`, solo auditoría/notificación, sin
+escribir en Futmondo) y terminó sin errores. No se pudo validar la
+decisión de sustitución en sí porque la plantilla usada era la liga de
+prueba (equipos de Premier League, no LaLiga — ver nota más abajo), pero
+sí quedó confirmado que la consulta a Fotmob, la caché en
+`real_lineup_checks` y el resto del flujo funcionan de punta a punta sin
+fallar.
+
+Con un solo dato de muestra no se sabe si 41 min es representativo o un
+caso particular de este partido — pero **41 min ya deja claro que la
+cadencia de 2h del cron era insuficiente**: un hueco de 2h entre
+ejecuciones podía dejar pasar TODA la ventana entre "ya se sabe quién
+juega" y "el partido ya empezó" sin que el job la viera. Por eso
+`manage_substitutes.yml` pasó de `0 */2 * * 5,6,0,1` (cada 2h) a
+`*/20 10-23 * * 5,6,0,1` (cada 20 min, 10:00-23:00 UTC) — un valor
+conservador mientras se acumulan más casos reales, no uno calibrado con
+varios partidos.
+
+**TODO sin confirmar todavía**: si 41 min antes es representativo de
+LaLiga en general (un solo dato no basta) — con más casos reales podría
+ajustarse la cadencia de nuevo, hacia arriba o hacia abajo; y la
+estabilidad a medio plazo de Fotmob, una API no oficial sin contrato ni
+SLA igual que SofaScore — hoy responde sin bloqueo, pero podría empezar a
+bloquear sin aviso en cualquier momento. Un fallo de esta fuente extra
+(eso, red, cambio de forma de la respuesta...) no tumba la comprobación
+por lesión — `manage_substitutes.py` avisa por Telegram y
 sigue solo con `is_injury_status()`.
 
 **IMPORTANTE — el suplente colocado no hace nada por sí solo**: según la

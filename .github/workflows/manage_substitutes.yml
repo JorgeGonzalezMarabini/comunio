@@ -3,11 +3,23 @@ name: manage_substitutes
 on:
   workflow_dispatch: {}
   schedule:
-    # Cada 2h, viernes a lunes (días de partido en la mayoría de jornadas
-    # de LaLiga) -- ajustar al calendario real de la liga de destino. A
-    # diferencia del resto de jobs, este necesita correr varias veces
-    # durante la jornada, no una vez: ver docstring de jobs/manage_substitutes.py.
-    - cron: "0 */2 * * 5,6,0,1"
+    # Cada 20 min, 10:00-23:00 UTC, viernes a lunes (días y horas de
+    # partido en la mayoría de jornadas de LaLiga) -- ajustar al
+    # calendario real de la liga de destino. A diferencia del resto de
+    # jobs, este necesita correr varias veces durante la jornada, no una
+    # vez: ver docstring de jobs/manage_substitutes.py.
+    #
+    # Antes cada 2h (`0 */2 * * 5,6,0,1`) -- CONFIRMADO insuficiente con un
+    # caso real (2026-08-17, ver README "Banquillo/suplentes"): Fotmob
+    # confirmó la alineación real de un partido solo 41 min antes del
+    # pitido, así que un hueco de 2h entre ejecuciones podía dejar pasar
+    # TODA la ventana entre "ya se sabe quién juega" y "el partido ya
+    # empezó" sin que el job la viera. Con un solo dato de muestra no se
+    # sabe si 41 min es representativo o casual -- 20 min es un valor
+    # conservador mientras se acumulan más casos reales, no uno calibrado.
+    # Limitado a 10:00-23:00 UTC (no las 24h) para no gastar minutos de
+    # Actions de madrugada, cuando LaLiga no juega.
+    - cron: "*/20 10-23 * * 5,6,0,1"
 
 permissions:
   contents: write
