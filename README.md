@@ -173,9 +173,15 @@ específicamente para banquillo, solo para titulares.
 la sustitución real de un titular que no juega (0 minutos) por su suplente
 de la misma posición la hace el **"entrenador automático"** — una función
 APARTE, de pago (1.000 mondos/jornada, gratis en modo PRO), que no está
-activada por defecto. Sin ella, el suplente que coloca `set_lineup.py` es
-decorativo: si un titular no juega, nadie entra a sustituirlo salvo que
-alguien —o el bot— lo haga a mano.
+activada por defecto. `GET .../lineup` de la liga de prueba usada en esta
+sesión devuelve `"bench": {"enabled": true, "automatic": false, ...}` —
+con `automatic: false`, el suplente que coloca el bot es decorativo: si un
+titular no juega, nadie entra a sustituirlo. **TODO sin investigar
+todavía**: si se puede activar el entrenador automático vía API (¿toggle
+en algún endpoint de configuración?), y si la liga real de destino es
+PRO (gratis) o tocaría gestionar mondos — sin esto, `pick_substitutes()`/
+`build_bench_changes()` calculan y envían el suplente correcto, pero no
+garantizan que llegue a jugar nunca.
 
 **`jobs/manage_substitutes.py` — sustitución manual** (añadido 2026-08-17,
 a petición del usuario: la liga privada de destino no tiene activado el

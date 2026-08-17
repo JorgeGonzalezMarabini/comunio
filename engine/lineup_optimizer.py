@@ -219,6 +219,17 @@ def pick_lineup(squad: list[dict], formation: str = None) -> dict:
 # `isBench: true`. Solo hay sitio para UN suplente por posición (no una
 # lista, igual que en Comunio en su momento) — Futmondo no deja añadir un
 # segundo suplente de la misma categoría mientras el primero siga ahí.
+#
+# IMPORTANTE — colocar al suplente aquí NO basta para que sirva de algo:
+# según la FAQ oficial (https://help.futmondo.com/article/159-entrenador-automatico),
+# la sustitución real de un titular que no juega por su suplente la hace
+# el "entrenador automático", una función APARTE y de pago (1.000
+# mondos/jornada, gratis en modo PRO), que no está activada por defecto
+# — `GET .../lineup` de la liga de prueba usada en esta sesión devuelve
+# `"bench": {"enabled": true, "automatic": false, ...}`. Sin
+# `automatic: true`, el suplente que coloca este módulo es decorativo. NO
+# investigado todavía si se puede activar vía API ni si haría falta
+# gestionar mondos para ello.
 BENCH_SLOT_BY_POSITION = {"MED": 0, "DEL": 1, "POR": 2, "DEF": 3}
 
 
