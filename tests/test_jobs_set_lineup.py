@@ -161,6 +161,86 @@ def test_set_lineup_partial_failure_is_not_reported_as_fully_sent(tmp_db, monkey
     assert row["submitted_to_futmondo"] == 0  # a medias NO cuenta como enviada
 
 
+def _add_bench_candidates(conn):
+    """
+    Añade 4 jugadores más (uno por posición) con peor `average_points` que
+    los titulares de _seed_squad_11 -- garantiza que queden en el
+    banquillo, no como titulares, para poder probar pick_substitutes()/
+    build_bench_changes() end-to-end en jobs/set_lineup.py.
+    """
+    extras = [("3001", "POR"), ("3002", "DEF"), ("3010", "MED"), ("3020", "DEL")]
+    for pid, position in extras:
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", (pid, f"J{pid}", "Equipo", position, NOW))
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, last_points, average_points, on_market, status, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
+            (pid, 500_000, 5, 1, 1.0, 0, "", NOW),  # average_points=1.0 < 2.0 de los titulares -- se van al banquillo
+        )
+    return [pid for pid, _ in extras]
+
+
+def test_set_lineup_picks_and_reports_substitutes(tmp_db, monkeypatch):
+    """
+    Con más de 11 jugadores disponibles, debe elegir un suplente por
+    posición (ver engine.lineup_optimizer.pick_substitutes) y reportarlo
+    en la notificación -- CONFIRMADO al 100% que Futmondo solo tiene sitio
+    para uno por posición (ver README/docstring del módulo).
+    """
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", False)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+        bench_ids = _add_bench_candidates(conn)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in squad_ids + bench_ids]}
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()
+
+    assert "Suplentes: MED: J3010, DEL: J3020, POR: J3001, DEF: J3002" in captured[0]
+
+
+def test_set_lineup_submits_bench_changes_with_isbench_true(tmp_db, monkeypatch):
+    """Con ENABLE_LINEUP_AUTO_SUBMIT=True, los suplentes se mandan con isBench=true y el slot fijo confirmado."""
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", True)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+        bench_ids = _add_bench_candidates(conn)
+
+    calls = []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in squad_ids + bench_ids]}
+
+        def get_lineup(self):
+            return {"answer": {"strategy": "4-4-2", "players": [], "bench": {"players": []}}}
+
+        def change_lineup(self, changes):
+            calls.append(changes)
+            return [{"change": c, "ok": True, "answer_or_error": {"code": "api.general.ok"}} for c in changes]
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()
+
+    changes = calls[0]
+    assert len(changes) == 15  # 11 titulares + 4 suplentes
+    bench_changes = [c for c in changes if c["isBench"]]
+    assert len(bench_changes) == 4
+    by_id = {c["to"]: c for c in bench_changes}
+    assert by_id["3001"]["position"] == 2  # POR
+    assert by_id["3002"]["position"] == 3  # DEF
+    assert by_id["3010"]["position"] == 0  # MED
+    assert by_id["3020"]["position"] == 1  # DEL
+    assert "Enviada a Futmondo (15/15 cambios aplicados)" in captured[0]
+
+
 def test_set_lineup_submit_failure_is_audited_without_crashing(tmp_db, monkeypatch):
     """Un fallo al enviar (HTTP o rechazo de negocio) no debe tumbar la auditoría de la decisión."""
     monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", True)

@@ -32,10 +32,12 @@ rechaza el cambio con `"api.error.not_allowed"`. Por eso este job SIEMPRE
 lee `client.get_lineup()` antes de construir los cambios: sin saber qué
 hay ya en cada slot, no se puede rellenar `"from"` cuando hace falta.
 
-De momento solo se manda el once titular, sin banquillo/suplentes: la
-numeración de esos slots no se ha confirmado con ninguna prueba real (ver
-TODO en engine/lineup_optimizer.py) — más seguro omitirlos que adivinar y
-mandar algo que Futmondo podría rechazar o interpretar mal en silencio.
+También manda el banquillo/suplentes: un slot FIJO por posición (ver
+`engine.lineup_optimizer.BENCH_SLOT_BY_POSITION`), CONFIRMADO AL 100%
+(2026-08-17, los 4 añadidos uno a uno desde la web + relectura con
+get_lineup() confirmando la posición numérica de cada uno). Solo se
+manda un suplente por posición (no una lista) porque Futmondo solo tiene
+sitio para eso.
 """
 import json
 from datetime import datetime, timezone
@@ -45,7 +47,7 @@ from clients.futmondo_client import FutmondoClient
 from clients.laliga_stats_client import get_league_data, next_match_difficulty
 from db.models import get_connection, get_player_features
 from engine.evaluator import evaluate_players
-from engine.lineup_optimizer import apply_fixture_difficulty, build_lineup_changes, pick_lineup
+from engine.lineup_optimizer import apply_fixture_difficulty, build_bench_changes, build_lineup_changes, pick_lineup, pick_substitutes
 from engine.squad_risk import assess_squad_depth, depth_warnings
 from notifier import notify
 
@@ -98,9 +100,17 @@ def run():
         f"{by_id[pid]['name']} ({by_id[pid]['position']}, expected_score={by_id[pid]['expected_score']:.3f})"
         for pid in lineup["starters"]
     ]
+
+    bench_players = [p for p in adjusted if p["id"] in lineup["bench"]]
+    substitutes_by_position = pick_substitutes(bench_players)
+    substitutes_summary = [
+        f"{pos}: {by_id[pid]['name']}" for pos, pid in substitutes_by_position.items() if pid is not None
+    ]
+
     reason = (
         f"Formación {lineup['formation']}, elegidos por expected_score "
         f"(evaluator + dificultad del próximo rival): " + "; ".join(starters_summary)
+        + ". Suplentes: " + (", ".join(substitutes_summary) if substitutes_summary else "ninguno disponible")
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -111,9 +121,13 @@ def run():
 
     if config.ENABLE_LINEUP_AUTO_SUBMIT:
         try:
-            current_lineup = client.get_lineup().get("answer", {}).get("players", [])
-            current_lineup_by_position = {p["position"]: p["id"] for p in current_lineup}
+            current_lineup_answer = client.get_lineup().get("answer", {})
+            current_lineup_by_position = {p["position"]: p["id"] for p in current_lineup_answer.get("players", [])}
+            current_bench_by_position = {
+                p["position"]: p["id"] for p in current_lineup_answer.get("bench", {}).get("players", [])
+            }
             changes = build_lineup_changes(adjusted, lineup["starters"], current_lineup_by_position)
+            changes += build_bench_changes(substitutes_by_position, current_bench_by_position)
             changes_needed = len(changes)
             results = client.change_lineup(changes)
             for r in results:
@@ -133,6 +147,7 @@ def run():
         )
 
     message = [f"set_lineup: once decidido ({lineup['formation']}):"] + [f"  - {s}" for s in starters_summary]
+    message.append("Suplentes: " + (", ".join(substitutes_summary) if substitutes_summary else "ninguno disponible"))
     if config.ENABLE_LINEUP_AUTO_SUBMIT:
         if submit_error:
             message.append(f"NO enviada a Futmondo (error: {submit_error}).")

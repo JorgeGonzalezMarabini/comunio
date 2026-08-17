@@ -25,7 +25,7 @@ seguir siendo válido, no por descuido.
 - [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — **reescrito de cero**: Futmondo numera los slots de la alineación de forma totalmente distinta a Comunio (enteros 0..10 en vez de un string de posición + categoría de banquillo), confirmado solo para la formación 4-4-2 (ver TODO en el propio módulo)
 - [x] `jobs/sync_data.py` — mapeo real Futmondo + Understat -> `db/models.py`; reconcilia pujas/ventas comparando plantilla y mercado actuales (sin endpoint externo de "mis ofertas", a diferencia de Comunio — ver sección dedicada); cruce con Understat por cascada de fiabilidad (nombre completo -> apellido+equipo -> apellido único -> similitud de texto), no solo nombre exacto — ver sección dedicada
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
-- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()` -> `change_lineup()` real. Por ahora solo manda el once titular, sin banquillo (ver TODO)
+- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
 - [~] Jobs y scheduler en GitHub Actions — los 4 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
@@ -148,8 +148,24 @@ verdad y se confirme igual que se hizo con 4-4-2. (Nota: `FORMATIONS`
 tenía antes `4-3-3`/`3-4-3`/`5-3-2`, heredadas sin querer de la fase de
 Comunio — ninguna de esas tres existe en Futmondo.)
 
-Tampoco se ha probado el banquillo/suplentes: `jobs/set_lineup.py` de
-momento solo manda el once titular.
+**Banquillo/suplentes — CONFIRMADO AL 100%** (2026-08-17, los 4 añadidos
+uno a uno desde la pestaña "Suplentes" de la web, interceptando cada POST
+real + relectura con `GET .../lineup` confirmando la posición numérica de
+cada uno en `bench.players`): a diferencia de los titulares, aquí hay un
+slot FIJO por posición (no depende de la formación ni cambia de una
+semana a otra):
+
+```
+0 = MED, 1 = DEL, 2 = POR, 3 = DEF   (con "isBench": true)
+```
+
+Solo hay sitio para **un** suplente por posición (no una lista) — igual
+que en Comunio en su momento. `jobs/set_lineup.py` ya elige y manda un
+suplente por posición (`engine.lineup_optimizer.pick_substitutes()` +
+`build_bench_changes()`), con el mismo criterio de "from"/no repetir
+cambios ya aplicados que los titulares (ver arriba) — aunque ese criterio
+en concreto (sustituir un suplente ya puesto) no se ha probado en vivo
+específicamente para banquillo, solo para titulares.
 
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en

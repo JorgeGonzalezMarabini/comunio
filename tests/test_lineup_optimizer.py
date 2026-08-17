@@ -1,10 +1,13 @@
 import pytest
 
 from engine.lineup_optimizer import (
+    BENCH_SLOT_BY_POSITION,
     LINEUP_SLOT_POSITION_ORDER,
     apply_fixture_difficulty,
+    build_bench_changes,
     build_lineup_changes,
     pick_lineup,
+    pick_substitutes,
 )
 
 
@@ -171,6 +174,56 @@ def test_build_lineup_changes_keeps_unchanged_starters_in_their_current_slot():
     assert changes[0]["to"] == "def_nuevo"
     assert changes[0]["from"] == "def3"
     assert changes[0]["position"] == 9  # el slot que ocupaba def3
+
+
+# --- Banquillo: pick_substitutes() / build_bench_changes() ---
+#
+# CONFIRMADO AL 100% (2026-08-17): un slot FIJO por posición
+# (0=MED, 1=DEL, 2=POR, 3=DEF), no una lista -- ver docstring del módulo.
+
+
+def test_bench_slot_by_position_is_fixed_mapping():
+    assert BENCH_SLOT_BY_POSITION == {"MED": 0, "DEL": 1, "POR": 2, "DEF": 3}
+
+
+def test_pick_substitutes_takes_best_scored_per_position():
+    bench = [
+        {"id": "def_bueno", "position": "DEF", "expected_score": 0.8},
+        {"id": "def_malo", "position": "DEF", "expected_score": 0.2},
+        {"id": "med_unico", "position": "MED", "expected_score": 0.5},
+        # sin nadie en POR ni DEL en el banquillo esta semana
+    ]
+    substitutes = pick_substitutes(bench)
+    assert substitutes == {"POR": None, "DEF": "def_bueno", "MED": "med_unico", "DEL": None}
+
+
+def test_build_bench_changes_uses_fixed_slots_and_skips_missing_positions():
+    substitutes = {"POR": None, "DEF": "def_bueno", "MED": "med_unico", "DEL": None}
+    changes = build_bench_changes(substitutes)
+
+    assert len(changes) == 2  # POR y DEL sin candidato -- no generan change
+    by_id = {c["to"]: c for c in changes}
+    assert by_id["def_bueno"]["position"] == 3
+    assert by_id["med_unico"]["position"] == 0
+    for change in changes:
+        assert change["isBench"] is True
+        assert change["cpt"] is False
+        assert change["multiposition"] is False
+        assert "from" not in change  # banquillo vacío antes -- ver siguiente test para el caso ocupado
+
+
+def test_build_bench_changes_includes_from_and_skips_already_correct():
+    substitutes = {"POR": None, "DEF": "def_bueno", "MED": "med_unico", "DEL": None}
+    # DEF (slot 3) ya tiene a otro jugador -- debe llevar "from".
+    # MED (slot 0) ya tiene exactamente a "med_unico" -- no debe generar change.
+    current_bench_by_position = {3: "def_viejo", 0: "med_unico"}
+
+    changes = build_bench_changes(substitutes, current_bench_by_position)
+
+    assert len(changes) == 1
+    assert changes[0]["to"] == "def_bueno"
+    assert changes[0]["from"] == "def_viejo"
+    assert changes[0]["position"] == 3
 
 
 def test_apply_fixture_difficulty_discounts_score_for_hard_opponent():

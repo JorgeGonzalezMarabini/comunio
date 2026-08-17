@@ -123,11 +123,8 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
     alineación actual), se asume que todos los slots están vacíos —
     jobs/set_lineup.py siempre debería pasarlo cuando pueda.
 
-    No incluye banquillo/suplentes: la numeración de esos slots no se ha
-    confirmado con ninguna prueba real (ver docstring del módulo) — de
-    momento jobs/set_lineup.py solo manda los titulares, más seguro que
-    adivinar y mandar algo que Futmondo podría rechazar o, peor,
-    interpretar mal en silencio.
+    No incluye banquillo/suplentes — ver build_bench_changes() más abajo,
+    con su propia numeración (fija, no depende de la formación).
     """
     current_lineup_by_position = current_lineup_by_position or {}
     by_id = {p["id"]: p for p in players}
@@ -207,3 +204,77 @@ def pick_lineup(squad: list[dict], formation: str = None) -> dict:
         "starters": [p["id"] for p in starters],
         "bench": [p["id"] for p in bench],
     }
+
+
+# Banquillo: UN slot FIJO por categoría de posición, que NO depende de la
+# formación ni de cuántos titulares haya de cada tipo — CONFIRMADO AL 100%
+# (2026-08-17, los 4 suplentes añadidos uno a uno desde la pestaña
+# "Suplentes" de la web, interceptando cada POST real a
+# /2/userteam/changeplayer + relectura con GET /1/userteam/lineup
+# confirmando la posición numérica de cada uno en `bench.players`):
+#   0 = MED, 1 = DEL, 2 = POR, 3 = DEF
+# A diferencia de los titulares (numeración consecutiva que sí depende de
+# la formación), esto son siempre estos 4 números fijos, con
+# `isBench: true`. Solo hay sitio para UN suplente por posición (no una
+# lista, igual que en Comunio en su momento) — Futmondo no deja añadir un
+# segundo suplente de la misma categoría mientras el primero siga ahí.
+BENCH_SLOT_BY_POSITION = {"MED": 0, "DEL": 1, "POR": 2, "DEF": 3}
+
+
+def pick_substitutes(bench_players: list[dict]) -> dict:
+    """
+    Elige, de entre `bench_players` (los NO titulares de pick_lineup() —
+    con "id"/"position"/"expected_score"), el mejor suplente por categoría
+    de posición: Futmondo solo tiene UN slot de banquillo por posición
+    (ver BENCH_SLOT_BY_POSITION), no una lista donde meter a varios.
+
+    Devuelve {"POR": id_o_None, "DEF": ..., "MED": ..., "DEL": ...} — None
+    si no queda ningún jugador de esa posición en el banquillo (normal:
+    p.ej. si todos los defensas de la plantilla son titulares esta semana,
+    no hay nadie con quien rellenar el suplente de defensa).
+    """
+    substitutes = {}
+    for position in BENCH_SLOT_BY_POSITION:
+        candidates = sorted(
+            (p for p in bench_players if p["position"] == position),
+            key=lambda p: p["expected_score"],
+            reverse=True,
+        )
+        substitutes[position] = candidates[0]["id"] if candidates else None
+    return substitutes
+
+
+def build_bench_changes(substitutes_by_position: dict, current_bench_by_position: dict = None) -> list[dict]:
+    """
+    Construye la lista `changes` (mismo shape que build_lineup_changes())
+    para el banquillo, con la numeración FIJA confirmada
+    (BENCH_SLOT_BY_POSITION) e `isBench: true`.
+
+    `substitutes_by_position`: la salida de pick_substitutes() — las
+    entradas con valor `None` (sin candidato para esa posición) se
+    ignoran, no generan ningún `change`.
+
+    `current_bench_by_position` (opcional): {position: player_id_actual},
+    el banquillo YA guardado (ver `FutmondoClient.get_lineup()["answer"]
+    ["bench"]["players"]`). Igual que en build_lineup_changes(): si el
+    slot ya tiene exactamente ese jugador, no se genera `change`; si tiene
+    uno DISTINTO, se incluye `"from"`. Esto no se ha probado en vivo
+    específicamente para banquillo (solo se probó rellenar slots vacíos),
+    pero es el mismo endpoint con el mismo shape que para titulares, donde
+    sí está confirmado — razonable esperar el mismo comportamiento, sin
+    darlo por 100% confirmado todavía.
+    """
+    current_bench_by_position = current_bench_by_position or {}
+    changes = []
+    for position, player_id in substitutes_by_position.items():
+        if player_id is None:
+            continue
+        slot = BENCH_SLOT_BY_POSITION[position]
+        current_occupant = current_bench_by_position.get(slot)
+        if current_occupant == player_id:
+            continue
+        change = {"cpt": False, "to": player_id, "position": slot, "isBench": True, "multiposition": False}
+        if current_occupant is not None:
+            change["from"] = current_occupant
+        changes.append(change)
+    return changes
