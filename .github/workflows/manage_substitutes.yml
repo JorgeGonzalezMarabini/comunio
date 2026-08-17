@@ -46,6 +46,16 @@ jobs:
           # ninguna key/Secret. Sin activar, este job se comporta igual que
           # sin esta fuente (solo is_injury_status()).
           ENABLE_REAL_LINEUP_CHECK: ${{ vars.ENABLE_REAL_LINEUP_CHECK }}
+          # Activado por decisión explícita del usuario (2026-08-17, ver
+          # README "Banquillo/suplentes") tras confirmar en vivo que
+          # build_substitution_changes()/Fotmob funcionan de punta a punta
+          # -- necesario además para que el propio mecanismo de "vuelve a
+          # leer Futmondo" evite notificar/auditar la misma sustitución en
+          # cada pasada (cron cada 20 min). La secuencia de las dos
+          # llamadas HTTP reales de la sustitución en sí sigue sin haberse
+          # probado todavía con un caso real (cero lesionados/rotados
+          # disponibles hasta la fecha).
+          ENABLE_SUBSTITUTE_AUTO_SUBMIT: ${{ vars.ENABLE_SUBSTITUTE_AUTO_SUBMIT }}
       # substitution_decisions queda registrado en db/futmondo.db (auditoría) --
       # sin este paso se perdería al terminar el run. Ver nota en sync_data.yml.
       - name: Commit BD actualizada

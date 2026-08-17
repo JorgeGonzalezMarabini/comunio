@@ -27,7 +27,7 @@ seguir siendo válido, no por descuido.
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
-- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); detrás de `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` (**false por defecto**, sin confirmar todavía con una sustitución real)
+- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` **activado** desde el 2026-08-17 (decisión explícita del usuario), aunque la secuencia de sustitución en sí sigue sin confirmarse todavía con un caso real
 - [x] Cliente de alineaciones reales (`clients/football_lineups_client.py`, Fotmob) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); Fotmob elegida tras descartar en vivo API-Football (plan gratuito sin acceso a temporada en curso), SofaScore (403 en todo, bloqueo de bot a nivel de borde igual que FBref), ESPN (403 Akamai) y TheSportsDB (datos de alineación corruptos); detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**, sin key ni cuenta que configurar) — ver sección "Banquillo/suplentes" para el TODO pendiente (timing exacto de confirmación, estabilidad a medio plazo de una API no oficial)
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
@@ -320,14 +320,30 @@ pareja de `changes` que los intercambia
 (`engine.lineup_optimizer.build_substitution_changes()`). Se apoya en la
 regla ya confirmada de `change_lineup()` (entrar desde el banquillo siempre
 funciona, nunca desde otro slot del campo), pero la secuencia completa —dos
-llamadas HTTP reales, una detrás de otra— **no se ha probado todavía con
-una lesión real** (pretemporada, cero lesionados en la liga de prueba) —
-por eso `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` es `false` por defecto (más
-conservador que `ENABLE_LINEUP_AUTO_SUBMIT`). Cada sustitución decidida se
-audita en `substitution_decisions` pase lo que pase con el envío. A
-diferencia del resto de jobs, solo notifica por Telegram cuando hay algo
-que decidir (o algo anómalo) — con la frecuencia con la que está pensado
-correr, notificar "nada que hacer" en cada ejecución sería ruido.
+llamadas HTTP reales, una detrás de otra— **sigue sin haberse probado
+todavía con un caso real** (cero lesionados/rotados disponibles hasta la
+fecha). Cada sustitución decidida se audita en `substitution_decisions`
+pase lo que pase con el envío. A diferencia del resto de jobs, solo
+notifica por Telegram cuando hay algo que decidir (o algo anómalo) — con
+la frecuencia con la que está pensado correr, notificar "nada que hacer"
+en cada ejecución sería ruido.
+
+**`config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` — activado el 2026-08-17, decisión
+explícita del usuario** (por defecto seguía siendo `false` en el código,
+más conservador que `ENABLE_LINEUP_AUTO_SUBMIT`, activado vía `.env`/
+Variable de GitHub Actions): imprescindible además una vez el cron pasó a
+cada 20 min (ver arriba) — el job decide comparando contra la alineación
+REAL actual de Futmondo, no contra un registro propio de "ya sustituí a
+X", así que con el flag en `false` nunca cambia nada en Futmondo entre
+pasadas y **cada ejecución (cada 20 min) vuelve a detectar la misma
+situación y a notificar de nuevo** — con el flag activado, en cambio, una
+vez la sustitución se aplica de verdad el titular ya no aparece en el
+campo en la siguiente lectura, así que deja de re-detectarse por sí solo
+sin necesitar ningún dedup adicional. Riesgo aceptado explícitamente por
+el usuario: la secuencia de dos llamadas seguía sin confirmarse con un
+caso real en el momento de activarlo — cualquier fallo parcial (ver
+docstring de `build_substitution_changes()`) queda igualmente auditado en
+`substitution_decisions`, no oculto.
 
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en
@@ -563,14 +579,18 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
    vuelta al repo al terminar (si no, cada ejecución perdería lo
    sincronizado en la anterior).
 
-**Antes de apuntar esto a la liga real** (no la de pruebas creada durante
-la sesión de captura): revisar unos días de ejecución primero, y tener en
-cuenta que `ENABLE_LINEUP_AUTO_SUBMIT=true` por defecto — el bot escribirá
-de verdad, sin confirmación manual, en cuanto el cron esté activo.
-`ENABLE_SUBSTITUTE_AUTO_SUBMIT` en cambio es `false` por defecto (ver
-sección "Banquillo/suplentes") — activarlo solo después de confirmar la
-secuencia de sustitución con un caso real. El mapeo de alineación solo
-está confirmado para 4-4-2 (ver sección de
+**Ya apuntado a la liga real** (2026-08-17: `FUTMONDO_CHAMPIONSHIP_ID`/
+`FUTMONDO_USERTEAM_ID` actualizados en `.env` y GitHub a la liga real; la
+liga de pruebas de la sesión de captura queda solo en el historial de
+commits). `db/futmondo.db` se limpió y se repobló contra la liga real ese
+mismo día. Tener en cuenta que `ENABLE_LINEUP_AUTO_SUBMIT=true` por
+defecto — el bot escribe de verdad, sin confirmación manual, en cuanto el
+cron está activo. `ENABLE_SUBSTITUTE_AUTO_SUBMIT` también se activó ese
+día (decisión explícita del usuario, ver sección "Banquillo/suplentes")
+**sin haber confirmado todavía la secuencia de sustitución con un caso
+real** — riesgo aceptado a propósito, no un descuido: era necesario para
+que el cron a 20 min no repitiera la misma notificación cada pasada. El
+mapeo de alineación solo está confirmado para 4-4-2 (ver sección de
 endpoints) — si la liga real usa otra formación, conviene desactivar
 `ENABLE_LINEUP_AUTO_SUBMIT` hasta confirmarlo con una prueba real, o
 revisar `lineup_decisions` a mano un tiempo antes de fiarse del envío
