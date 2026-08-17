@@ -167,7 +167,36 @@ def build_player_index(league_data: dict) -> dict:
     return {"by_full_name": by_full_name, "by_team_and_surname": by_team_and_surname, "by_surname": by_surname, "all": players}
 
 
-def match_player(name: str, team: str, index: dict, fuzzy_threshold: float = 0.75) -> tuple[dict | None, str]:
+# Understat combina varios códigos de posición separados por espacio para
+# jugadores polivalentes (ej. "F M S" = delantero y centrocampista; "S" no
+# es una posición, es un marcador de "suplente habitual" que Understat
+# añade a veces, se ignora sin más porque no está en este mapa). Ver
+# docstring de get_league_data().
+_UNDERSTAT_POSITION_TO_SHORT = {"GK": "POR", "D": "DEF", "M": "MED", "F": "DEL"}
+
+
+def _position_is_compatible(short_position: str | None, understat_position: str | None) -> bool:
+    """
+    Comprueba si `short_position` (POR/DEF/MED/DEL, la convención interna
+    del bot — ver clients.futmondo_client.FUTMONDO_POSITION_MAP) es
+    compatible con el/los código(s) de posición de Understat. Un jugador
+    polivalente en Understat encaja si CUALQUIERA de sus códigos coincide
+    — no se exige que la posición "principal" de Futmondo sea la primera
+    que liste Understat, ambas fuentes pueden priorizar de forma distinta.
+
+    Si falta el dato de cualquiera de los dos lados, devuelve True (no se
+    puede usar como filtro sin dato con el que comparar — no bloquea el
+    match por esto, es un refuerzo, no un requisito nuevo).
+    """
+    if not short_position or not understat_position:
+        return True
+    codes = {_UNDERSTAT_POSITION_TO_SHORT.get(tok) for tok in understat_position.split()}
+    return short_position in codes
+
+
+def match_player(
+    name: str, team: str, index: dict, position: str = None, fuzzy_threshold: float = 0.75
+) -> tuple[dict | None, str]:
     """
     Busca el jugador de Understat que mejor corresponde a `name`/`team` (los
     que devuelve Futmondo — ver jobs/sync_data.py), probando estrategias de
@@ -175,6 +204,16 @@ def match_player(name: str, team: str, index: dict, fuzzy_threshold: float = 0.7
     inequívoco. Nunca "adivina" si hay ambigüedad real: mejor dejar a un
     jugador sin cruzar (sus columnas de Understat quedan NULL esa sync) que
     cruzarlo mal y contaminar su score con las stats de otro jugador.
+
+    `position` (opcional, POR/DEF/MED/DEL): si se pasa, se exige además que
+    sea compatible con la posición de Understat (ver
+    `_position_is_compatible()`) en las DOS estrategias menos fiables
+    ("surname_unique" y "fuzzy") — un desempate barato que no necesita
+    ningún dato nuevo (ya se calcula la posición corta al ingerir cada
+    jugador, ver jobs/sync_data.py). No se aplica a "exact"/"surname+team"
+    porque esas dos ya son suficientemente fiables por sí solas y un dato
+    de posición desactualizado en cualquiera de las dos fuentes podría
+    rechazar un cruce bueno sin necesidad.
 
     Devuelve `(jugador_o_None, estrategia)` — la estrategia es solo para
     poder auditar/loggear de qué nivel de confianza salió cada cruce (ver
@@ -191,14 +230,16 @@ def match_player(name: str, team: str, index: dict, fuzzy_threshold: float = 0.7
       3. "surname_unique": igual que el anterior pero sin poder confirmar
          equipo (los nombres de equipo de las dos fuentes no coinciden en
          texto, o Futmondo no trae equipo) — solo se acepta si ese apellido
-         es único en TODA la liga, para no arriesgarse a mezclar a dos
-         jugadores homónimos de equipos distintos.
+         es único en TODA la liga Y (si se pasó `position`) la posición es
+         compatible, para no arriesgarse a mezclar a dos jugadores
+         homónimos de equipos distintos.
       4. "fuzzy": similitud de texto (`difflib.SequenceMatcher`) contra los
          jugadores del MISMO equipo — aceptado solo si el mejor candidato
-         supera `fuzzy_threshold` Y saca claramente más nota que el segundo
-         mejor candidato (margen >= 0.15), para no "adivinar" entre dos
-         apellidos parecidos del mismo equipo (ej. dos defensas con
-         apellido similar). Pensado para variantes menores de transcripción
+         supera `fuzzy_threshold`, saca claramente más nota que el segundo
+         mejor candidato (margen >= 0.15) Y (si se pasó `position`) la
+         posición es compatible, para no "adivinar" entre dos apellidos
+         parecidos del mismo equipo (ej. dos defensas con apellido
+         similar). Pensado para variantes menores de transcripción
          (guiones, apóstrofes, orden nombre/apellido) que las estrategias
          anteriores no cubren.
 
@@ -223,7 +264,9 @@ def match_player(name: str, team: str, index: dict, fuzzy_threshold: float = 0.7
     if not same_team_same_surname:
         same_surname_anywhere = index["by_surname"].get(normalized_name, [])
         if len(same_surname_anywhere) == 1:
-            return same_surname_anywhere[0], "surname_unique"
+            candidate = same_surname_anywhere[0]
+            if _position_is_compatible(position, candidate.get("position")):
+                return candidate, "surname_unique"
 
     if normalized_team:
         same_team_players = [p for p in index["all"] if _normalize(p.get("team_title", "")) == normalized_team]
@@ -234,7 +277,11 @@ def match_player(name: str, team: str, index: dict, fuzzy_threshold: float = 0.7
             scored = sorted(same_team_players, key=ratio, reverse=True)
             best_ratio = ratio(scored[0])
             runner_up_ratio = ratio(scored[1]) if len(scored) > 1 else 0.0
-            if best_ratio >= fuzzy_threshold and (best_ratio - runner_up_ratio) >= 0.15:
+            if (
+                best_ratio >= fuzzy_threshold
+                and (best_ratio - runner_up_ratio) >= 0.15
+                and _position_is_compatible(position, scored[0].get("position"))
+            ):
                 return scored[0], "fuzzy"
 
     return None, "sin_match"

@@ -179,6 +179,15 @@ fiable, y **paran en la primera que dé un resultado inequívoco**:
    clara con el segundo mejor candidato, para no "adivinar" entre dos
    apellidos parecidos del mismo equipo.
 
+Las estrategias (3) y (4) —las dos menos fiables— exigen además que la
+posición (POR/DEF/MED/DEL) sea compatible con el código de posición de
+Understat (`"GK"/"D"/"M"/"F"`, combinables para jugadores polivalentes) —
+un desempate barato que no necesita ningún dato nuevo (ya se calcula la
+posición corta al ingerir cada jugador). Se descartó cruzar por **dorsal**
+(número de camiseta), que en un principio parecía otra vía obvia:
+comprobado en vivo contra el endpoint real de Understat, ninguno de los
+600 jugadores de La Liga trae ese dato — la API simplemente no lo expone.
+
 Si ninguna da un resultado inequívoco, el jugador se queda sin cruzar esa
 sync (mejor eso que cruzarlo mal y contaminar su score con las stats de
 otro). `jobs/sync_data.py` cuenta cuántos cruces salieron de cada

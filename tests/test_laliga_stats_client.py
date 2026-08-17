@@ -91,11 +91,13 @@ def test_index_players_by_name_normalizes_accents_and_case():
 
 _LEAGUE_DATA = {
     "players": [
-        {"player_name": "Tom Cairney", "team_title": "Fulham", "id": "u1"},
-        {"player_name": "Sergio Ramos", "team_title": "Sevilla", "id": "u2"},
+        {"player_name": "Tom Cairney", "team_title": "Fulham", "id": "u1", "position": "M"},
+        {"player_name": "Sergio Ramos", "team_title": "Sevilla", "id": "u2", "position": "D"},
         {"player_name": "Diego Garcia", "team_title": "Betis", "id": "u3"},  # apellido "Garcia" repetido en otro equipo
         {"player_name": "Luis Garcia", "team_title": "Alaves", "id": "u4"},  # para forzar ambigüedad de apellido sin equipo
-        {"player_name": "Kylian Mbappe-Lottin", "team_title": "Real Madrid", "id": "u5"},
+        {"player_name": "Kylian Mbappe-Lottin", "team_title": "Real Madrid", "id": "u5", "position": "F"},
+        {"player_name": "Marc Bola", "team_title": "Watford", "id": "u6", "position": "D"},  # apellido único en la liga, para probar el filtro de posición
+        {"player_name": "Iker Solano", "team_title": "Getafe", "id": "u7"},  # apellido único, sin "position" -- para probar que el filtro no bloquea sin dato
     ]
 }
 
@@ -151,6 +153,47 @@ def test_match_player_fuzzy_catches_minor_spelling_variation():
     player, strategy = match_player("Kylian Mbappe Lottin", "Real Madrid", index)
     assert strategy == "fuzzy"
     assert player["id"] == "u5"
+
+
+def test_match_player_surname_unique_accepts_when_position_compatible():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Bola", "Watford FC", index, position="DEF")  # Understat: "D" -> DEF
+    assert strategy == "surname_unique"
+    assert player["id"] == "u6"
+
+
+def test_match_player_surname_unique_rejects_when_position_conflicts():
+    """
+    Apellido único en la liga, pero Futmondo lo da como delantero y
+    Understat lo tiene fichado como defensa -- demasiada discrepancia para
+    fiarse sin equipo con el que confirmar. Mejor no cruzar.
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Bola", "Watford FC", index, position="DEL")
+    assert player is None
+    assert strategy == "sin_match"
+
+
+def test_match_player_fuzzy_accepts_when_position_compatible():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Kylian Mbappe Lottin", "Real Madrid", index, position="DEL")  # Understat: "F" -> DEL
+    assert strategy == "fuzzy"
+    assert player["id"] == "u5"
+
+
+def test_match_player_fuzzy_rejects_when_position_conflicts():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Kylian Mbappe Lottin", "Real Madrid", index, position="POR")
+    assert player is None
+    assert strategy == "sin_match"
+
+
+def test_match_player_position_missing_on_understat_side_does_not_block():
+    """Si Understat no trae "position" para ese jugador, el filtro no debe bloquear el match -- no hay con qué comparar."""
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Solano", "Getafe FC", index, position="DEL")  # nombre de equipo no coincide -> surname_unique
+    assert strategy == "surname_unique"
+    assert player["id"] == "u7"
 
 
 def test_match_player_no_match_returns_none():

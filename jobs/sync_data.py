@@ -202,7 +202,8 @@ def run():
     def _cross_with_understat(conn, player: dict) -> None:
         if player_index is None:
             return
-        understat_player, strategy = match_player(player.get("name", ""), player.get("team", ""), player_index)
+        position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
+        understat_player, strategy = match_player(player.get("name", ""), player.get("team", ""), player_index, position=position)
         match_counts[strategy] = match_counts.get(strategy, 0) + 1
         if understat_player:
             _upsert_external_stats(conn, str(player["id"]), understat_player, season, now)
