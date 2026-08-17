@@ -65,7 +65,7 @@ def apply_fixture_difficulty(
 LINEUP_SLOT_POSITION_ORDER = ["DEL", "MED", "DEF", "POR"]
 
 
-def build_lineup_changes(players: list[dict], starter_ids: list) -> list[dict]:
+def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_by_position: dict = None) -> list[dict]:
     """
     Construye la lista `changes` que espera
     clients.futmondo_client.FutmondoClient.change_lineup(), con la
@@ -75,25 +75,85 @@ def build_lineup_changes(players: list[dict], starter_ids: list) -> list[dict]:
     posición de cada titular — normalmente el mismo `squad` pasado a
     pick_lineup(). `starter_ids`: pick_lineup(...)["starters"].
 
+    `current_lineup_by_position` (opcional): {position: player_id_actual},
+    la alineación YA guardada en Futmondo justo antes de este cambio (ver
+    `FutmondoClient.get_lineup()`).
+
+    Dos bugs/límites reales confirmados en producción el mismo día
+    (2026-08-17, ver README y clients/futmondo_client.py:change_lineup
+    para el detalle completo):
+
+      1. Sustituir un slot que YA tiene un jugador DISTINTO exige incluir
+         `"from"` con el id del que sale, si no la API lo rechaza con
+         `"api.error.not_allowed"`.
+      2. Colocar en un slot a un jugador que en ESE MOMENTO está en el
+         campo en OTRA posición (una rotación entre titulares) se rechaza
+         con `"api.error.in_field"`, aunque el `"from"` sea correcto —
+         confirmado que sustituir SIEMPRE funciona si el que entra viene
+         del banquillo, nunca si viene de otro slot del campo.
+
+    Por eso esta función NO reasigna los slots de un grupo de posición
+    desde cero cada vez (lo que forzaba rotaciones falsas entre jugadores
+    que ya estaban bien colocados, solo en un slot numérico distinto):
+    para cada grupo (DEL/MED/DEF/POR), a los titulares de esta semana que
+    YA ocupan uno de los slots del grupo se les deja en su sitio (sin
+    `change`); solo se generan cambios para los slots que de verdad
+    quedan libres (su ocupante actual ya no es titular esta semana),
+    emparejados con los titulares nuevos que entran — que en el caso
+    normal (evaluación semanal, la posición de un jugador no cambia de
+    una semana a otra) siempre vienen del banquillo, nunca de otro slot
+    del campo que se esté tocando en la misma pasada. Si aun así un
+    jugador entrante estuviera en el campo en otra posición en este
+    mismo momento (caso raro no cubierto), esa `change` en concreto
+    volvería a fallar con `"api.error.in_field"` — `jobs/set_lineup.py`
+    lo audita igual que cualquier otro fallo, no lo oculta.
+
+    Si no se pasa `current_lineup_by_position` (p.ej. no se pudo leer la
+    alineación actual), se asume que todos los slots están vacíos —
+    jobs/set_lineup.py siempre debería pasarlo cuando pueda.
+
     No incluye banquillo/suplentes: la numeración de esos slots no se ha
     confirmado con ninguna prueba real (ver docstring del módulo) — de
     momento jobs/set_lineup.py solo manda los titulares, más seguro que
     adivinar y mandar algo que Futmondo podría rechazar o, peor,
     interpretar mal en silencio.
     """
+    current_lineup_by_position = current_lineup_by_position or {}
     by_id = {p["id"]: p for p in players}
     starters_by_position = {pos: [] for pos in LINEUP_SLOT_POSITION_ORDER}
     for player_id in starter_ids:
         starters_by_position[by_id[player_id]["position"]].append(player_id)
 
-    changes = []
-    position_num = 0
+    # Rango de slots fijo por grupo de posición, contiguo, en el orden
+    # LINEUP_SLOT_POSITION_ORDER — confirmado solo para 4-4-2 (ver TODO
+    # más arriba en el módulo).
+    slot_ranges = {}
+    next_slot = 0
     for position in LINEUP_SLOT_POSITION_ORDER:
-        for player_id in starters_by_position[position]:
-            changes.append(
-                {"cpt": False, "to": player_id, "position": position_num, "isBench": False, "multiposition": False}
-            )
-            position_num += 1
+        count = len(starters_by_position[position])
+        slot_ranges[position] = list(range(next_slot, next_slot + count))
+        next_slot += count
+
+    changes = []
+    for position in LINEUP_SLOT_POSITION_ORDER:
+        target_players = starters_by_position[position]
+        slots = slot_ranges[position]
+
+        # Slots de este grupo cuyo ocupante actual ya es titular esta
+        # semana en este mismo grupo -- se dejan quietos, sin `change`.
+        occupant_by_slot = {slot: current_lineup_by_position.get(slot) for slot in slots}
+        already_correct_players = {occupant for occupant in occupant_by_slot.values() if occupant in target_players}
+
+        free_slots = [slot for slot, occupant in occupant_by_slot.items() if occupant not in target_players]
+        entering_players = [p for p in target_players if p not in already_correct_players]
+
+        for slot, player_id in zip(free_slots, entering_players):
+            occupant = occupant_by_slot[slot]
+            change = {"cpt": False, "to": player_id, "position": slot, "isBench": False, "multiposition": False}
+            if occupant is not None:
+                change["from"] = occupant
+            changes.append(change)
+
     return changes
 
 

@@ -12,8 +12,25 @@ real interceptando la llamada POST real del frontend a
 confirmando la posición — ver clients/futmondo_client.py y
 engine/lineup_optimizer.py para el detalle y el TODO sobre otras
 formaciones). Sigue detrás de config.ENABLE_LINEUP_AUTO_SUBMIT por si se
-prefiere revisar antes de dejarlo escribir solo contra una liga real;
-cualquier fallo al enviar se audita sin romper la ejecución.
+prefiere revisar antes de dejarlo escribir solo contra una liga real.
+
+`client.change_lineup()` manda una llamada HTTP por jugador y nunca
+lanza en el primer fallo — ver su docstring para el bug real confirmado
+en producción (2026-08-17) que llevó a este diseño: mandar los 11 cambios
+de golpe en una sola llamada hacía que Futmondo solo aplicara el primero,
+sin ningún error que lo delatara, dejando la alineación mostrada en la
+web totalmente desincronizada de lo que decía la notificación de
+Telegram. Aquí se audita cada jugador que falló al colocar por separado
+(`lineup_decisions.submitted_to_futmondo` solo es 1 si todos los cambios
+necesarios se aplicaron, no si la llamada "no lanzó excepción").
+
+Segundo bug real encontrado el mismo día, al investigar por qué seguía
+sin coincidir la alineación tras el primer arreglo: sustituir un slot que
+YA tiene un jugador distinto exige mandar `"from"` con el id del que sale
+(ver `engine.lineup_optimizer.build_lineup_changes`) — sin él, Futmondo
+rechaza el cambio con `"api.error.not_allowed"`. Por eso este job SIEMPRE
+lee `client.get_lineup()` antes de construir los cambios: sin saber qué
+hay ya en cada slot, no se puede rellenar `"from"` cuando hace falta.
 
 De momento solo se manda el once titular, sin banquillo/suplentes: la
 numeración de esos slots no se ha confirmado con ninguna prueba real (ver
@@ -89,12 +106,20 @@ def run():
     now = datetime.now(timezone.utc).isoformat()
     submitted = False
     submit_error = None
+    failed_players = []  # [(nombre, motivo)] -- cambios individuales que fallaron, ver docstring del módulo
+    changes_needed = 0  # 0 si la alineación actual ya coincidía del todo (ver build_lineup_changes)
 
     if config.ENABLE_LINEUP_AUTO_SUBMIT:
         try:
-            changes = build_lineup_changes(adjusted, lineup["starters"])
-            client.change_lineup(changes)
-            submitted = True
+            current_lineup = client.get_lineup().get("answer", {}).get("players", [])
+            current_lineup_by_position = {p["position"]: p["id"] for p in current_lineup}
+            changes = build_lineup_changes(adjusted, lineup["starters"], current_lineup_by_position)
+            changes_needed = len(changes)
+            results = client.change_lineup(changes)
+            for r in results:
+                if not r["ok"]:
+                    failed_players.append((by_id[r["change"]["to"]]["name"], r["answer_or_error"]))
+            submitted = not failed_players  # solo "enviada" de verdad si todos los cambios necesarios se aplicaron
         except Exception as e:  # noqa: BLE001 — un fallo al enviar no debe tumbar la auditoría de la decisión
             submit_error = str(e)
 
@@ -109,7 +134,17 @@ def run():
 
     message = [f"set_lineup: once decidido ({lineup['formation']}):"] + [f"  - {s}" for s in starters_summary]
     if config.ENABLE_LINEUP_AUTO_SUBMIT:
-        message.append("Enviada a Futmondo." if submitted else f"NO enviada a Futmondo (error: {submit_error}).")
+        if submit_error:
+            message.append(f"NO enviada a Futmondo (error: {submit_error}).")
+        elif changes_needed == 0:
+            message.append("La alineación en Futmondo ya coincidía con la decidida, no hizo falta cambiar nada.")
+        elif submitted:
+            message.append(f"Enviada a Futmondo ({changes_needed}/{changes_needed} cambios aplicados).")
+        else:
+            message.append(
+                f"⚠️ Enviada A MEDIAS a Futmondo: {len(failed_players)}/{changes_needed} cambio(s) NO se pudieron aplicar:"
+            )
+            message.extend(f"  - {name}: {error}" for name, error in failed_players)
     else:
         message.append("NO enviada a Futmondo (ENABLE_LINEUP_AUTO_SUBMIT=false).")
 

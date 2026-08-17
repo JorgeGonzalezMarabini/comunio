@@ -9,6 +9,18 @@ adicional a nivel de config, independiente de que cada test module
 intercepte `notify()` explícitamente o no — así ningún test puede tocar
 la Telegram API real por descuido, aunque se le olvide a alguien mockear
 `notify` en un test nuevo.
+
+`no_real_futmondo_network` es la misma idea aplicada a Futmondo, añadida
+al descubrir el riesgo real (2026-08-17): con `.env` local ya relleno con
+credenciales reales (necesarias para depurar el bug de alineación de ese
+mismo día), un `FakeClient(FutmondoClient)` de test que se olvide de
+sobreescribir un método concreto (p.ej. `get_lineup`) hereda la
+implementación real -- que usaría esas credenciales reales de verdad
+contra `api.futmondo.com` en vez de fallar limpiamente. Forzar
+`FUTMONDO_TOKEN`/`FUTMONDO_USER_ID` a `None` aquí hace que cualquier
+llamada real no mockeada lance `FutmondoAuthError` de inmediato (antes de
+tocar la red), delatando el hueco en vez de disparar una escritura real
+por descuido.
 """
 import sys
 from pathlib import Path
@@ -24,6 +36,14 @@ import config
 def no_real_telegram(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", None)
     monkeypatch.setattr(config, "TELEGRAM_CHAT_ID", None)
+
+
+@pytest.fixture(autouse=True)
+def no_real_futmondo_network(monkeypatch):
+    monkeypatch.setattr(config, "FUTMONDO_TOKEN", None)
+    monkeypatch.setattr(config, "FUTMONDO_USER_ID", None)
+    monkeypatch.setattr(config, "FUTMONDO_CHAMPIONSHIP_ID", None)
+    monkeypatch.setattr(config, "FUTMONDO_USERTEAM_ID", None)
 
 
 @pytest.fixture

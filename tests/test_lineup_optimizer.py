@@ -85,6 +85,94 @@ def test_build_lineup_changes_shape_matches_change_lineup_contract():
         assert change["multiposition"] is False
 
 
+def test_build_lineup_changes_includes_from_when_slot_already_has_different_player():
+    """
+    Regresión del bug real de producción (2026-08-17, ver docstring del
+    módulo y clients.futmondo_client.FutmondoClient.change_lineup):
+    sustituir un slot que YA tiene un jugador distinto exige incluir
+    "from" con el id del que sale -- confirmado interceptando la llamada
+    real del frontend haciendo el mismo cambio a mano.
+    """
+    squad = _squad_442()
+    lineup = pick_lineup(squad, formation="4-4-2")
+    # Alineación previa: en el slot 10 (portero) hay un jugador DISTINTO de "por1".
+    current_lineup_by_position = {10: "otro_portero_de_antes"}
+
+    changes = build_lineup_changes(squad, lineup["starters"], current_lineup_by_position)
+    by_id = {c["to"]: c for c in changes}
+
+    assert by_id["por1"]["from"] == "otro_portero_de_antes"
+    # Los slots que antes estaban vacíos (no aparecen en current_lineup_by_position) no llevan "from".
+    assert "from" not in by_id["del0"]
+
+
+def test_build_lineup_changes_skips_slots_already_correct():
+    """
+    Si un slot ya tiene EXACTAMENTE al jugador que le corresponde, no debe
+    generarse ningún `change` para él -- repetir un cambio ya aplicado
+    también se vio rechazado en la prueba real (mismo día).
+    """
+    squad = _squad_442()
+    lineup = pick_lineup(squad, formation="4-4-2")
+    changes_from_empty = build_lineup_changes(squad, lineup["starters"])
+    by_id = {c["to"]: c for c in changes_from_empty}
+    current_lineup_by_position = {c["position"]: c["to"] for c in changes_from_empty}
+
+    # Simula un segundo cambio idéntico: nada debería quedar por enviar.
+    changes_again = build_lineup_changes(squad, lineup["starters"], current_lineup_by_position)
+    assert changes_again == []
+
+    # Si solo UN slot difiere (ej. el portero cambia), solo ese genera change.
+    current_lineup_by_position[by_id["por1"]["position"]] = "otro_portero"
+    changes_partial = build_lineup_changes(squad, lineup["starters"], current_lineup_by_position)
+    assert len(changes_partial) == 1
+    assert changes_partial[0]["to"] == "por1"
+    assert changes_partial[0]["from"] == "otro_portero"
+
+
+def test_build_lineup_changes_keeps_unchanged_starters_in_their_current_slot():
+    """
+    Regresión de un TERCER bug/límite real de producción (2026-08-17, ver
+    docstring del módulo y de clients.futmondo_client.FutmondoClient.
+    change_lineup): colocar a un jugador que en ESE MOMENTO está en el
+    campo en otra posición se rechaza con "api.error.in_field", incluso
+    con el "from" correcto -- sustituir SIEMPRE funciona si el que entra
+    viene del banquillo, nunca si viene de otro slot del campo (confirmado
+    en vivo: dos jugadores YA colocados que se querían rotar entre sí
+    fallaban, y solo se pudo resolver metiendo a uno en el banquillo antes
+    de recolocar al otro).
+
+    Por eso, si tres de los cuatro defensas de esta semana YA estaban en
+    el campo la semana pasada (en cualquier slot del grupo DEF) y solo
+    entra uno nuevo, build_lineup_changes() NO debe generar ningún
+    `change` para los tres que se quedan -- solo uno, para el slot que de
+    verdad queda libre. Reasignar los cuatro slots desde cero (el diseño
+    anterior) habría generado rotaciones falsas entre los tres que ya
+    estaban bien, y esas rotaciones son justo las que la API rechaza.
+    """
+    squad = _squad_442()
+    # Alineación completa de la semana pasada, en los slots confirmados
+    # para 4-4-2 (delanteros 0-1, medios 2-5, defensas 6-9, portero 10).
+    current_lineup_by_position = {
+        0: "del0", 1: "del1",
+        2: "med0", 3: "med1", 4: "med2", 5: "med3",
+        6: "def0", 7: "def1", 8: "def2", 9: "def3",
+        10: "por1",
+    }
+    # Esta semana el once sigue siendo el mismo salvo un cambio en defensa:
+    # def3 sale, entra un central nuevo del banquillo ("def_nuevo").
+    squad_this_week = squad + [{"id": "def_nuevo", "position": "DEF", "expected_score": 0.6}]
+    starters = ["por1", "def0", "def1", "def2", "def_nuevo", "med0", "med1", "med2", "med3", "del0", "del1"]
+
+    changes = build_lineup_changes(squad_this_week, starters, current_lineup_by_position)
+
+    # Solo debe generarse UN cambio: el que libera el slot de def3 para def_nuevo.
+    assert len(changes) == 1
+    assert changes[0]["to"] == "def_nuevo"
+    assert changes[0]["from"] == "def3"
+    assert changes[0]["position"] == 9  # el slot que ocupaba def3
+
+
 def test_apply_fixture_difficulty_discounts_score_for_hard_opponent():
     players = [
         {"id": "facil", "team": "Barcelona", "score": 0.8},

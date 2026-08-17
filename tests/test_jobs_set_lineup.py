@@ -95,9 +95,12 @@ def test_set_lineup_submits_to_futmondo_when_enabled(tmp_db, monkeypatch):
         def get_roster(self):
             return {"answer": [{"id": pid} for pid in squad_ids]}
 
+        def get_lineup(self):
+            return {"answer": {"strategy": "4-4-2", "players": []}}  # sin alineación previa -- todos los slots vacíos
+
         def change_lineup(self, changes):
             calls.append(changes)
-            return {"code": "api.general.ok"}
+            return [{"change": c, "ok": True, "answer_or_error": {"code": "api.general.ok"}} for c in changes]
 
     captured = []
     with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
@@ -105,7 +108,7 @@ def test_set_lineup_submits_to_futmondo_when_enabled(tmp_db, monkeypatch):
          patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
         set_lineup.run()
 
-    assert "Enviada a Futmondo" in captured[0]
+    assert "Enviada a Futmondo (11/11 cambios aplicados)" in captured[0]
     assert len(calls) == 1
     changes = calls[0]
     assert len(changes) == 11
@@ -115,6 +118,47 @@ def test_set_lineup_submits_to_futmondo_when_enabled(tmp_db, monkeypatch):
     with get_connection() as conn:
         row = conn.execute("SELECT submitted_to_futmondo FROM lineup_decisions").fetchone()
     assert row["submitted_to_futmondo"] == 1
+
+
+def test_set_lineup_partial_failure_is_not_reported_as_fully_sent(tmp_db, monkeypatch):
+    """
+    Regresión del bug real de producción (2026-08-17, ver docstring de
+    clients.futmondo_client.FutmondoClient.change_lineup): si Futmondo
+    rechaza colocar a alguno de los 11, el job NO debe decir "Enviada a
+    Futmondo" sin más -- tiene que dejar claro que se envió a medias y qué
+    jugador(es) fallaron, y `submitted_to_futmondo` debe quedar en 0 (no se
+    puede confiar en que la alineación mostrada coincida con la decidida).
+    """
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", True)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in squad_ids]}
+
+        def get_lineup(self):
+            return {"answer": {"strategy": "4-4-2", "players": []}}  # sin alineación previa -- todos los slots vacíos
+
+        def change_lineup(self, changes):
+            results = [{"change": c, "ok": True, "answer_or_error": {"code": "api.general.ok"}} for c in changes]
+            results[0]["ok"] = False
+            results[0]["answer_or_error"] = "Futmondo rechazó la operación: api.market.some_rejection"
+            return results
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()
+
+    assert "Enviada A MEDIAS" in captured[0]
+    assert "1/11" in captured[0]
+    assert "Enviada a Futmondo (11/11" not in captured[0]
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT submitted_to_futmondo FROM lineup_decisions").fetchone()
+    assert row["submitted_to_futmondo"] == 0  # a medias NO cuenta como enviada
 
 
 def test_set_lineup_submit_failure_is_audited_without_crashing(tmp_db, monkeypatch):

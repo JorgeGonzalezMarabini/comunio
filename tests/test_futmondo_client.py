@@ -195,25 +195,49 @@ def test_pay_clause_body(fake_client):
     }
 
 
-def test_change_lineup_body_and_success(fake_client):
+def test_change_lineup_sends_one_http_call_per_change(fake_client):
+    """
+    Regresión del bug real de producción (2026-08-17): mandar los 11
+    cambios de golpe en una sola llamada hacía que Futmondo solo aplicara
+    el primero, sin ningún error que lo delatara -- change_lineup() debe
+    mandar una llamada POR CADA jugador, nunca varios en el mismo body.
+    """
     fake_client.session.response_fn = lambda method, url, payload: FakeResponse(
         200, {"answer": {"code": "api.general.ok", "budget": 20_000_000, "rc": "-1"}}
     )
-    changes = [{"cpt": False, "to": "1001", "position": 0, "isBench": False, "multiposition": False}]
-    answer = fake_client.change_lineup(changes)
+    changes = [
+        {"cpt": False, "to": "1001", "position": 0, "isBench": False, "multiposition": False},
+        {"cpt": False, "to": "1002", "position": 1, "isBench": False, "multiposition": False},
+    ]
+    results = fake_client.change_lineup(changes)
 
-    assert answer["code"] == "api.general.ok"
-    call = fake_client.session.calls[0]
-    assert call["url"].endswith("/2/userteam/changeplayer")
-    assert call["json"]["query"]["changes"] == changes
+    assert [r["ok"] for r in results] == [True, True]
+    assert len(fake_client.session.calls) == 2  # una llamada por change, no una para toda la lista
+    for call, change in zip(fake_client.session.calls, changes):
+        assert call["url"].endswith("/2/userteam/changeplayer")
+        assert call["json"]["query"]["changes"] == [change]  # cada llamada lleva UN solo change
 
 
-def test_change_lineup_raises_on_rejection(fake_client):
-    fake_client.session.response_fn = lambda method, url, payload: FakeResponse(
-        200, {"answer": {"code": "api.market.some_rejection"}}
-    )
-    with pytest.raises(FutmondoOfferError):
-        fake_client.change_lineup([])
+def test_change_lineup_reports_per_player_failure_without_stopping(fake_client):
+    """
+    Un jugador rechazado no debe impedir intentar colocar al resto (mismo
+    criterio que jobs/run_market.py con las pujas) -- change_lineup() nunca
+    lanza en el primer fallo, lo audita por jugador.
+    """
+    responses = iter([
+        FakeResponse(200, {"answer": {"code": "api.market.some_rejection"}}),
+        FakeResponse(200, {"answer": {"code": "api.general.ok"}}),
+    ])
+    fake_client.session.response_fn = lambda method, url, payload: next(responses)
+    changes = [
+        {"cpt": False, "to": "1001", "position": 0, "isBench": False, "multiposition": False},
+        {"cpt": False, "to": "1002", "position": 1, "isBench": False, "multiposition": False},
+    ]
+    results = fake_client.change_lineup(changes)
+
+    assert results[0]["ok"] is False
+    assert results[1]["ok"] is True
+    assert len(fake_client.session.calls) == 2  # sí intentó el segundo pese al fallo del primero
 
 
 def test_futmondo_position_map_translates_spanish_roles_to_short_codes():

@@ -111,7 +111,31 @@ Numeración de `position` confirmada: enteros consecutivos **empezando en
 0** (a diferencia de Comunio, que empezaba en 1), en el orden delanteros
 -> centrocampistas -> defensas -> portero, portero SIEMPRE el último
 índice (10 en un 4-4-2 con 11 titulares). Confirmado en la prueba real:
-portero -> 10, tres defensas colocados -> 6, 7, 8. **No probado con
+portero -> 10, tres defensas colocados -> 6, 7, 8.
+
+**Tres bugs/límites reales encontrados el mismo día en producción (2026-08-17),
+al notar que la alineación de Telegram no coincidía con la que se veía en
+la web** — los tres documentados con detalle en el docstring de
+`change_lineup()` / `build_lineup_changes()`:
+
+1. Mandar los 11 cambios de golpe en una sola llamada hacía que Futmondo
+   solo aplicara el primero, devolviendo igualmente `"api.general.ok"` —
+   corregido mandando una llamada HTTP por jugador.
+2. Sustituir un slot que ya tiene un jugador DISTINTO exige incluir
+   `"from"` con el id de quien sale, si no la API lo rechaza con
+   `"api.error.not_allowed"` — corregido leyendo `get_lineup()` antes de
+   construir los cambios y solo generando `change` para los slots que de
+   verdad hacen falta.
+3. **Sin resolver todavía**: si el jugador que entra en un slot ya está
+   en el campo en OTRA posición que también se está cambiando en la misma
+   pasada (una rotación entre varios titulares, no una sustitución simple
+   desde el banquillo), la API rechaza esos cambios con
+   `"api.error.in_field"` pese a llevar el `"from"` correcto. Probablemente
+   haga falta un paso intermedio (banquillo) para "liberar" al jugador
+   antes de recolocarlo, pero eso depende de la numeración de slots del
+   banquillo, sin confirmar (ver más abajo).
+
+**No probado con
 ninguna formación distinta de 4-4-2** — `engine/lineup_optimizer.py`
 generaliza el mismo criterio (numeración consecutiva, portero al final)
 para el resto de formaciones de `config.py`, pero es una extrapolación

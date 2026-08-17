@@ -382,30 +382,78 @@ class FutmondoClient:
         result = self._post("/1/market/rosterclause", {"player_id": player_id, "player_slug": player_slug, "price": price})
         return self._check_ok(result)
 
-    def change_lineup(self, changes: list[dict]) -> dict:
+    def change_lineup(self, changes: list[dict]) -> list[dict]:
         """
-        Coloca uno o varios jugadores en slots de la alineación. **100%
-        confirmado** (2026-08-17, alineación real de prueba, varios
-        jugadores colocados uno a uno interceptando cada llamada POST real
-        del frontend + relectura con get_lineup() confirmando la posición).
+        Coloca jugadores en slots de la alineación, UNO POR LLAMADA.
 
             POST /2/userteam/changeplayer
             body.query.changes: [{"cpt": false, "to": <playerId>,
                                    "position": <int>, "isBench": false,
-                                   "multiposition": false}, ...]
+                                   "multiposition": false}]
             respuesta real: {"answer": {"code": "api.general.ok",
                               "budget": <int>, "rc": "-1"}, ...}
 
-        A diferencia de Comunio (un único PUT con la alineación completa),
-        Futmondo aplica cambios incrementales — se puede llamar una vez por
-        jugador o mandar varios cambios en la misma lista (no probado con
-        más de uno en la misma llamada, pero el shape lo admite
-        literalmente). Ver engine/lineup_optimizer.py para cómo construir
-        `changes` con la numeración de `position` confirmada (solo 4-4-2,
-        ver TODO ahí) y `isBench` para el banquillo.
+        **Bug real confirmado en producción (2026-08-17)**: este método
+        aceptaba `changes` como una lista y mandaba los 11 cambios de golpe
+        en una única llamada — el propio docstring lo marcaba como "no
+        probado con más de uno en la misma llamada, pero el shape lo
+        admite literalmente". En la primera ejecución real de
+        `jobs/set_lineup.py` contra la liga de prueba, de 11 cambios
+        mandados así en una sola llamada, la API devolvió
+        `"api.general.ok"` pero **solo aplicó el primero** — los otros 10
+        slots se quedaron con la alineación previa (confirmado comparando
+        el `player_ids` auditado en `lineup_decisions` contra una relectura
+        real de `get_lineup()` justo después: solo coincidía el jugador
+        que iba primero en la lista). Nada en la respuesta delataba el
+        fallo parcial.
+
+        Corregido: ahora se manda **una llamada HTTP por cada item de
+        `changes`** — el único patrón confirmado de verdad durante la
+        sesión de captura real (cada jugador se colocó uno a uno,
+        interceptando cada POST del frontend por separado). Sigue
+        aceptando una lista para no cambiar la forma de llamar desde
+        `jobs/set_lineup.py`, pero ahora itera internamente.
+
+        Devuelve una lista de resultados, uno por cada `change`, en el
+        mismo orden: `{"change": <el dict original>, "ok": bool,
+        "answer_or_error": <answer si ok, mensaje de error si no>}`. NO
+        lanza en el primer fallo — sigue con el resto de la lista (igual
+        que jobs/run_market.py con las pujas: un jugador que falle no debe
+        impedir colocar al resto). El llamador decide qué hacer con los
+        que fallaron (ver jobs/set_lineup.py).
+
+        Ver engine/lineup_optimizer.py para cómo construir `changes` con
+        la numeración de `position` confirmada (solo 4-4-2, ver TODO ahí),
+        `"from"` para sustituir a alguien que ya ocupa el slot, y
+        `isBench` para el banquillo.
+
+        **Tercer hallazgo real el mismo día (2026-08-17), sin resolver
+        todavía**: sustituir un slot ocupado incluyendo `"from"` funciona
+        bien cuando el jugador que ENTRA no está ya en el campo en otra
+        posición — pero si SÍ lo está (una rotación entre varios jugadores
+        ya colocados, ej. A pasa a la posición de B y B a la de C), la API
+        rechaza esos cambios con `"api.error.in_field"` ("este jugador ya
+        está en el campo"), aunque cada `change` individual lleve su
+        `"from"` correcto. Probablemente haga falta primero mandar al
+        jugador al banquillo (con `isBench: true`) como paso intermedio
+        antes de colocarlo en su nueva posición, pero la numeración de
+        slots del banquillo no está confirmada (ver TODO en
+        engine/lineup_optimizer.py) — no se ha intentado resolver esto
+        todavía para no seguir escribiendo a ciegas contra una cuenta
+        real. `change_lineup()` audita el fallo de cada jugador afectado
+        (`answer_or_error` trae literalmente `"api.error.in_field"`) en
+        vez de fallar en silencio, así que el síntoma queda siempre
+        visible aunque la causa de fondo siga sin arreglarse.
 
         "rc" en la respuesta no se ha confirmado qué significa (visto
         siempre "-1" en la prueba real).
         """
-        result = self._post("/2/userteam/changeplayer", {"changes": changes})
-        return self._check_ok(result)
+        results = []
+        for change in changes:
+            try:
+                result = self._post("/2/userteam/changeplayer", {"changes": [change]})
+                answer = self._check_ok(result)
+                results.append({"change": change, "ok": True, "answer_or_error": answer})
+            except (requests.RequestException, FutmondoOfferError) as e:
+                results.append({"change": change, "ok": False, "answer_or_error": str(e)})
+        return results
