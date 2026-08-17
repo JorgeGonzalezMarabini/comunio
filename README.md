@@ -27,7 +27,8 @@ seguir siendo válido, no por descuido.
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
-- [~] Jobs y scheduler en GitHub Actions — los 4 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
+- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado lesionado/en duda por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); detrás de `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` (**false por defecto**, sin confirmar todavía con una sustitución real)
+- [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
 
 ## Por qué Futmondo y no Comunio
@@ -166,6 +167,35 @@ suplente por posición (`engine.lineup_optimizer.pick_substitutes()` +
 cambios ya aplicados que los titulares (ver arriba) — aunque ese criterio
 en concreto (sustituir un suplente ya puesto) no se ha probado en vivo
 específicamente para banquillo, solo para titulares.
+
+**IMPORTANTE — el suplente colocado no hace nada por sí solo**: según la
+[FAQ oficial](https://help.futmondo.com/article/159-entrenador-automatico),
+la sustitución real de un titular que no juega (0 minutos) por su suplente
+de la misma posición la hace el **"entrenador automático"** — una función
+APARTE, de pago (1.000 mondos/jornada, gratis en modo PRO), que no está
+activada por defecto. Sin ella, el suplente que coloca `set_lineup.py` es
+decorativo: si un titular no juega, nadie entra a sustituirlo salvo que
+alguien —o el bot— lo haga a mano.
+
+**`jobs/manage_substitutes.py` — sustitución manual** (añadido 2026-08-17,
+a petición del usuario: la liga privada de destino no tiene activado el
+entrenador automático). Complementa a `set_lineup.py`, no lo sustituye:
+corre con más frecuencia (pensado para varias veces al día en días de
+partido, ver `manage_substitutes.yml`) y, en cada pasada, revisa la
+alineación YA guardada en Futmondo — si algún titular aparece con `status`
+de lesión/duda (`is_injury_status()`) y su posición tiene un suplente sano
+asignado en el banquillo, genera la pareja de `changes` que los intercambia
+(`engine.lineup_optimizer.build_substitution_changes()`). Se apoya en la
+regla ya confirmada de `change_lineup()` (entrar desde el banquillo siempre
+funciona, nunca desde otro slot del campo), pero la secuencia completa —dos
+llamadas HTTP reales, una detrás de otra— **no se ha probado todavía con
+una lesión real** (pretemporada, cero lesionados en la liga de prueba) —
+por eso `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` es `false` por defecto (más
+conservador que `ENABLE_LINEUP_AUTO_SUBMIT`). Cada sustitución decidida se
+audita en `substitution_decisions` pase lo que pase con el envío. A
+diferencia del resto de jobs, solo notifica por Telegram cuando hay algo
+que decidir (o algo anómalo) — con la frecuencia con la que está pensado
+correr, notificar "nada que hacer" en cada ejecución sería ruido.
 
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en
@@ -365,7 +395,7 @@ ambos vienen en `query`.
 ## Tests
 
 Batería de tests con `pytest` — cubre `engine/`, `clients/`, `db/models.py`
-y los 4 jobs, migrada íntegramente al contrato de Futmondo (nada de
+y los 5 jobs, migrada íntegramente al contrato de Futmondo (nada de
 Comunio queda en los fixtures). Nunca toca la red real ni Telegram real
 (`tests/conftest.py::no_real_telegram` es `autouse=True`) ni
 `db/futmondo.db` (cada test usa una BD SQLite temporal aislada,
@@ -390,17 +420,21 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
 3. Hacer `git push` de este repo a `origin` (el agente que escribió este
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
-4. Los 4 workflows (`sync_data` cada hora, `run_market` y `run_sales`
-   2x/día, `set_lineup` viernes 18:00 UTC) ya tienen el `schedule:`
-   activado — correrán solos en cuanto 1-2 estén hechos. Cada uno comitea
-   `db/futmondo.db`/`logs/` de vuelta al repo al terminar (si no, cada
-   ejecución perdería lo sincronizado en la anterior).
+4. Los 5 workflows (`sync_data` cada hora, `run_market` y `run_sales`
+   2x/día, `set_lineup` viernes 18:00 UTC, `manage_substitutes` cada 2h de
+   viernes a lunes) ya tienen el `schedule:` activado — correrán solos en
+   cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
+   vuelta al repo al terminar (si no, cada ejecución perdería lo
+   sincronizado en la anterior).
 
 **Antes de apuntar esto a la liga real** (no la de pruebas creada durante
 la sesión de captura): revisar unos días de ejecución primero, y tener en
 cuenta que `ENABLE_LINEUP_AUTO_SUBMIT=true` por defecto — el bot escribirá
-de verdad, sin confirmación manual, en cuanto el cron esté activo. El
-mapeo de alineación solo está confirmado para 4-4-2 (ver sección de
+de verdad, sin confirmación manual, en cuanto el cron esté activo.
+`ENABLE_SUBSTITUTE_AUTO_SUBMIT` en cambio es `false` por defecto (ver
+sección "Banquillo/suplentes") — activarlo solo después de confirmar la
+secuencia de sustitución con un caso real. El mapeo de alineación solo
+está confirmado para 4-4-2 (ver sección de
 endpoints) — si la liga real usa otra formación, conviene desactivar
 `ENABLE_LINEUP_AUTO_SUBMIT` hasta confirmarlo con una prueba real, o
 revisar `lineup_decisions` a mano un tiempo antes de fiarse del envío
@@ -414,7 +448,7 @@ Ver el detalle de cada módulo en su propio docstring. Resumen:
 clients/    -> integraciones externas (Futmondo, Understat)
 db/         -> esquema SQLite + conexión
 engine/     -> evaluator, bidding_strategy, lineup_optimizer, squad_risk, selling_strategy
-jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup)
+jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup, manage_substitutes)
 tests/      -> batería pytest (ver sección "Tests" más arriba)
 notifier.py -> resumen por Telegram tras cada job
 logs/       -> auditoría de decisiones

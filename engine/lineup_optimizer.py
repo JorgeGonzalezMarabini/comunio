@@ -9,6 +9,7 @@ apply_fixture_difficulty() (dato real: clients.laliga_stats_client.
 next_match_difficulty(), basado en el forecast de Understat).
 """
 import config
+from clients.futmondo_client import is_injury_status
 
 # formación -> nº de jugadores por posición (sin contar portero, que es fijo).
 #
@@ -277,4 +278,98 @@ def build_bench_changes(substitutes_by_position: dict, current_bench_by_position
         if current_occupant is not None:
             change["from"] = current_occupant
         changes.append(change)
+    return changes
+
+
+def build_substitution_changes(
+    players_by_id: dict,
+    current_lineup_by_position: dict,
+    current_bench_by_position: dict,
+) -> list[dict]:
+    """
+    Construye la lista `changes` (mismo shape que build_lineup_changes()/
+    build_bench_changes()) para sustituir, dentro de la alineación YA
+    guardada en Futmondo, a cada titular confirmado lesionado/en duda (ver
+    clients.futmondo_client.is_injury_status()) por el suplente de su
+    misma posición ya asignado en el banquillo (BENCH_SLOT_BY_POSITION) —
+    pensado para jobs/manage_substitutes.py, NO para jobs/set_lineup.py
+    (que decide antes del cierre de jornada, sin saber todavía quién
+    estará confirmado fuera).
+
+    Por qué hace falta esto aparte de set_lineup.py: según la FAQ oficial
+    (https://help.futmondo.com/article/159-entrenador-automatico, ver
+    también README "Banquillo/suplentes"), la entrada real del suplente
+    cuando un titular no juega la hace el "entrenador automático", función
+    de pago (gratis en modo PRO) que NO está activada por defecto — sin
+    ella, el suplente que coloca set_lineup.py es decorativo. En una liga
+    donde esa función esté desactivada, hace falta sustituir a mano, y eso
+    solo puede decidirse cerca de cada partido (lesión/sanción confirmada),
+    no una semana antes.
+
+    Se apoya en la regla ya CONFIRMADA en producción (ver docstring de
+    clients.futmondo_client.FutmondoClient.change_lineup): sustituir
+    SIEMPRE funciona si el que entra viene del banquillo, nunca si viene
+    de otro slot del campo ("api.error.in_field"). El suplente que entra
+    aquí siempre viene del banquillo, así que el PRIMER `change` de cada
+    pareja generada cae dentro del caso confirmado. El titular que sale,
+    en cambio, sí está en ese momento en el campo — por eso el SEGUNDO
+    `change` de la pareja (mandarlo al slot de banquillo que el suplente
+    deja libre) depende de que se ejecute DESPUÉS del primero como llamada
+    HTTP real independiente (nunca en la misma pasada), para que al
+    procesarlo ya no esté "en el campo": es justo lo que
+    FutmondoClient.change_lineup() ya hace (una llamada por `change`, en
+    el orden de la lista) — el orden de los dos `changes` de cada pareja
+    en la lista devuelta importa, no reordenarlo.
+
+    Sin confirmar todavía con una prueba real (sin caso de lesión
+    disponible en la liga de prueba, pretemporada): que Futmondo vacíe de
+    verdad el slot de banquillo de origen al mover a su ocupante al campo
+    en el primer `change`. Por eso el segundo `change` NO lleva "from"
+    (mismo criterio que build_bench_changes(): solo incluirlo si hiciera
+    falta) — si esto fuera falso, ese segundo `change` fallaría con
+    "api.error.not_allowed", y jobs/manage_substitutes.py lo auditaría
+    como cualquier otro fallo, sin ocultarlo. Ver config.
+    ENABLE_SUBSTITUTE_AUTO_SUBMIT.
+
+    `players_by_id`: {id: {..., "position", "status"}} — normalmente toda
+    la plantilla (db.models.get_player_features()), para poder leer
+    "status" tanto del titular como del suplente.
+    `current_lineup_by_position`/`current_bench_by_position`: {slot: id},
+    la alineación/banquillo YA guardados en Futmondo AHORA MISMO (ver
+    FutmondoClient.get_lineup()["answer"]["players"]/["bench"]["players"]),
+    no la decisión (potencialmente desfasada) de jobs/set_lineup.py.
+
+    Solo genera una sustitución por posición en cada pasada — Futmondo
+    solo tiene sitio para un suplente por posición (igual que
+    pick_substitutes()); si hay más de un titular fuera en la misma
+    categoría, el resto queda sin suplente disponible hasta que se libere
+    otro slot de banquillo (fuera de alcance de esta función). Se salta
+    una posición si el titular no está lesionado/en duda, si no hay nadie
+    asignado en el slot de banquillo de esa posición, o si el suplente
+    asignado TAMBIÉN está lesionado/en duda (no hay a quién meter).
+    """
+    changes = []
+    replaced_positions = set()
+    for slot, starter_id in current_lineup_by_position.items():
+        starter = players_by_id.get(starter_id)
+        if starter is None or not is_injury_status(starter.get("status")):
+            continue
+        position = starter["position"]
+        if position in replaced_positions:
+            continue  # ya se usó el único suplente de esta posición en esta pasada
+        bench_slot = BENCH_SLOT_BY_POSITION.get(position)
+        substitute_id = current_bench_by_position.get(bench_slot)
+        if substitute_id is None:
+            continue  # sin suplente asignado para esta posición
+        substitute = players_by_id.get(substitute_id)
+        if substitute is not None and is_injury_status(substitute.get("status")):
+            continue  # el suplente asignado tampoco puede jugar
+
+        changes.append(
+            {"cpt": False, "to": substitute_id, "position": slot, "isBench": False, "multiposition": False, "from": starter_id}
+        )
+        changes.append(
+            {"cpt": False, "to": starter_id, "position": bench_slot, "isBench": True, "multiposition": False}
+        )
+        replaced_positions.add(position)
     return changes

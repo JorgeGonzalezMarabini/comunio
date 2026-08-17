@@ -110,6 +110,21 @@ CREATE TABLE IF NOT EXISTS lineup_decisions (
     reason          TEXT,
     created_at      TEXT NOT NULL
 );
+
+-- Una fila por sustitución decidida por jobs/manage_substitutes.py (titular
+-- confirmado lesionado/en duda -> entra el suplente de su misma posición ya
+-- asignado en el banquillo). Ver engine.lineup_optimizer.
+-- build_substitution_changes() para el porqué de por qué esto es un job
+-- aparte de lineup_decisions.
+CREATE TABLE IF NOT EXISTS substitution_decisions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    starter_id      TEXT NOT NULL REFERENCES players(id),      -- titular confirmado fuera
+    substitute_id   TEXT NOT NULL REFERENCES players(id),      -- suplente que entra
+    position        TEXT NOT NULL,          -- POR | DEF | MED | DEL
+    submitted_to_futmondo INTEGER NOT NULL DEFAULT 0,  -- 0/1, ver config.ENABLE_SUBSTITUTE_AUTO_SUBMIT
+    reason          TEXT,
+    created_at      TEXT NOT NULL
+);
 """
 
 

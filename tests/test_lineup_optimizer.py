@@ -6,6 +6,7 @@ from engine.lineup_optimizer import (
     apply_fixture_difficulty,
     build_bench_changes,
     build_lineup_changes,
+    build_substitution_changes,
     pick_lineup,
     pick_substitutes,
 )
@@ -224,6 +225,106 @@ def test_build_bench_changes_includes_from_and_skips_already_correct():
     assert changes[0]["to"] == "def_bueno"
     assert changes[0]["from"] == "def_viejo"
     assert changes[0]["position"] == 3
+
+
+# --- Sustitución manual: build_substitution_changes() ---
+#
+# jobs/manage_substitutes.py -- ver docstring de la función para el
+# porqué de la regla "entrar siempre desde el banquillo" y por qué el
+# orden de la pareja de changes generada importa.
+
+
+def _players_by_id(entries):
+    """entries: [(id, position, status), ...] -> {id: {"position", "status"}}."""
+    return {pid: {"position": position, "status": status} for pid, position, status in entries}
+
+
+def test_build_substitution_changes_swaps_injured_starter_for_bench_substitute():
+    players_by_id = _players_by_id(
+        [("def_titular", "DEF", "lesionado"), ("def_suplente", "DEF", "")]
+    )
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {3: "def_suplente"}  # slot fijo DEF, ver BENCH_SLOT_BY_POSITION
+
+    changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
+
+    assert len(changes) == 2
+    entering, leaving = changes
+
+    # El suplente entra al slot de campo que dejaba el titular, viniendo
+    # del banquillo -- el caso CONFIRMADO en producción, nunca roto.
+    assert entering == {
+        "cpt": False, "to": "def_suplente", "position": 6, "isBench": False,
+        "multiposition": False, "from": "def_titular",
+    }
+    # El titular sale al slot de banquillo que el suplente deja libre,
+    # SIN "from" (se asume vacío tras el primer change -- ver docstring).
+    assert leaving == {
+        "cpt": False, "to": "def_titular", "position": 3, "isBench": True, "multiposition": False,
+    }
+
+
+def test_build_substitution_changes_ignores_healthy_starters():
+    players_by_id = _players_by_id([("def_titular", "DEF", ""), ("def_suplente", "DEF", "")])
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {3: "def_suplente"}
+
+    assert build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position) == []
+
+
+def test_build_substitution_changes_skips_position_without_bench_substitute():
+    players_by_id = _players_by_id([("def_titular", "DEF", "lesionado")])
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {}  # nadie asignado en el slot de banquillo de DEF
+
+    assert build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position) == []
+
+
+def test_build_substitution_changes_skips_when_substitute_also_injured():
+    players_by_id = _players_by_id(
+        [("def_titular", "DEF", "lesionado"), ("def_suplente", "DEF", "lesionado")]
+    )
+    current_lineup_by_position = {6: "def_titular"}
+    current_bench_by_position = {3: "def_suplente"}
+
+    assert build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position) == []
+
+
+def test_build_substitution_changes_only_one_substitution_per_position():
+    """Futmondo solo tiene un slot de banquillo por posición -- dos titulares
+    lesionados de la misma categoría no pueden sustituirse los dos a la vez."""
+    players_by_id = _players_by_id(
+        [
+            ("def_titular_1", "DEF", "lesionado"),
+            ("def_titular_2", "DEF", "lesionado"),
+            ("def_suplente", "DEF", ""),
+        ]
+    )
+    current_lineup_by_position = {6: "def_titular_1", 7: "def_titular_2"}
+    current_bench_by_position = {3: "def_suplente"}
+
+    changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
+
+    assert len(changes) == 2  # solo una pareja, no dos
+    assert changes[0]["to"] == "def_suplente"
+
+
+def test_build_substitution_changes_handles_multiple_positions_independently():
+    players_by_id = _players_by_id(
+        [
+            ("def_titular", "DEF", "lesionado"), ("def_suplente", "DEF", ""),
+            ("med_titular", "MED", "lesionado"), ("med_suplente", "MED", ""),
+            ("del_titular", "DEL", ""),  # sano -- no debe generar nada
+        ]
+    )
+    current_lineup_by_position = {6: "def_titular", 2: "med_titular", 0: "del_titular"}
+    current_bench_by_position = {3: "def_suplente", 0: "med_suplente"}
+
+    changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
+
+    assert len(changes) == 4  # dos parejas, una por posición sustituida
+    entering_ids = {c["to"] for c in changes if not c["isBench"]}
+    assert entering_ids == {"def_suplente", "med_suplente"}
 
 
 def test_apply_fixture_difficulty_discounts_score_for_hard_opponent():

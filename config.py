@@ -124,5 +124,22 @@ LINEUP_DIFFICULTY_WEIGHT = float(os.getenv("LINEUP_DIFFICULTY_WEIGHT", "0.2"))
 # solo en una liga real.
 ENABLE_LINEUP_AUTO_SUBMIT = os.getenv("ENABLE_LINEUP_AUTO_SUBMIT", "true").lower() == "true"
 
+# --- Sustitución manual (jobs/manage_substitutes.py) ---
+# Envía a Futmondo de verdad los cambios de sustitución decididos (además
+# de auditarlos siempre en `substitution_decisions`). Pensado para ligas
+# donde el "entrenador automático" de Futmondo (función de pago que
+# sustituye solo a un titular que no juega) NO está activado — ver
+# engine.lineup_optimizer.build_substitution_changes() y README, sección
+# "Banquillo/suplentes".
+#
+# Por defecto False, más conservador que ENABLE_LINEUP_AUTO_SUBMIT:
+# aunque se apoya en una regla de la API confirmada en producción (entrar
+# desde el banquillo siempre funciona), la secuencia completa de dos
+# `changes` reales, uno detrás de otro, no se ha probado todavía con una
+# lesión real (sin ningún caso disponible en la liga de prueba,
+# pretemporada) — dejar en false hasta confirmarlo, o para revisar
+# `substitution_decisions` a mano antes de dejarlo escribir solo.
+ENABLE_SUBSTITUTE_AUTO_SUBMIT = os.getenv("ENABLE_SUBSTITUTE_AUTO_SUBMIT", "false").lower() == "true"
+
 # --- Logging / auditoría ---
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")

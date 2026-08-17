@@ -1,0 +1,40 @@
+name: manage_substitutes
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Cada 2h, viernes a lunes (días de partido en la mayoría de jornadas
+    # de LaLiga) -- ajustar al calendario real de la liga de destino. A
+    # diferencia del resto de jobs, este necesita correr varias veces
+    # durante la jornada, no una vez: ver docstring de jobs/manage_substitutes.py.
+    - cron: "0 */2 * * 5,6,0,1"
+
+permissions:
+  contents: write
+
+jobs:
+  substitute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m jobs.manage_substitutes
+        env:
+          FUTMONDO_TOKEN: ${{ secrets.FUTMONDO_TOKEN }}
+          FUTMONDO_USER_ID: ${{ secrets.FUTMONDO_USER_ID }}
+          FUTMONDO_CHAMPIONSHIP_ID: ${{ vars.FUTMONDO_CHAMPIONSHIP_ID }}
+          FUTMONDO_USERTEAM_ID: ${{ vars.FUTMONDO_USERTEAM_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # substitution_decisions queda registrado en db/futmondo.db (auditoría) --
+      # sin este paso se perdería al terminar el run. Ver nota en sync_data.yml.
+      - name: Commit BD actualizada
+        run: |
+          git config user.name "futmondo-bot"
+          git config user.email "actions@github.com"
+          git add db/futmondo.db logs/
+          git diff --staged --quiet || git commit -m "manage_substitutes: actualiza BD [skip ci]"
+          git push
