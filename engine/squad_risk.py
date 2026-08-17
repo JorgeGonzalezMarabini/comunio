@@ -2,16 +2,16 @@
 Evalúa riesgos estructurales de la plantilla, independientes de qué once
 se ponga una jornada concreta (eso es cosa de engine.lineup_optimizer).
 
-Motivación — regla oficial de Comunio (ver README, confirmado en la propia
-web: "Ajustes -> Administrar liga -> Reglas del mercado -> Cláusula de
-rescisión"): si las cláusulas de rescisión están activadas en la liga
-(estará activo en la liga real del usuario, aunque no en la de pruebas —
-esa función requiere suscripción Comunio Plus/Pro Player, fuera del
-alcance por la restricción de coste 0 del proyecto), CUALQUIER manager
-puede fichar un jugador de tu plantilla sin tu aprobación pagando un
-múltiplo de su valor de mercado. Si eso te deja sin jugadores suficientes
-para cubrir una posición de tu alineación, Comunio te penaliza con
-**-4 puntos por esa posición vacía** esa jornada.
+Motivación — Futmondo también tiene cláusula de rescisión (endpoint
+`POST /1/market/rosterclause`, ver clients/futmondo_client.py:pay_clause,
+visto en la propia UI de la app): si está activada en la liga, CUALQUIER
+manager puede fichar un jugador de tu plantilla sin tu aprobación pagando
+su cláusula. No se ha confirmado con una fuente oficial si Futmondo
+penaliza igual que Comunio (-4 puntos por posición vacía en la alineación)
+cuando eso te deja sin jugadores suficientes para cubrir una posición —
+se mantiene la misma vigilancia por precaución conservadora: aunque la
+penalización exacta no esté confirmada, quedarte sin poder alinear a
+nadie en una posición nunca es deseable.
 
 El bot no puede (todavía) saber si a un jugador concreto se lo van a
 clausular, pero SÍ puede vigilar si la plantilla tiene margen de reserva
@@ -22,7 +22,7 @@ automáticamente. Eso es lo que comprueba este módulo.
 from __future__ import annotations
 
 import config
-from clients.comunio_client import COMUNIO_INJURY_STATUSES
+from clients.futmondo_client import is_injury_status
 from engine.lineup_optimizer import FORMATIONS
 
 
@@ -33,7 +33,7 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
 
     `squad`: lista de jugadores con al menos "position" (POR/DEF/MED/DEL)
     y "status" (para poder descontar lesionados/sancionados — ver
-    clients.comunio_client.COMUNIO_INJURY_STATUSES). Normalmente toda la
+    clients.futmondo_client.is_injury_status()). Normalmente toda la
     plantilla, no solo los titulares de esta jornada.
 
     Devuelve un dict por posición:
@@ -55,7 +55,7 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
     assessment = {}
     for position, required in slots.items():
         players_in_position = [p for p in squad if p.get("position") == position]
-        available = [p for p in players_in_position if p.get("status") not in COMUNIO_INJURY_STATUSES]
+        available = [p for p in players_in_position if not is_injury_status(p.get("status"))]
         bench = len(available) - required
         assessment[position] = {
             "total": len(players_in_position),

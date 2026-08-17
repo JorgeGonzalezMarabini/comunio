@@ -11,43 +11,46 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Comunio ---
-# Capturado con Chrome DevTools el 2026-08-15 (login real + navegación autenticada).
-# La web (www.comunio.es, Next.js) y la API REST (api.comunio.es) son dominios
-# distintos: el bot habla siempre con api.comunio.es.
-COMUNIO_EMAIL = os.getenv("COMUNIO_EMAIL")
-COMUNIO_PASSWORD = os.getenv("COMUNIO_PASSWORD")
-COMUNIO_BASE_URL = os.getenv("COMUNIO_BASE_URL", "https://api.comunio.es")
-COMUNIO_AUTH_HEADER = os.getenv("COMUNIO_AUTH_HEADER", "Authorization")
-# Esquema asumido por convención (access_token/refresh_token en localStorage,
-# header "Authorization" confirmado por HAR). No se ha podido confirmar el
-# valor literal del prefijo sin exponer el token real; si el cliente da 401
-# con "Bearer", probar sin prefijo o con otro esquema.
-COMUNIO_AUTH_SCHEME = os.getenv("COMUNIO_AUTH_SCHEME", "Bearer")
+# --- Futmondo ---
+# Capturado con Chrome DevTools el 2026-08-17 (sesión real en app.futmondo.com,
+# app Flutter Web contra un único dominio: api.futmondo.com).
+#
+# NO hay endpoint de login conocido (ni en captura propia ni en la
+# referencia comunitaria vicenteqa/futmondo-utils) — token y userid se
+# obtienen a mano iniciando sesión una vez en la web y leyendo
+# localStorage["flutter.token"] / localStorage["flutter.id_user"] desde la
+# consola del navegador (F12 -> Console -> `localStorage.getItem("flutter.token")`).
+# Sin confirmar cuánto dura el token; si deja de funcionar (401/datos
+# vacíos), hay que repetir la captura manual y actualizar el secret.
+FUTMONDO_TOKEN = os.getenv("FUTMONDO_TOKEN")
+FUTMONDO_USER_ID = os.getenv("FUTMONDO_USER_ID")
+FUTMONDO_BASE_URL = os.getenv("FUTMONDO_BASE_URL", "https://api.futmondo.com")
 
-# Una liga privada = una "community". Se obtiene tras el login (a confirmar
-# el campo exacto de la respuesta) o inspeccionando la URL de la app una vez
-# dentro de la liga. De momento configurable a mano.
-COMUNIO_COMMUNITY_ID = os.getenv("COMUNIO_COMMUNITY_ID")
-# Igual que COMUNIO_COMMUNITY_ID: necesario para casi todos los endpoints
-# (van scoped a /users/{userId}/...) y todavía no se ha confirmado que venga
-# en la respuesta de login, así que es configurable a mano de momento.
-COMUNIO_USER_ID = os.getenv("COMUNIO_USER_ID")
+# Un campeonato ("championship") es una liga privada o pública dentro de
+# Futmondo; "userteamId" es el equipo de ESE usuario en ESE campeonato en
+# concreto (un mismo usuario puede tener varios equipos, uno por
+# campeonato). Ambos se ven en el body de cualquier petición autenticada
+# mientras navegas la app (DevTools -> Network -> cualquier POST a
+# api.futmondo.com -> Payload). Liga de prueba usada en la sesión de
+# captura: championshipId=6a82c086b4e159a76ab3b3d8,
+# userteamId=6a82c08704b95c71b37179a4 (liga descartable, solo de pruebas).
+FUTMONDO_CHAMPIONSHIP_ID = os.getenv("FUTMONDO_CHAMPIONSHIP_ID")
+FUTMONDO_USERTEAM_ID = os.getenv("FUTMONDO_USERTEAM_ID")
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- Base de datos ---
-DATABASE_PATH = os.getenv("DATABASE_PATH", "db/comunio.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "db/futmondo.db")
 
 # --- Pesos del evaluador (engine/evaluator.py) ---
 # Configurables para poder ajustarlos con el tiempo sin tocar código.
 # Para DECIDIR PUJAS: el precio importa (relación calidad/precio del
 # mercado, con presupuesto limitado que repartir entre candidatos).
 EVALUATOR_WEIGHTS = {
-    "comunio_points_per_price": 0.35,   # rendimiento Comunio relativo al precio
-    "comunio_trend": 0.15,              # tendencia de puntuación reciente
+    "futmondo_points_per_price": 0.35,  # rendimiento Futmondo relativo al precio
+    "futmondo_trend": 0.15,             # tendencia de puntuación reciente
     "xg": 0.25,                         # expected goals (Understat)
     "minutes_played": 0.15,             # continuidad / peso en su equipo
     "injury_penalty": 0.10,             # penalización si lesionado/duda
@@ -56,10 +59,10 @@ EVALUATOR_WEIGHTS = {
 # Para ELEGIR ALINEACIÓN: el precio NO debe importar — un jugador de la
 # plantilla ya está comprado, su precio es coste hundido. Reutilizar
 # EVALUATOR_WEIGHTS aquí penalizaría injustamente a los fichajes caros
-# (ver jobs/set_lineup.py). Mismas features, sin "comunio_points_per_price".
+# (ver jobs/set_lineup.py). Mismas features, sin "futmondo_points_per_price".
 LINEUP_EVALUATOR_WEIGHTS = {
-    "comunio_points_per_price": 0.0,
-    "comunio_trend": 0.30,
+    "futmondo_points_per_price": 0.0,
+    "futmondo_trend": 0.30,
     "xg": 0.40,
     "minutes_played": 0.30,
     "injury_penalty": 0.10,
@@ -71,7 +74,7 @@ BIDDING_SAFETY_LIMITS = {
     "max_spend_per_player": 15_000_000,      # tope absoluto por jugador
     "max_budget_risk_per_matchday_pct": 0.30,  # % máx. del presupuesto restante jugable en una jornada
     "min_budget_reserve": 2_000_000,          # colchón que nunca se toca
-    # Cuánto por encima del precio/VM real del jugador (Comunio) se está
+    # Cuánto por encima del precio/VM real del jugador (Futmondo) se está
     # dispuesto a pujar como máximo, escalado por el score (0..1) del
     # jugador: prima_aplicada = max_premium_over_price_pct * score. Un
     # jugador con score 1.0 se puja hasta un +20% sobre su VM; uno con
@@ -93,16 +96,18 @@ BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.
 BIDDING_POSITION_RISK_BOOST = float(os.getenv("BIDDING_POSITION_RISK_BOOST", "0.15"))
 
 # --- Venta de jugadores (engine/selling_strategy.py) ---
-# % mínimo de plusvalía (precio actual vs. precio de compra real,
-# "purchaseInfo.price" de squad) para considerar vender un jugador. Vender
-# es la ÚNICA fuente de ingresos en Comunio (no hay salario pasivo, ver
-# README) — la estrategia documentada es comprar barato y vender cuando
-# sube; con un máximo de ±15%/día de fluctuación, un 10% es un punto de
-# partida razonable, sin calibrar todavía con resultados reales.
+# % mínimo de plusvalía (precio actual vs. precio de referencia,
+# "buyPrice" de roster) para considerar vender un jugador. Vender es la
+# ÚNICA fuente de ingresos en Futmondo, igual que en Comunio (no hay
+# salario pasivo) — la estrategia documentada es comprar barato y vender
+# cuando sube; 10% es un punto de partida razonable, sin calibrar todavía
+# con resultados reales.
 SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
 
 # --- Alineación (engine/lineup_optimizer.py) ---
-# Formato real del sitio (confirmado por captura): sin el "1-" del portero.
+# Formato real de Futmondo (confirmado por captura, campo "strategy" de
+# /1/userteam/lineup): CON guiones, ej. "4-4-2" — a diferencia de Comunio,
+# que los quitaba en su "tactic". No hace falta convertir para mandarlo.
 DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
 
 # Cuánto descuenta el score de un jugador la dificultad de su próximo rival
@@ -110,13 +115,13 @@ DEFAULT_FORMATION = os.getenv("DEFAULT_FORMATION", "4-4-2")
 # el score por completo). Ver engine.lineup_optimizer.apply_fixture_difficulty.
 LINEUP_DIFFICULTY_WEIGHT = float(os.getenv("LINEUP_DIFFICULTY_WEIGHT", "0.2"))
 
-# Envía la alineación decidida a Comunio de verdad (además de auditarla en
-# `lineup_decisions`, que pasa siempre). Activado por defecto: el mapeo de
-# slots y el body están confirmados al 100% con una prueba real completa
-# (once de 11 jugadores + réplica exacta del PUT devolviendo 200 OK,
-# 2026-08-15 — ver clients/comunio_client.py y engine/lineup_optimizer.py).
-# Poner en false en .env si se prefiere revisar manualmente antes de
-# dejarlo escribir solo en una liga real.
+# Envía la alineación decidida a Futmondo de verdad (además de auditarla en
+# `lineup_decisions`, que pasa siempre). El mapeo de slots de
+# /2/userteam/changeplayer solo está confirmado al 100% para la formación
+# 4-4-2 (ver TODO en engine/lineup_optimizer.py) — dejar en false en .env
+# si se usa otra formación distinta de DEFAULT_FORMATION hasta confirmarla
+# con una prueba real, o para revisar manualmente antes de dejarlo escribir
+# solo en una liga real.
 ENABLE_LINEUP_AUTO_SUBMIT = os.getenv("ENABLE_LINEUP_AUTO_SUBMIT", "true").lower() == "true"
 
 # --- Logging / auditoría ---

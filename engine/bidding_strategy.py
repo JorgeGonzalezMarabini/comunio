@@ -24,19 +24,20 @@ def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int
       - la reserva mínima que nunca se toca
       - el dinero YA comprometido en ofertas pendientes sin resolver
 
-    `pending_committed`: suma de TODAS tus ofertas de compra todavía
-    pendientes en Comunio (sin resolver), sea de hoy o de días anteriores
-    — ver db.models.get_player_features / clients.comunio_client.get_offers.
-    Regla de negocio real y crítica (confirmada en la FAQ oficial de
-    Comunio, 2026-08-16): Comunio NO descuenta el saldo (`credit`) cuando
-    colocas una oferta, solo cuando se EJECUTA al cerrar el mercado — y el
-    periodo de transferencias puede durar más de un día. Si no se resta
-    aquí, el bot podría acumular más compromiso del que su saldo real
-    soporta (varias ofertas pendientes de días distintos ejecutándose a la
-    vez), dejando el saldo EN NEGATIVO — y la regla de Comunio es tajante:
-    saldo negativo al cierre de una jornada = **0 puntos esa jornada
-    entera**, sea cual sea la alineación. Por eso se resta antes que
-    ninguna otra cosa, no solo como un límite más entre varios.
+    `pending_committed`: aproximación a TODAS tus pujas de compra todavía
+    pendientes (sin resolver), sea de hoy o de días anteriores — ver
+    db.models.get_pending_bid_amount() / clients.futmondo_client.
+    total_pending_bid_amount(). En Comunio esto estaba confirmado por su
+    propia FAQ oficial (saldo negativo al cierre de jornada = 0 puntos esa
+    jornada entera) y por un endpoint real que listaba las ofertas
+    pendientes; en Futmondo no se ha encontrado ni la regla exacta de
+    penalización por saldo negativo confirmada en una fuente oficial ni un
+    endpoint equivalente (ver TODO en clients/futmondo_client.py) — se
+    mantiene la misma resta defensiva por precaución: si el saldo
+    (`budget`/`information`) tampoco se descuenta hasta resolver el
+    mercado (razonable asumirlo, visto que el `budget` que devuelve
+    `/2/userteam/changeplayer` no cambia al pujar), un bot que ignore esto
+    podría comprometer más de lo que el saldo real soporta.
     """
     limits = config.BIDDING_SAFETY_LIMITS
 
@@ -90,9 +91,9 @@ def decide_bid(
 ) -> dict | None:
     """
     Decide si pujar por `player` (debe incluir "id", "score" de
-    engine/evaluator.py, y "price"/"recommended_price" — el VM real de
-    Comunio, ver db.models.get_player_features) y cuánto, respetando los
-    límites de seguridad.
+    engine/evaluator.py, y "price" — el VM/precio real de Futmondo, ver
+    db.models.get_player_features) y cuánto, respetando los límites de
+    seguridad.
 
     El importe se ancla al precio/VM REAL del jugador, no a una fracción
     arbitraria del presupuesto: se puja el VM + una prima que crece con el
@@ -107,8 +108,8 @@ def decide_bid(
     por qué se pujó por ese jugador en concreto.
 
     `pending_committed`: ver max_biddable_amount() — dinero ya comprometido
-    en ofertas pendientes sin resolver (regla crítica: saldo negativo al
-    cierre de jornada = 0 puntos esa jornada, ver README).
+    en pujas pendientes sin resolver (protección defensiva de saldo, ver
+    README).
 
     Devuelve None si no se debe pujar, o un dict:
         {"player_id": ..., "amount": ..., "score": ..., "reason": "..."}
@@ -120,7 +121,7 @@ def decide_bid(
     if score < min_score_threshold:
         return None
 
-    price = player.get("price") or player.get("recommended_price") or 0
+    price = player.get("price") or 0
     if price <= 0:
         # Sin precio de referencia real no hay base segura para calcular
         # una puja — mejor no pujar que inventar un importe a ciegas.
@@ -135,12 +136,14 @@ def decide_bid(
 
     amount = min(desired_amount, cap)
 
-    # Bug real detectado en producción (2026-08-15): el cap de seguridad
-    # puede recortar `amount` por debajo del precio/VM real del jugador
-    # (p.ej. si el presupuesto de jornada ya está casi agotado por pujas
-    # anteriores en la misma pasada) — Comunio rechaza esas pujas por ir
-    # por debajo del precio. Mejor no pujar que mandar una oferta condenada
-    # a fallar: si el cap no llega ni al precio base, no hay margen seguro
+    # Bug real detectado en producción con Comunio (2026-08-15, ver
+    # historial de commits): el cap de seguridad puede recortar `amount`
+    # por debajo del precio/VM real del jugador (p.ej. si el presupuesto
+    # de jornada ya está casi agotado por pujas anteriores en la misma
+    # pasada) — Comunio rechazaba esas pujas por ir por debajo del precio;
+    # de Futmondo no se ha confirmado el mismo rechazo exacto, pero mejor
+    # no pujar que mandar una oferta con toda probabilidad condenada a
+    # fallar: si el cap no llega ni al precio base, no hay margen seguro
     # para pujar por este jugador en este momento.
     if amount < price:
         return None
@@ -183,14 +186,13 @@ def decide_bids_for_market(
     llamada ni varias llamadas en la misma jornada pueden superar el límite
     configurado entre todas.
 
-    `pending_committed`: la protección de saldo real — suma de TODAS las
-    ofertas de compra pendientes sin resolver en Comunio ahora mismo (ver
-    clients.comunio_client.ComunioClient.get_offers(), no solo las de hoy).
-    Se pasa tal cual a cada decide_bid(): Comunio no descuenta el saldo
-    hasta que una oferta se ejecuta, así que ignorar esto podría dejar
-    saldo negativo si varias ofertas pendientes de días distintos se
-    ejecutan a la vez — y saldo negativo al cierre de jornada son 0 puntos
-    esa jornada entera (regla oficial de Comunio, ver README).
+    `pending_committed`: la protección de saldo (defensiva, ver TODO en
+    clients/futmondo_client.py) — aproximación a TODAS las pujas de compra
+    pendientes sin resolver ahora mismo (ver db.models.
+    get_pending_bid_amount(), no solo las de hoy). Se pasa tal cual a cada
+    decide_bid() por si Futmondo tampoco descuenta el saldo hasta que una
+    puja se resuelve (razonable asumirlo, sin confirmar la regla exacta de
+    penalización por saldo negativo — ver README).
     """
     decisions = []
     risked = already_risked_this_matchday

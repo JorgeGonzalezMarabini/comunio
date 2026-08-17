@@ -6,8 +6,8 @@ from engine.evaluator import evaluate_players, normalize_pool, rank_players, sco
 
 def test_score_player_weights_and_injury_penalty():
     weights = {
-        "comunio_points_per_price": 0.35,
-        "comunio_trend": 0.15,
+        "futmondo_points_per_price": 0.35,
+        "futmondo_trend": 0.15,
         "xg": 0.25,
         "minutes_played": 0.15,
         "injury_penalty": 0.10,
@@ -31,16 +31,16 @@ def test_rank_players_orders_by_score_desc():
             {"id": "a", "points_per_price": 0.2},
             {"id": "b", "points_per_price": 0.9},
         ],
-        weights={"comunio_points_per_price": 1.0, "comunio_trend": 0, "xg": 0, "minutes_played": 0, "injury_penalty": 0},
+        weights={"futmondo_points_per_price": 1.0, "futmondo_trend": 0, "xg": 0, "minutes_played": 0, "injury_penalty": 0},
     )
     assert [p["id"] for p in ranked] == ["b", "a"]
 
 
 def test_normalize_pool_minmax_and_injury_flag():
     raw = [
-        {"id": "caro", "price": 9_000_000, "average_points": 15.0, "last_points": 15, "xg": 12.5, "minutes_played": 1200, "games": 13, "status": "ACTIVE"},
-        {"id": "barato", "price": 350_000, "average_points": 8.0, "last_points": 8, "xg": 0.3, "minutes_played": 450, "games": 5, "status": "ACTIVE"},
-        {"id": "lesionado", "price": 1_000_000, "average_points": 4.0, "last_points": 2, "xg": 0.1, "minutes_played": 900, "games": 10, "status": "WEAKENED"},
+        {"id": "caro", "price": 9_000_000, "average_points": 15.0, "last_points": 15, "xg": 12.5, "minutes_played": 1200, "games": 13, "status": ""},
+        {"id": "barato", "price": 350_000, "average_points": 8.0, "last_points": 8, "xg": 0.3, "minutes_played": 450, "games": 5, "status": ""},
+        {"id": "lesionado", "price": 1_000_000, "average_points": 4.0, "last_points": 2, "xg": 0.1, "minutes_played": 900, "games": 10, "status": "injured"},
     ]
     normalized = normalize_pool(raw)
     by_id = {p["id"]: p for p in normalized}
@@ -69,8 +69,8 @@ def test_evaluate_players_end_to_end_ranks_by_combined_score():
     caso que sí demuestra el sesgo de precio con datos exactos.
     """
     raw = [
-        {"id": "1074", "name": "Caro", "price": 9_000_000, "average_points": 15.0, "last_points": 15, "xg": 12.5, "minutes_played": 1200, "games": 13, "status": "ACTIVE"},
-        {"id": "4069", "name": "Barato", "price": 350_000, "average_points": 8.0, "last_points": 8, "xg": 0.3, "minutes_played": 450, "games": 5, "status": "ACTIVE"},
+        {"id": "1074", "name": "Caro", "price": 9_000_000, "average_points": 15.0, "last_points": 15, "xg": 12.5, "minutes_played": 1200, "games": 13, "status": ""},
+        {"id": "4069", "name": "Barato", "price": 350_000, "average_points": 8.0, "last_points": 8, "xg": 0.3, "minutes_played": 450, "games": 5, "status": ""},
     ]
     ranked = evaluate_players(raw, weights=config.EVALUATOR_WEIGHTS)
     assert ranked[0]["score"] > ranked[1]["score"]
@@ -83,7 +83,7 @@ def test_lineup_weights_dont_penalize_expensive_player_by_price():
     datos sintéticos (ver README): un jugador caro pero mejor en todo lo
     demás puede salir peor puntuado que uno barato y mediocre solo por el
     precio si se usan los pesos de PUJA para elegir alineación; con los
-    pesos de ALINEACIÓN (sin comunio_points_per_price) no debe pasar.
+    pesos de ALINEACIÓN (sin futmondo_points_per_price) no debe pasar.
 
     Se llama a score_player() directamente con features ya normalizadas
     (no via evaluate_players/normalize_pool) para poder fijar valores

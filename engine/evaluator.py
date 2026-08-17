@@ -1,13 +1,13 @@
 """
 Motor de evaluación: calcula un score combinado por jugador a partir de
-datos internos de Comunio (puntos, precio, tendencia, estado) y stats
+datos internos de Futmondo (puntos, precio, tendencia, estado) y stats
 externas de Understat (xG, minutos).
 
 Dos capas:
   - `score_player`/`rank_players`: funciones puras sobre features ya
     normalizadas 0..1 (fáciles de testear sin BD).
   - `normalize_pool`/`evaluate_players`: puente real desde
-    `db.models.get_player_features()` (columnas crudas de Comunio +
+    `db.models.get_player_features()` (columnas crudas de Futmondo +
     Understat) a esas features normalizadas.
 
 Los pesos NO están hardcodeados aquí: viven en config.EVALUATOR_WEIGHTS
@@ -16,7 +16,7 @@ para poder ajustarlos con el tiempo sin tocar esta lógica.
 from __future__ import annotations
 
 import config
-from clients.comunio_client import COMUNIO_INJURY_STATUSES
+from clients.futmondo_client import is_injury_status
 
 
 def score_player(player_stats: dict, weights: dict = None) -> float:
@@ -52,8 +52,8 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
     w = weights or config.EVALUATOR_WEIGHTS
 
     score = (
-        w["comunio_points_per_price"] * player_stats.get("points_per_price", 0)
-        + w["comunio_trend"] * player_stats.get("trend", 0)
+        w["futmondo_points_per_price"] * player_stats.get("points_per_price", 0)
+        + w["futmondo_trend"] * player_stats.get("trend", 0)
         + w["xg"] * player_stats.get("xg", 0)
         + w["minutes_played"] * player_stats.get("minutes_played_ratio", 0)
     )
@@ -148,7 +148,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
                 "trend": norm_trend[i],
                 "xg": norm_xg90[i],
                 "minutes_played_ratio": norm_minutes[i],
-                "is_injured_or_doubtful": p.get("status") in COMUNIO_INJURY_STATUSES,
+                "is_injured_or_doubtful": is_injury_status(p.get("status")),
             }
         )
     return normalized

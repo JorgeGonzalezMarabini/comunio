@@ -19,19 +19,19 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m jobs.sync_data
         env:
-          COMUNIO_EMAIL: ${{ secrets.COMUNIO_EMAIL }}
-          COMUNIO_PASSWORD: ${{ secrets.COMUNIO_PASSWORD }}
-          COMUNIO_COMMUNITY_ID: ${{ vars.COMUNIO_COMMUNITY_ID }}
-          COMUNIO_USER_ID: ${{ vars.COMUNIO_USER_ID }}
+          FUTMONDO_TOKEN: ${{ secrets.FUTMONDO_TOKEN }}
+          FUTMONDO_USER_ID: ${{ secrets.FUTMONDO_USER_ID }}
+          FUTMONDO_CHAMPIONSHIP_ID: ${{ vars.FUTMONDO_CHAMPIONSHIP_ID }}
+          FUTMONDO_USERTEAM_ID: ${{ vars.FUTMONDO_USERTEAM_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # db/comunio.db está versionado a propósito (ver README) — sin este
+      # db/futmondo.db está versionado a propósito (ver README) — sin este
       # paso, cada ejecución partiría del último commit y perdería todo lo
       # sincronizado en el run anterior.
       - name: Commit BD actualizada
         run: |
-          git config user.name "comunio-bot"
+          git config user.name "futmondo-bot"
           git config user.email "actions@github.com"
-          git add db/comunio.db logs/
+          git add db/futmondo.db logs/
           git diff --staged --quiet || git commit -m "sync_data: actualiza BD [skip ci]"
           git push

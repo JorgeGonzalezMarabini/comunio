@@ -1,334 +1,224 @@
-# Comunio Liga Bot
+# Futmondo Liga Bot
 
-Bot de gestión automática de un equipo en Comunio (liga privada): fichajes/pujas,
-evaluación de jugadores (Comunio + stats externas), alineaciones automáticas y
-notificación de cada acción. Coste 0: sin APIs de pago ni VPS de pago.
+Bot de gestión automática de un equipo en Futmondo (liga privada, modo
+"Social"): fichajes/pujas, evaluación de jugadores (Futmondo + stats
+externas), alineaciones automáticas y notificación de cada acción. Coste
+0: sin APIs de pago ni VPS de pago.
+
+**Nota de historia**: este proyecto empezó como un bot de Comunio (ver
+`git log` para esa fase) y se migró por completo a Futmondo el
+2026-08-17, a petición del usuario. Nada de Comunio queda en el código —
+API, esquema de BD y engine están reescritos para Futmondo. Se deja esta
+nota porque parte del razonamiento de diseño (p.ej. por qué el precio no
+debe importar al elegir alineación, o por qué vender jugadores no debe
+dejar una posición sin cobertura) se heredó tal cual de esa fase por
+seguir siendo válido, no por descuido.
 
 ## Estado actual
 
-- [x] Captura de endpoints reales de Comunio — hecha el 2026-08-15 con Chrome DevTools sobre una liga de prueba real
-- [x] Cliente de Comunio (`clients/comunio_client.py`) — login (esquema `Bearer` **confirmado** con petición real autenticada) y lectura (standings/squad/market/offers/lineup) contra endpoints reales; **pujar, guardar alineación, retirar puja, poner en venta y quitar de la venta confirmados los cinco al 100%** con pruebas reales (verbo y body exactos, ver abajo) — no queda ninguna escritura basada solo en inferencia
-- [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — Understat implementado contra su endpoint JSON real (`getLeagueData`); **FBref descartado** (bloquea con Cloudflare, ver abajo)
-- [x] Esquema de base de datos (`db/models.py`) — campos alineados con Understat Y con el JSON real de Comunio (squad/market), incluyendo normalización de posición y del "-" de puntos en pretemporada
-- [x] Motor de evaluación (`engine/evaluator.py`) — conectado a datos reales: `normalize_pool()`/`evaluate_players()` parten de `db.models.get_player_features()` (SQL con último snapshot de Comunio + Understat por jugador) y normalizan cada feature 0..1 dentro del pool; pesos configurables en `config.py`, sin calibrar todavía contra resultados reales de liga
-- [x] Estrategia de pujas (`engine/bidding_strategy.py`) — el importe se ancla al VM/precio real del jugador + una prima que escala con el score, siempre topado por los límites de seguridad de `config.py`; **dos bugs reales corregidos**: (1) el cap de seguridad podía recortar el importe por debajo del precio del jugador y Comunio rechazaba la puja — `decide_bid()` ya no puja si el cap no llega al precio; (2) **el más grave** — el bot no restaba las ofertas de compra pendientes sin resolver de días anteriores, pudiendo comprometer más saldo del real y dejarlo en negativo (ver sección dedicada más abajo: saldo negativo = **0 puntos toda la jornada**, regla oficial de Comunio); `decide_bids_for_market()` decide varias pujas de una tacada respetando el riesgo acumulado en la misma pasada, ahora también priorizando posiciones en riesgo de plantilla (`apply_position_priority()`)
-- [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — formaciones básicas (formato humano "4-4-2", con `to_api_tactic()` para convertir al "442" real de la API); **dificultad del rival ya incorporada** vía `apply_fixture_difficulty()` + `laliga_stats_client.next_match_difficulty()` (forecast de Understat, verificado que siempre es en perspectiva del equipo local)
-- [x] `jobs/sync_data.py` — mapeo real Comunio+Understat -> `db/models.py`, corrido de verdad en producción vía el cron. También **reconcilia el estado de pujas y ventas** (`bids.status`/`sales.status`: 'placed'/'listed' -> 'won'/'lost'/'sold') comparando `get_offers()` y la plantilla actual — nada más lo hacía, así que sin esto la auditoría se quedaba congelada para siempre
-- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real, con presupuesto (`credit`) y riesgo ya comprometido hoy leídos de Comunio/BD; cada intento fallido (HTTP o rechazo de negocio con HTTP 200, `ComunioOfferError`) se audita sin tumbar los demás. **Corrido de verdad en producción** (2026-08-16, cron real vía GitHub Actions): pujó por 4 jugadores reales tras el fix del bug de `on_market`
-- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (con **pesos distintos a los de puja**, ver nota abajo) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_slots()`/`pick_substitutes()` -> `set_lineup()` real. La decisión SIEMPRE se audita en `lineup_decisions`; el envío real a Comunio está **activado por defecto** (`config.ENABLE_LINEUP_AUTO_SUBMIT=true`, con opción de desactivarlo en `.env`) ahora que el mapeo de slots está confirmado al 100%. Ahora también avisa de **riesgo de plantilla** (ver `engine/squad_risk.py` más abajo)
-- [x] `jobs/run_sales.py` (nuevo) — identifica jugadores comprados por el bot con plusvalía suficiente (`engine/selling_strategy.py`, sobre `purchaseInfo.price` real de squad) y los pone en venta (`list_for_sale()`); único ingreso real del bot (ver sección dedicada más abajo)
-- [~] Jobs y scheduler en GitHub Actions — `schedule:` activado en los 4 YAMLs (incluido el nuevo `run_sales.yml`) + persistencia de `db/comunio.db` entre ejecuciones (commit automático); **pendiente**: configurar Secrets/Variables del nuevo job en GitHub (mismos que los demás, ver sección "Activar el cron")
-- [x] Notificaciones por Telegram (`notifier.py`)
+- [x] Captura de endpoints reales de Futmondo — hecha el 2026-08-17 con Chrome DevTools sobre una liga de prueba real ("Liga de prueba bot", modo Social, creada para la propia sesión de captura)
+- [x] Cliente de Futmondo (`clients/futmondo_client.py`) — lectura (plantilla/mercado/alineación/ficha de jugador) y escritura (pujar, poner en venta, cambiar alineación) contra endpoints reales, cada uno marcado explícitamente como confirmado con captura propia o heredado sin verificar de la referencia comunitaria (ver detalle abajo)
+- [x] Cliente de stats externas (`clients/laliga_stats_client.py`) — sin cambios frente a la fase de Comunio: Understat contra su endpoint JSON real; FBref descartado (bloquea con Cloudflare)
+- [x] Esquema de base de datos (`db/models.py`) — reescrito para los campos reales de Futmondo (`value`/`buyPrice`/`role` en vez de `quotedprice`/`purchaseInfo`/posición en inglés)
+- [x] Motor de evaluación (`engine/evaluator.py`) — misma lógica que en la fase de Comunio (normaliza features 0..1 dentro del pool, pesos en `config.py`), adaptada a los nombres de columna nuevos
+- [x] Estrategia de pujas (`engine/bidding_strategy.py`) — misma lógica de seguridad (tope por jugador, % de presupuesto por jornada, reserva mínima, prima sobre el VM real) — la protección contra saldo negativo se mantiene por precaución aunque en Futmondo no se ha podido confirmar la regla exacta de penalización (ver sección dedicada)
+- [x] Optimizador de alineaciones (`engine/lineup_optimizer.py`) — **reescrito de cero**: Futmondo numera los slots de la alineación de forma totalmente distinta a Comunio (enteros 0..10 en vez de un string de posición + categoría de banquillo), confirmado solo para la formación 4-4-2 (ver TODO en el propio módulo)
+- [x] `jobs/sync_data.py` — mapeo real Futmondo + Understat -> `db/models.py`; reconcilia pujas/ventas comparando plantilla y mercado actuales (sin endpoint externo de "mis ofertas", a diferencia de Comunio — ver sección dedicada)
+- [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
+- [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()` -> `change_lineup()` real. Por ahora solo manda el once titular, sin banquillo (ver TODO)
+- [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
+- [~] Jobs y scheduler en GitHub Actions — los 4 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
+- [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
 
-## Endpoints reales de Comunio (capturados 2026-08-15)
+## Por qué Futmondo y no Comunio
 
-Dos dominios distintos: `www.comunio.es` es el frontend (Next.js, no se usa
-desde el bot) y `https://api.comunio.es` es la API REST real que sí se usa.
+Decisión del usuario (2026-08-17): el proyecto pasa a gestionar una liga
+real de Futmondo, no de Comunio. Dado que ambas plataformas tienen APIs
+completamente distintas (dominios, forma de autenticación, nombres de
+campo, mecánica de alineación...), se optó por sustituir Comunio del todo
+en vez de mantener ambos proveedores en paralelo — más simple de mantener
+para un proyecto de una sola liga.
 
-Auth: NO es cookie de sesión — `POST /login` devuelve `access_token` /
-`refresh_token` que el frontend guarda en `localStorage` y reenvía en cada
-llamada como header `Authorization: Bearer <token>` — **esquema confirmado**
-con una petición real autenticada (200 OK), no solo una suposición.
+## Endpoints reales de Futmondo (capturados 2026-08-17)
 
-La API es HAL/HATEOAS: casi toda respuesta trae un `_links` con URLs
-completas para las acciones disponibles sobre ese recurso — mucho más
-fiable que adivinar rutas.
+Un único dominio: `https://api.futmondo.com` — a diferencia de Comunio no
+hay separación frontend/API (la web, `app.futmondo.com`, es una app
+Flutter Web que habla contra este mismo dominio).
 
-| Acción | Endpoint |
-|---|---|
-| Login | `POST /login` — body `{username, password, tzoffset}` |
-| Estado de sesión | `GET /login/state` |
-| Plantilla | `GET /users/{userId}/squad` |
-| Clasificación | `GET /communities/{communityId}/standings?period=total&wpe=true` |
-| Miembros de la liga | `GET /communities/{communityId}/members` |
-| Mercado (compra/venta) | `GET /communities/{communityId}/users/{userId}/exchangemarket` |
-| Ofertas/pujas activas | `GET /communities/{communityId}/users/{userId}/offers?current` (el query param es obligatorio, sin él da 500) |
-| Alineación actual | `GET /communities/{communityId}/users/{userId}/lineup` |
-| Logout | `POST /communities/{communityId}/users/{userId}/logout` — body `{userId}` |
+**Auth — sin login conocido**: `token` y `userid` no se obtienen de un
+`POST /login` (no existe, ni en captura propia ni en la referencia
+comunitaria de [vicenteqa/futmondo-utils](https://github.com/vicenteqa/futmondo-utils),
+que documenta buena parte de esta misma API). Se capturan a mano iniciando
+sesión una vez en `app.futmondo.com` y leyendo
+`localStorage.getItem("flutter.token")` / `"flutter.id_user"` desde la
+consola del navegador — la app es Flutter Web, guarda ahí la sesión igual
+que el frontend de Comunio guardaba su `access_token` en `localStorage`.
+No se ha confirmado cuánto dura el token ni si refresca solo.
 
-**Pujar**: el propio `_links["game:exchangemarket:placeoffers"]` de
-`get_market()` apunta literalmente a `.../users/{userId}/offers` (el mismo
-path que el GET) — confirma que es un POST ahí. El objeto resultante,
-releído después con `get_offers()`, tiene esta forma real (validado con una
-puja real de prueba, con permiso explícito):
-```
-{id, type: "PURCHASE", tradable: {id, name, ...}, user: {...},
- tradingPartner: {...}, price, datecreated, state: "PENDING",
- _links: {"game:offer:withdraw": ".../offers/{id}", "game:offer:decline": "..."}}
-```
-El body de creación (`{"type": "PURCHASE", "tradable": {"id": ...}, "price": ...}`)
-es una inferencia razonable a partir de esa forma, no un POST confirmado
-literalmente. `game:offer:withdraw` da el path para retirar una puja propia
-(`withdraw_bid()`), verbo DELETE por convención sin confirmar tampoco.
+Todas las llamadas observadas son **POST**, incluso las de solo lectura,
+con `token`/`userid` en el **body** (no en un header `Authorization` como
+Comunio): `{"header": {"token": ..., "userid": ...}, "query": {"championshipId": ..., "userteamId": ..., ...}}`.
 
-**Guardar alineación — CONFIRMADO AL 100%** (2026-08-15, once completo de 11
-jugadores en la liga de prueba, interceptando la llamada PUT real del
-propio frontend + réplica exacta del body devolviendo 200 `{"status": "OK"}`):
+| Acción | Endpoint | Confirmado |
+|---|---|---|
+| Plantilla | `POST /1/userteam/roster` | ✅ captura propia |
+| Resumen del equipo (budget, teamValue...) | `POST /1/userteam/information` | ✅ captura propia |
+| Alineación actual | `POST /1/userteam/lineup` | ✅ captura propia |
+| Cambiar alineación | `POST /2/userteam/changeplayer` | ✅ captura propia |
+| Mercado de fichajes | `POST /1/market/players` | ✅ captura propia |
+| Mis jugadores en venta | `POST /1/market/myplayers` | ✅ captura propia |
+| Pujar | `POST /1/market/bid` | ✅ captura propia |
+| Poner en venta | `POST /1/market/putonmarket` | ✅ captura propia |
+| Ficha de jugador (+ histórico de precio) | `POST /1/player/summary` | ✅ captura propia |
+| Quitar de la venta | `POST /1/market/cancelsell` | ⚠️ solo referencia comunitaria |
+| Pagar cláusula | `POST /1/market/rosterclause` | ⚠️ solo referencia comunitaria |
+| Ocultar en mercado | `POST /5/market/toggleplayer` | ⚠️ solo referencia comunitaria, no usado por el bot |
+| Ofertas de cláusula sobre TU plantilla | `POST /1/market/rosterbids` | ✅ visto en captura, no usado por el bot |
+| Equipos de la liga | `POST /1/league/championshipteams` | ✅ visto en captura, no usado por el bot |
+| Plantillas de todos los managers | `POST /5/league/championshipplayers` | ✅ visto en captura, no usado por el bot |
 
-```
-PUT /communities/{communityId}/users/{userId}/lineup
-body: {
-    "userId": <user_id, int>,
-    "tactic": "442",                              # SIN guiones, ver to_api_tactic()
-    "lineup": {"1": "<playerId>", ..., "11": "<playerId>"},   # strings
-    "substitutes": {"striker": "", "midfielder": "", "defender": "", "keeper": ""},
-    "type": "default",
-}
-```
+Ver el docstring de `clients/futmondo_client.py` para el detalle completo
+de cada body/respuesta real, incluidos los campos exactos de cada
+recurso (jugador de roster/mercado, respuesta de pujar, etc.).
 
-Numeración de slots CONFIRMADA (patrón fijo, no depende del jugador): se
-numeran 1..11 agrupando por posición en ESTE orden fijo — **delanteros ->
-centrocampistas -> defensas -> portero** (portero SIEMPRE el último slot).
-En un 4-4-2: slots 1-2 delanteros, 3-6 centrocampistas, 7-10 defensas, 11
-portero. Ver `engine.lineup_optimizer.build_lineup_slots()`. `substitutes`
-es UN suplente por categoría de posición (no una lista, solo 4 slots de
-banquillo fijos en la UI) — ver `pick_substitutes()`.
-
-**Pujar — CONFIRMADO AL 100%** (2026-08-15, interceptando la llamada POST
-real del frontend al pujar por un jugador nuevo + réplica exacta con un
-`offerid` real devuelto):
+**Pujar — CONFIRMADO AL 100%** (2026-08-17, puja real sobre un jugador del
+mercado en la liga de prueba + relectura confirmando el precio):
 
 ```
-POST /communities/{communityId}/users/{userId}/offers
-body: {"offers": [{"price": <amount>, "tradableid": <playerId>, "type": "NEW"}]}
+POST /1/market/bid
+body.query: {..., "player_slug": ..., "player_id": ..., "price": <amount>, "isClause": false}
+respuesta real: {"answer": {"code": "api.general.ok"}, ...}
 ```
 
-Distinto de lo inferido inicialmente (`"tradable": {"id": ...}` anidado,
-`"type": "PURCHASE"`) — el body real usa `"tradableid"` plano y `"type":
-"NEW"` al crear (`"PURCHASE"` es el tipo que aparece luego en la oferta ya
-creada al releerla, un concepto distinto). Además, `"offers"` es una
-**lista**: la API admite pujar por varios jugadores en una sola llamada
-(no usado todavía, ver TODO en `place_bid`).
+A diferencia de Comunio, la respuesta **no incluye un id de oferta** — no
+hay forma de retirar una puja concreta por id, y el seguimiento de "pujas
+pendientes propias" se hace por `player_id` contra la plantilla y el
+mercado actuales (ver sección "Reconciliación de pujas" más abajo).
 
-**Importante**: la respuesta es HTTP 200 incluso si la oferta se rechaza a
-nivel de negocio (ej. el jugador ya no está en el mercado, o **pujar por
-debajo del precio/VM del jugador** — visto en producción el 2026-08-16) —
-hay que mirar `response["response"][i]["status"]`, no solo el código HTTP.
-`place_bid()` ya lo comprueba y lanza `ComunioOfferError` si no es `"OK"`.
-
-Ese rechazo por precio bajo destapó un bug real en `bidding_strategy.py`:
-el cap de seguridad de jornada podía recortar el importe calculado por
-debajo del precio del jugador (p.ej. con el presupuesto de jornada casi
-agotado por pujas anteriores en la misma pasada), y `decide_bid()` no lo
-comprobaba antes de enviar — mandaba una puja condenada a ser rechazada.
-Corregido: si el cap no llega al precio, no se puja por ese jugador en
-este momento (mejor no pujar que fallar).
-
-Este es el segundo caso (después de la alineación) en que el body real
-difería de una inferencia razonable por convención en detalles no obvios
-— buen recordatorio de que "parece razonable" no sustituye a probarlo.
-
-**Retirar puja — CONFIRMADO AL 100%** (2026-08-15, interceptando la llamada
-real del frontend al pulsar "Retirar oferta" + réplica exacta sobre otra
-oferta real, comprobando después que desaparece de `get_offers()`):
+**Cambiar alineación — CONFIRMADO AL 100% solo para 4-4-2** (2026-08-17,
+alineación real completa, cada jugador colocado interceptando la llamada
+POST real del frontend + relectura con `GET .../lineup` confirmando la
+posición numérica asignada):
 
 ```
-PUT /communities/{communityId}/users/{userId}/offers/{offerId}
-body: {}
+POST /2/userteam/changeplayer
+body.query.changes: [{"cpt": false, "to": <playerId>, "position": <int>,
+                       "isBench": false, "multiposition": false}, ...]
+respuesta real: {"answer": {"code": "api.general.ok", "budget": <int>, "rc": "-1"}, ...}
 ```
 
-Un tercer caso de inferencia incorrecta: se asumía **DELETE** por
-convención REST (`game:offer:withdraw` sonaba a "borra este recurso"), pero
-el verbo real es **PUT con body vacío** — el path ya identifica la oferta,
-el verbo+URL es toda la instrucción que hace falta. Con esto, **ninguna de
-las tres escrituras del bot depende ya de una convención sin probar**.
+Numeración de `position` confirmada: enteros consecutivos **empezando en
+0** (a diferencia de Comunio, que empezaba en 1), en el orden delanteros
+-> centrocampistas -> defensas -> portero, portero SIEMPRE el último
+índice (10 en un 4-4-2 con 11 titulares). Confirmado en la prueba real:
+portero -> 10, tres defensas colocados -> 6, 7, 8. **No probado con
+ninguna formación distinta de 4-4-2** — `engine/lineup_optimizer.py`
+generaliza el mismo criterio (numeración consecutiva, portero al final)
+para el resto de formaciones de `config.py`, pero es una extrapolación
+razonada, no una confirmación. Tampoco se ha probado el banquillo/
+suplentes: `jobs/set_lineup.py` de momento solo manda el once titular.
 
-**Nota de privacidad de la captura:** el valor real del `access_token` nunca
-se expuso a mí ni se registró en ningún sitio — se leyó únicamente dentro
-del propio navegador (`localStorage.getItem(...)`) para construir el header
-de peticiones de prueba, y el resultado que se me devolvió fue solo la
-forma/valores de los datos de negocio (plantilla, mercado, ofertas — nada
-sensible), nunca el token en sí. La extensión de captura además bloquea
-activamente la lectura de cookies/tokens en otros contextos, y esa
-protección se respetó tal cual en vez de intentar sortearla.
-
-## Stats externas: Understat sí, FBref no
-
-FBref bloquea cualquier petición simple con un reto Cloudflare (`403 Just a
-moment...`) — no es viable desde `requests`/GitHub Actions sin meter un
-navegador headless completo, así que se descartó (decisión del usuario,
-2026-08-15).
-
-Understat, en cambio, expone un endpoint JSON real que la propia web usa
-por AJAX — nada de parsear HTML ni `<script>` embebidos:
+**Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
+en venta desde la pestaña "Vender" + comprobado en la UI que aparece en
+"Mis ventas"):
 
 ```
-GET https://understat.com/getLeagueData/{league}/{season}
--> {"teams": {...}, "players": [...], "dates": [...]}
+POST /1/market/putonmarket
+body.query: {..., "price": <asking_price>, "player_id": <id>, "isClause": null, "mode": null, "toLoan": null}
+respuesta real: {"answer": {"code": "api.general.ok"}, ...}
 ```
 
-Verificado contra `La_liga/2025`: 600 jugadores, 20 equipos, con xG, xA,
-minutos, goles, asistencias, tarjetas y posición por jugador — cubre casi
-todo lo que iba a aportar FBref. El calendario (`dates[].forecast`) da
-además una señal directa de dificultad del próximo rival para
-`lineup_optimizer.py`.
+**Quitar de la venta — NO confirmado**: se intentó en la misma sesión
+(botón "Cancelar venta" del frontend) pero no llegó a dispararse la
+llamada de red esperada en el tiempo disponible. `cancel_sale()` está
+implementado igual que el resto de escrituras (mismo patrón, mismo
+dominio) siguiendo la referencia comunitaria, pero sin una prueba real
+propia que lo confirme — ver TODO en `clients/futmondo_client.py`.
 
-Nota de temporada: `current_season()` calcula la temporada vigente por
-fecha, pero justo al arrancar una temporada nueva Understat puede tardar
-unos días en publicar datos (`players: []`) — **confirmado en producción**
-el primer día de la temporada 2026/27 (0 jugadores en "2026" vs 600 en la
-"2025" recién terminada). `get_league_data_with_fallback()` cae
-automáticamente a la temporada anterior en ese caso (aproximación
-temporal, `jobs/sync_data.py` notifica cuándo lo está haciendo) — ojo:
-un fichaje nuevo en La Liga esta temporada no va a cruzar por nombre
-contra datos de la temporada pasada, así que la tasa de cruce con
-Understat baja temporalmente hasta que Understat publique la actual.
+**Nota de privacidad de la captura:** igual que en la fase de Comunio, el
+valor real de `token`/`userid` nunca se expuso ni se registró en ningún
+sitio — se leyeron solo dentro del propio navegador (`localStorage`) para
+las peticiones de prueba, y el resultado devuelto fue solo la forma/
+valores de los datos de negocio (plantilla, mercado — nada sensible).
 
-**Lesiones/dudas**: resuelto directamente con campos reales de Comunio, sin
-depender de una tercera fuente. Cada jugador de `squad`/`market` trae
-`status` (`"ACTIVE"` | `"WEAKENED"` | `"INJURED"`, no se ha visto un valor
-de sanción en esta muestra) + `statusInfo` en texto libre (ej. "Lesión
-muscular", "Fractura de peroné") — ya mapeado en `db/models.py`
-(`comunio_snapshots.status`/`status_info`).
+## Stats externas: Understat (sin cambios frente a Comunio)
 
-## Economía de Comunio: sin ingreso pasivo, y saldo negativo = 0 puntos
+Ver `clients/laliga_stats_client.py` — este módulo es independiente de la
+plataforma de fantasy y no cambió con la migración. Único ajuste: el
+estado de lesión/duda ya no viene confirmado de la API del juego (en
+Comunio sí, con valores `ACTIVE`/`WEAKENED`/`INJURED` reales) — Futmondo
+expone un campo `status` pero no se ha observado un valor de lesión real
+todavía (liga de prueba en pretemporada). Ver
+`clients/futmondo_client.py:is_injury_status()`.
 
-Investigado (2026-08-16, con fuentes) al preguntarnos cuál es la
-estrategia ganadora en Comunio, porque afecta directamente al diseño de
-seguridad del bot:
+## Reconciliación de pujas y ventas (sin endpoint externo de "mis ofertas")
 
-- **No hay ingreso pasivo**: la única forma de ganar dinero es vendiendo
-  jugadores ([FAQ oficial](https://magazine.comunio.es/faq-comunio-10-dudas-muy-frecuentes-entre-los-managers/)).
-  La estrategia clásica es especular con el valor de mercado (que fluctúa
-  como una bolsa: oferta/demanda + rendimiento reciente, máx. ±15%/día o
-  ±250k si el jugador vale <1,6M — [ComunioMagazine](https://magazine.comunio.es/los-valores-de-mercado-en-comunio-como-funcionan/)):
-  comprar barato/infravalorado, esperar a que suba, vender con beneficio
-  ([Comuniate](https://www.comuniate.com/noticias/251/como-funcionan-las-variaciones-de-precio-en-comunio-incluye-video-explicativo)).
-  **Ya implementado** en `engine/selling_strategy.py` + `jobs/run_sales.py`
-  (ver sección dedicada más abajo).
-- **Regla crítica de seguridad**: según la misma FAQ oficial, **si tu
-  saldo está en negativo al cerrar una jornada, no puntúas esa jornada
-  entera (0 puntos)**, sea cual sea tu alineación. Esto es más grave que
-  cualquier otro límite de seguridad ya implementado.
+Comunio exponía `GET .../offers?current` con la lista real de ofertas
+pendientes propias, con id — permitía saber con certeza si una puja seguía
+viva. **Futmondo no tiene un endpoint equivalente confirmado** (ni en la
+captura propia ni en la referencia comunitaria). `jobs/sync_data.py`
+reconcilia por pertenencia, con las limitaciones que eso implica:
 
-**Bug real corregido a raíz de esto**: Comunio no descuenta el saldo
-(`credit`) al colocar una oferta de compra, solo cuando se EJECUTA al
-cerrar el periodo de transferencias — que puede durar más de un día (visto
-en la UI: "Desde 15.08 · Hasta 16.08"). El bot solo restaba
-`get_bids_risked_today()` (lo arriesgado HOY según nuestra propia BD) del
-presupuesto disponible, así que una oferta pendiente de un día anterior
-sin resolver todavía no se tenía en cuenta — el bot podía comprometer más
-dinero del que el saldo real soportaba si varias ofertas de días distintos
-se ejecutaban a la vez, dejando el saldo en negativo.
+- Una puja `'placed'` se marca `'won'` si el jugador ya aparece en la
+  plantilla (`get_roster()`).
+- Se marca `'lost'` si el jugador ya no está ni en la plantilla ni en el
+  mercado actual (`get_market()`) — el listado expiró o se resolvió sin
+  nosotros, sin poder distinguir si ganó otro manager o si expiró sin
+  comprador.
+- Si sigue en el mercado y no en la plantilla, se asume que la puja sigue
+  abierta y no se toca.
 
-Corregido con `clients.comunio_client.total_pending_purchase_amount()`,
-que suma TODAS las ofertas de compra pendientes sin resolver directamente
-desde `get_offers()` (la fuente de verdad real de Comunio, no una
-aproximación local) y se resta del presupuesto ANTES que cualquier otro
-límite, en `engine.bidding_strategy.max_biddable_amount()`. Demostrado con
-un escenario límite (17,5M ya comprometidos de 20M de saldo): sin el fix,
-el peor caso dejaba el saldo en -2,9M; con el fix, se queda en +2,35M pase
-lo que pase. `get_bids_risked_today()` sigue existiendo, pero ahora solo
-como ritmo de gasto por jornada (autoimpuesto), no como protección de
-saldo — esa responsabilidad es de `total_pending_purchase_amount()`.
+Consecuencia directa para la protección de presupuesto
+(`engine.bidding_strategy.max_biddable_amount`): en vez de sumar ofertas
+pendientes reales desde una fuente externa (como hacía
+`total_pending_purchase_amount` con Comunio), `db.models.
+get_pending_bid_amount()` suma nuestra **propia** tabla `bids` local
+(`status='placed'`, sin filtro de fecha). Es una protección más débil que
+la de Comunio — si la reconciliación se retrasa o la BD se pierde, podría
+desincronizarse — pero es la única fuente disponible, y por diseño solo
+puede sobreestimar el compromiso (nunca subestimarlo, que sería el caso
+peligroso).
 
-## Vender jugadores (`engine/selling_strategy.py`, `jobs/run_sales.py`)
+## `buyPrice`: por qué `run_sales` ya no filtra "solo comprados por el bot"
 
-**Poner en venta y quitar de la venta — CONFIRMADO AL 100%** (2026-08-16,
-interceptando las llamadas reales del frontend en la pestaña "Ventas" +
-réplica exacta):
+En Comunio, `purchaseInfo == null` distinguía sin ambigüedad "plantilla
+inicial" de "comprado por el bot vía puja" — `engine/selling_strategy.py`
+solo consideraba vender lo segundo. En Futmondo, el campo más parecido es
+`buyPrice` (visto en cada item de `get_roster()`), pero **no sirve para
+la misma distinción**: en la liga de prueba se vio tanto un jugador de la
+plantilla inicial con `buyPrice=0` (Matz Sels) como otro también inicial
+con `buyPrice>0` (Tzolakis, 14.017.740€ en su ficha de alineación) — todo
+apunta a que `buyPrice` es más bien "valor de referencia al entrar al
+equipo" (incluida la asignación inicial), no "importe pagado en una puja
+real nuestra".
 
-```
-POST /communities/{communityId}/users/{userId}/exchangemarket/addplayer
-body: {"items": [{"tradableId": <playerId>, "price": <asking_price>}]}
-respuesta real: {"status": "OK", "notPlaced": [], "purchasePrices": {...}, "remaining": <int>}
-
-POST /communities/{communityId}/users/{userId}/exchangemarket/removeplayer
-body: {"tradableIds": [<playerId>]}
-```
-
-**Importante — NO es venta instantánea**: poner en venta solo hace al
-jugador visible para que alguien (otro manager o el "Computer") lo compre
-después — el saldo no cambia al listar. `jobs/sync_data.py` reconcilia el
-resultado comparando la plantilla en cada sync (si el jugador ya no está,
-se marca `sales.status = 'sold'`) — misma limitación que con las pujas: no
-se puede distinguir con los datos de la API una venta real de una
-retirada manual sin vender.
-
-`"remaining"` en la respuesta parece un límite diario de acciones de
-mercado (añadir/quitar), sin confirmar el número exacto ni qué pasa al
-agotarlo. `"purchasePrices"` trajo un valor que no coincidía con el precio
-pedido en la prueba real (180.000 pedido -> 199.500 en la respuesta) —
-sin confirmar qué representa, no se usa todavía para nada.
-
-**Qué vender**: `get_squad()` trae el precio real de compra en
-`purchaseInfo.price` (confirmado por captura real; `null` si el jugador es
-de la plantilla inicial, nunca comprado por el bot). `decide_sales()`
-compara ese precio contra el valor de mercado actual (`quotedprice`) y
-decide vender si la plusvalía supera `config.SELLING_MIN_PROFIT_PCT`
-(10% por defecto, sin calibrar todavía) — nunca se fuerza la venta de un
-jugador sin precio de compra real conocido.
-
-**Bloqueo duro de riesgo de plantilla** (encontrado al preguntarnos si la
-venta tenía en cuenta quedarte sin cubrir una posición — no lo tenía):
-vender es tan capaz de dejarte una posición sin cobertura (-4 puntos) como
-que te "clausulen" a alguien, con la diferencia de que esta la causa el
-propio bot y es 100% evitable. `decide_sales()` reutiliza
-`engine.squad_risk.assess_squad_depth()` y **nunca vende** un jugador si
-eso deja su posición sin margen de suplentes sanos, por rentable que sea
-la operación — a diferencia del empujón blando de `apply_position_priority()`
-en las pujas, aquí es un bloqueo duro: ninguna plusvalía compensa quedarte
-con un hueco en la alineación. Si hay varios candidatos rentables en la
-misma posición y no hay margen para vender a todos, se prioriza al de
-mayor plusvalía. Un jugador lesionado/sancionado rentable sí se puede
-vender sin restricción (no contaba como "disponible" para cubrir la
-posición de todos modos). Probado en los 4 casos: venta bloqueada (único
-sano de su posición), prioridad entre dos candidatos por la misma
-posición con margen para solo uno, venta libre en posición con sobra, y
-venta de un lesionado rentable.
+Sin poder ganar una puja de prueba real en el tiempo disponible para
+confirmarlo del todo, `engine/selling_strategy.py` trata cualquier
+`buyPrice > 0` como precio de referencia válido para calcular plusvalía,
+**sin filtrar por origen** — un cambio de comportamiento deliberado y
+documentado, no un descuido. Si más adelante se confirma que `buyPrice`
+sí distingue el origen (comparando el roster antes/después de ganar una
+puja real), habría que volver a filtrar como hacía la versión de Comunio.
 
 ## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
 
-Comunio permite (si la liga lo activa) que **cualquier manager fiche un
-jugador de tu plantilla sin tu aprobación**, pagando un múltiplo de su
-valor de mercado (x1,2 a x5, configurable por la liga). Si eso te deja sin
-jugadores suficientes para cubrir una posición de tu alineación, Comunio
-te penaliza con **-4 puntos por esa posición vacía** esa jornada
-([FAQ oficial](https://classic.comunio.es/faq.phtml)). La liga de pruebas
-usada en toda la sesión NO la tiene activada — es una función de pago
-(Comunio Plus/Pro Player, visto en `Ajustes → Administrar liga → Reglas
-del mercado → Cláusula de rescisión`, con badge "PRO" y el toggle inerte
-sin la suscripción) fuera de alcance por la restricción de coste 0 del
-proyecto. **La liga real del usuario sí la tendrá activada.**
-
-`engine/squad_risk.py` vigila el riesgo estructural: para cada posición,
-cuántos jugadores disponibles (sin lesión/sanción) hay por encima de los
-titulares necesarios en `config.DEFAULT_FORMATION`. Si una posición se
-queda sin ningún suplente sano, perder a su único titular por cualquier
-motivo (cláusula, lesión, sanción) deja un hueco automático.
-`jobs/set_lineup.py` lo comprueba en cada ejecución y lo incluye en la
-notificación de Telegram.
-
-**Ya conectado a las pujas**: `jobs/run_market.py` calcula el mismo riesgo
-sobre tu plantilla antes de evaluar el mercado y usa
-`engine.bidding_strategy.apply_position_priority()` para subir el score de
-los candidatos en posiciones en riesgo (`config.BIDDING_POSITION_RISK_BOOST`,
-aditivo — no fuerza la puja de un candidato malo, solo le da ventaja frente
-a otro de score similar en una posición ya cubierta). La auditoría en
-`bids.reason` deja constancia de cuándo una puja vino priorizada así.
-
-TODO cuando se active en la liga real: si la API expone el importe exacto
-de la cláusula por jugador (probable — el campo `hasAcceptedBuyoutClauseOffer`
-ya aparece en el JSON de squad incluso con la función desactivada, así que
-la estructura de datos ya existe), se podría afinar el riesgo con el coste
-real de "salvar" cada posición, no solo un aviso binario.
+Futmondo también tiene cláusula de rescisión (`POST /1/market/rosterclause`,
+visto en la propia UI de la app, con un icono de cláusula en cada
+jugador). No se ha confirmado con una fuente oficial si penaliza igual
+que Comunio (-4 puntos por posición vacía en la alineación) cuando te
+deja sin cobertura en una posición — `engine/squad_risk.py` mantiene la
+misma vigilancia de todos modos, por precaución conservadora: quedarte
+sin poder alinear a nadie en una posición nunca es deseable, confirmada o
+no la penalización exacta.
 
 ## Pujas vs. alineación: pesos distintos a propósito
 
-`engine/evaluator.py` acepta un `weights` opcional en `score_player()`/
-`rank_players()`/`evaluate_players()` porque **el mismo score no vale para
-las dos decisiones**:
-
-- **Pujar** (`config.EVALUATOR_WEIGHTS`): el precio importa — es relación
-  calidad/precio con presupuesto limitado que repartir entre candidatos del
-  mercado.
-- **Elegir alineación** (`config.LINEUP_EVALUATOR_WEIGHTS`, sin
-  `comunio_points_per_price`): el precio NO debe importar — un jugador de
-  tu plantilla ya está comprado, es coste hundido. Se detectó probando
-  `jobs/set_lineup.py` con datos sintéticos: reutilizar los pesos de puja
-  hacía que un delantero caro y muy productivo (Mbappe, en la prueba)
-  saliera peor puntuado que suplentes baratos solo por ser caro — un sesgo
-  real que habría llevado a bancar al mejor jugador de la plantilla.
+Igual que en la fase de Comunio: `engine/evaluator.py` acepta un
+`weights` opcional porque el mismo score no vale para pujar (el precio
+importa, relación calidad/precio con presupuesto limitado) que para
+elegir alineación (el precio de un jugador ya en tu plantilla es coste
+hundido, no debe influir en quién juega) — ver `config.EVALUATOR_WEIGHTS`
+vs `config.LINEUP_EVALUATOR_WEIGHTS`.
 
 ## Setup local
 
@@ -337,22 +227,31 @@ Requiere Python 3.11+ (el `venv/` de este repo, gestionado por PyCharm, usa 3.14
 ```bash
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # y rellenar credenciales
-python -m db.models    # crea db/comunio.db con el esquema
+cp .env.example .env   # y rellenar credenciales (ver comentarios del propio archivo)
+python -m db.models    # crea db/futmondo.db con el esquema
 ```
+
+Para obtener `FUTMONDO_TOKEN`/`FUTMONDO_USER_ID`: iniciar sesión en
+https://app.futmondo.com y, con las herramientas de desarrollador
+abiertas (F12 -> Console), ejecutar:
+
+```js
+localStorage.getItem("flutter.token")
+localStorage.getItem("flutter.id_user")
+```
+
+Para `FUTMONDO_CHAMPIONSHIP_ID`/`FUTMONDO_USERTEAM_ID`: con la pestaña
+Network abierta, navegar a cualquier pantalla de la liga (plantilla,
+mercado...) y mirar el `payload` de cualquier POST a `api.futmondo.com` —
+ambos vienen en `query`.
 
 ## Tests
 
-Batería de tests con `pytest` (74 tests) — cubre `engine/`, `clients/`,
-`db/models.py` y los 4 jobs, incluida una regresión por cada bug real
-encontrado durante el desarrollo (el de `on_market`, el de pujas por
-debajo de precio, el de saldo negativo por ofertas pendientes sin
-resolver, el sesgo de precio en `LINEUP_EVALUATOR_WEIGHTS`, el bloqueo de
-ventas que dejan una posición sin cubrir...). Nunca toca la red real ni
-Telegram real (`tests/conftest.py::no_real_telegram` es `autouse=True` a
-propósito, después de que un script de prueba mandara sin querer una
-notificación real durante el desarrollo — ver historial de commits) ni
-`db/comunio.db` (cada test usa una BD SQLite temporal aislada,
+Batería de tests con `pytest` — cubre `engine/`, `clients/`, `db/models.py`
+y los 4 jobs, migrada íntegramente al contrato de Futmondo (nada de
+Comunio queda en los fixtures). Nunca toca la red real ni Telegram real
+(`tests/conftest.py::no_real_telegram` es `autouse=True`) ni
+`db/futmondo.db` (cada test usa una BD SQLite temporal aislada,
 `tests/conftest.py::tmp_db`).
 
 ```bash
@@ -367,31 +266,35 @@ pytest -m network                      # opcional: confirma que Understat sigue 
 necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
 
 1. **Secrets** (`Settings → Secrets and variables → Actions → Secrets`,
-   cifrados, nunca visibles en logs): `COMUNIO_EMAIL`, `COMUNIO_PASSWORD`,
+   cifrados, nunca visibles en logs): `FUTMONDO_TOKEN`, `FUTMONDO_USER_ID`,
    `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 2. **Variables** (misma sección, pestaña `Variables` — no son secretas, solo
-   IDs): `COMUNIO_COMMUNITY_ID`, `COMUNIO_USER_ID`. Para la liga de pruebas:
-   `5243734` / `21161679` (capturados durante la sesión).
+   IDs): `FUTMONDO_CHAMPIONSHIP_ID`, `FUTMONDO_USERTEAM_ID`.
 3. Hacer `git push` de este repo a `origin` (el agente que escribió este
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
 4. Los 4 workflows (`sync_data` cada hora, `run_market` y `run_sales`
    2x/día, `set_lineup` viernes 18:00 UTC) ya tienen el `schedule:`
-   activado — correrán solos en cuanto 1-3 estén hechos. Cada uno comitea
-   `db/comunio.db`/`logs/` de vuelta al repo al terminar (si no, cada
+   activado — correrán solos en cuanto 1-2 estén hechos. Cada uno comitea
+   `db/futmondo.db`/`logs/` de vuelta al repo al terminar (si no, cada
    ejecución perdería lo sincronizado en la anterior).
 
-**Antes de apuntar esto a una liga real** (no la de pruebas): revisar unos
-días de ejecución en la de pruebas primero, y tener en cuenta que
-`ENABLE_LINEUP_AUTO_SUBMIT=true` por defecto — el bot escribirá de verdad,
-sin confirmación manual, en cuanto el cron esté activo.
+**Antes de apuntar esto a la liga real** (no la de pruebas creada durante
+la sesión de captura): revisar unos días de ejecución primero, y tener en
+cuenta que `ENABLE_LINEUP_AUTO_SUBMIT=true` por defecto — el bot escribirá
+de verdad, sin confirmación manual, en cuanto el cron esté activo. El
+mapeo de alineación solo está confirmado para 4-4-2 (ver sección de
+endpoints) — si la liga real usa otra formación, conviene desactivar
+`ENABLE_LINEUP_AUTO_SUBMIT` hasta confirmarlo con una prueba real, o
+revisar `lineup_decisions` a mano un tiempo antes de fiarse del envío
+automático.
 
 ## Estructura
 
 Ver el detalle de cada módulo en su propio docstring. Resumen:
 
 ```
-clients/    -> integraciones externas (Comunio, Understat)
+clients/    -> integraciones externas (Futmondo, Understat)
 db/         -> esquema SQLite + conexión
 engine/     -> evaluator, bidding_strategy, lineup_optimizer, squad_risk, selling_strategy
 jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup)

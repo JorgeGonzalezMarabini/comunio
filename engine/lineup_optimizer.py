@@ -11,8 +11,6 @@ next_match_difficulty(), basado en el forecast de Understat).
 import config
 
 # formación -> nº de jugadores por posición (sin contar portero, que es fijo).
-# Formato real del sitio (confirmado por captura): "4-4-2", sin el "1-" del
-# portero (a diferencia de la convención "1-4-4-2" asumida inicialmente).
 FORMATIONS = {
     "4-4-2": {"POR": 1, "DEF": 4, "MED": 4, "DEL": 2},
     "4-3-3": {"POR": 1, "DEF": 4, "MED": 3, "DEL": 3},
@@ -44,72 +42,59 @@ def apply_fixture_difficulty(
     return adjusted
 
 
-def to_api_tactic(formation: str) -> str:
-    """
-    Convierte el formato humano usado aquí ("4-4-2") al formato real que
-    espera la API de Comunio en `tactic` ("442", SIN guiones — confirmado
-    por captura real de GET lineup, distinto de lo que muestra la UI).
-    """
-    return formation.replace("-", "")
-
-
-# Orden de slots CONFIRMADO al 100% con una prueba real completa (once de
-# 11 jugadores + interceptación de la llamada PUT real del frontend,
-# 2026-08-15): se numeran 1..11 agrupando por posición en ESTE orden fijo,
-# portero SIEMPRE el último slot (11 en un 4-4-2). No depende de qué
-# jugador concreto sea, solo de su posición.
+# Orden CONFIRMADO al 100% pero SOLO para la formación 4-4-2 (2026-08-17,
+# alineación real de prueba, cada jugador colocado interceptando la
+# llamada POST real del frontend a /2/userteam/changeplayer + relectura
+# con GET /1/userteam/lineup confirmando el `position` numérico asignado):
+# delanteros -> centrocampistas -> defensas -> portero, numerados
+# consecutivamente EMPEZANDO EN 0 (a diferencia de Comunio, que empezaba
+# en 1) — portero siempre el ÚLTIMO índice (10 en un 4-4-2 con 11
+# titulares). Confirmado en la prueba real: Tzolakis (portero) -> 10,
+# Calafiori/Struijk/(cuarto defensa) (defensas) -> 6, 7, 8(, 9).
+#
+# TODO sin confirmar: para otras formaciones (4-3-3, 3-4-3, 5-3-2) se
+# GENERALIZA este mismo criterio (numeración consecutiva por el orden de
+# LINEUP_SLOT_POSITION_ORDER, portero siempre el último índice) porque es
+# lo más simple consistente con lo observado, pero no se ha probado con
+# una formación distinta de 4-4-2 — si Futmondo usara en realidad una
+# tabla de slots fija por posición (p.ej. delantero siempre 0-1 aunque
+# haya 3), esta generalización sería incorrecta para 4-3-3/3-4-3. Antes de
+# activar config.ENABLE_LINEUP_AUTO_SUBMIT con una formación distinta de
+# 4-4-2 en una liga real, conviene confirmarlo con una prueba igual que se
+# hizo aquí.
 LINEUP_SLOT_POSITION_ORDER = ["DEL", "MED", "DEF", "POR"]
 
-# Traducción posición corta (usada en engine/db, ver clients.comunio_client.
-# COMUNIO_POSITION_MAP) -> nombre real que espera la API en "substitutes".
-API_POSITION_NAMES = {"DEL": "striker", "MED": "midfielder", "DEF": "defender", "POR": "keeper"}
 
-
-def build_lineup_slots(players: list[dict], starter_ids: list) -> dict:
+def build_lineup_changes(players: list[dict], starter_ids: list) -> list[dict]:
     """
-    Construye el mapa {slot: player_id} que espera
-    clients.comunio_client.ComunioClient.set_lineup(), con la numeración
-    confirmada (ver LINEUP_SLOT_POSITION_ORDER).
+    Construye la lista `changes` que espera
+    clients.futmondo_client.FutmondoClient.change_lineup(), con la
+    numeración confirmada para 4-4-2 (ver LINEUP_SLOT_POSITION_ORDER).
 
     `players`: lista completa (con "id"/"position") de donde sacar la
     posición de cada titular — normalmente el mismo `squad` pasado a
     pick_lineup(). `starter_ids`: pick_lineup(...)["starters"].
+
+    No incluye banquillo/suplentes: la numeración de esos slots no se ha
+    confirmado con ninguna prueba real (ver docstring del módulo) — de
+    momento jobs/set_lineup.py solo manda los titulares, más seguro que
+    adivinar y mandar algo que Futmondo podría rechazar o, peor,
+    interpretar mal en silencio.
     """
     by_id = {p["id"]: p for p in players}
     starters_by_position = {pos: [] for pos in LINEUP_SLOT_POSITION_ORDER}
     for player_id in starter_ids:
         starters_by_position[by_id[player_id]["position"]].append(player_id)
 
-    slots = {}
-    slot_num = 1
+    changes = []
+    position_num = 0
     for position in LINEUP_SLOT_POSITION_ORDER:
         for player_id in starters_by_position[position]:
-            slots[str(slot_num)] = player_id
-            slot_num += 1
-    return slots
-
-
-def pick_substitutes(bench: list[dict]) -> dict:
-    """
-    Elige un suplente por posición (el de mayor "expected_score" en cada
-    categoría) entre `bench` (jugadores con "id"/"position"/"expected_score"
-    no titulares, ver pick_lineup(...)["bench"] resuelto contra el squad
-    completo). Comunio solo admite UN suplente por categoría de posición
-    (visto en la UI: 4 slots fijos de banquillo, no una lista libre).
-
-    Devuelve la forma exacta que espera set_lineup(): {"striker": id_o_"",
-    "midfielder": ..., "defender": ..., "keeper": ...}.
-    """
-    substitutes = {name: "" for name in API_POSITION_NAMES.values()}
-    for position, api_name in API_POSITION_NAMES.items():
-        candidates = sorted(
-            (p for p in bench if p.get("position") == position),
-            key=lambda p: p.get("expected_score", 0),
-            reverse=True,
-        )
-        if candidates:
-            substitutes[api_name] = candidates[0]["id"]
-    return substitutes
+            changes.append(
+                {"cpt": False, "to": player_id, "position": position_num, "isBench": False, "multiposition": False}
+            )
+            position_num += 1
+    return changes
 
 
 def pick_lineup(squad: list[dict], formation: str = None) -> dict:

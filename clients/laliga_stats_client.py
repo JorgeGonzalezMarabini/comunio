@@ -19,10 +19,12 @@ Verificado el 2026-08-15 contra La_liga/2025 (600 jugadores, 20 equipos).
 Nombres de liga válidos (los que acepta el desplegable de la web): "La_liga",
 "EPL", "Bundesliga", "Serie_A", "Ligue_1", "RFPL".
 
-Estado de lesión/duda: Understat NO lo tiene. La propia API de Comunio ya
-marca jugadores lesionados/dudosos con un icono en la plantilla/mercado
-(visto en la UI), así que ese dato sale de comunio_client.py, no de aquí
-— evita depender de una tercera fuente para algo que ya tenemos.
+Estado de lesión/duda: Understat NO lo tiene. La propia API de Futmondo
+expone un campo `status` en cada jugador (aunque sin confirmar todavía qué
+valores toma exactamente para lesión/sanción, ver
+clients/futmondo_client.py:is_injury_status), así que ese dato sale de ahí
+si acaba confirmándose, no de aquí — evita depender de una tercera fuente
+para algo que en teoría ya tenemos.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ UNDERSTAT_BASE_URL = "https://understat.com"
 REQUEST_DELAY_SECONDS = 1.0
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; comunio-liga-bot/1.0)",
+    "User-Agent": "Mozilla/5.0 (compatible; futmondo-liga-bot/1.0)",
     "X-Requested-With": "XMLHttpRequest",
 }
 
@@ -114,12 +116,12 @@ def get_league_data_with_fallback(league: str = "La_liga", season: str = None) -
 def index_players_by_name(league_data: dict) -> dict:
     """
     Indexa `league_data["players"]` por nombre normalizado (minúsculas, sin
-    acentos) para poder cruzarlo con los nombres que devuelve Comunio.
+    acentos) para poder cruzarlo con los nombres que devuelve Futmondo.
 
     TODO: el cruce por nombre es frágil (acentos, apodos, "Álvaro" vs
     "Alvaro Garcia" vs "A. Garcia"...). Si da muchos fallos de match en la
     práctica, considerar mapear por equipo+posición como desempate, o
-    mantener a mano un `db.models` de alias jugador Comunio -> id Understat.
+    mantener a mano un `db.models` de alias jugador Futmondo -> id Understat.
     """
     import unicodedata
 

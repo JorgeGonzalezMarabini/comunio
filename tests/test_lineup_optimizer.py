@@ -1,11 +1,10 @@
 import pytest
 
 from engine.lineup_optimizer import (
+    LINEUP_SLOT_POSITION_ORDER,
     apply_fixture_difficulty,
-    build_lineup_slots,
+    build_lineup_changes,
     pick_lineup,
-    pick_substitutes,
-    to_api_tactic,
 )
 
 
@@ -18,10 +17,9 @@ def _squad_442():
     return squad
 
 
-def test_to_api_tactic_strips_dashes():
-    """Confirmado por captura real: la API espera 'tactic' sin guiones ('442', no '4-4-2')."""
-    assert to_api_tactic("4-4-2") == "442"
-    assert to_api_tactic("4-3-3") == "433"
+def test_lineup_slot_position_order_is_del_med_def_por():
+    """Confirmado por captura real: numeración consecutiva empezando en 0, portero siempre el último."""
+    assert LINEUP_SLOT_POSITION_ORDER == ["DEL", "MED", "DEF", "POR"]
 
 
 def test_pick_lineup_selects_best_scored_per_position():
@@ -44,37 +42,47 @@ def test_pick_lineup_rejects_unknown_formation():
         pick_lineup(_squad_442(), formation="9-9-9")
 
 
-def test_build_lineup_slots_confirmed_order_del_med_def_por():
+def test_build_lineup_changes_confirmed_order_del_med_def_por_starting_at_zero():
     """
-    Numeración CONFIRMADA por captura real (once completo + interceptación
-    de la llamada PUT real): slots 1..11 agrupados por posición en el
-    orden fijo delanteros -> centrocampistas -> defensas -> portero,
-    portero siempre el último.
+    Numeración CONFIRMADA por captura real (varios jugadores colocados
+    interceptando la llamada POST real + relectura con get_lineup()
+    confirmando el `position` numérico asignado): consecutiva EMPEZANDO EN
+    0, agrupada por posición en el orden fijo delanteros ->
+    centrocampistas -> defensas -> portero, portero siempre el último
+    índice.
     """
     squad = _squad_442()
     lineup = pick_lineup(squad, formation="4-4-2")
-    slots = build_lineup_slots(squad, lineup["starters"])
+    changes = build_lineup_changes(squad, lineup["starters"])
 
-    assert slots["11"] == "por1"  # portero siempre el último slot
-    del_slots = {slots[str(i)] for i in range(1, 3)}
-    med_slots = {slots[str(i)] for i in range(3, 7)}
-    def_slots = {slots[str(i)] for i in range(7, 11)}
-    assert all(pid.startswith("del") for pid in del_slots)
-    assert all(pid.startswith("med") for pid in med_slots)
-    assert all(pid.startswith("def") for pid in def_slots)
+    assert len(changes) == 11
+    by_id = {c["to"]: c for c in changes}
+
+    # Portero siempre el último índice (10 en un 4-4-2 con 11 titulares).
+    assert by_id["por1"]["position"] == 10
+
+    del_positions = {by_id[pid]["position"] for pid in lineup["starters"] if pid.startswith("del")}
+    med_positions = {by_id[pid]["position"] for pid in lineup["starters"] if pid.startswith("med")}
+    def_positions = {by_id[pid]["position"] for pid in lineup["starters"] if pid.startswith("def")}
+
+    assert del_positions == {0, 1}
+    assert med_positions == {2, 3, 4, 5}
+    assert def_positions == {6, 7, 8, 9}
+
+    # Numeración consecutiva sin huecos ni repeticiones.
+    assert sorted(c["position"] for c in changes) == list(range(11))
 
 
-def test_pick_substitutes_picks_best_score_per_position():
-    bench = [
-        {"id": "suplente_bueno", "position": "DEL", "expected_score": 0.8},
-        {"id": "suplente_malo", "position": "DEL", "expected_score": 0.2},
-        {"id": "suplente_por", "position": "POR", "expected_score": 0.5},
-    ]
-    substitutes = pick_substitutes(bench)
-    assert substitutes["striker"] == "suplente_bueno"
-    assert substitutes["keeper"] == "suplente_por"
-    assert substitutes["defender"] == ""  # sin suplente disponible en esa posición
-    assert substitutes["midfielder"] == ""
+def test_build_lineup_changes_shape_matches_change_lineup_contract():
+    squad = _squad_442()
+    lineup = pick_lineup(squad, formation="4-4-2")
+    changes = build_lineup_changes(squad, lineup["starters"])
+
+    for change in changes:
+        assert change.keys() == {"cpt", "to", "position", "isBench", "multiposition"}
+        assert change["cpt"] is False
+        assert change["isBench"] is False
+        assert change["multiposition"] is False
 
 
 def test_apply_fixture_difficulty_discounts_score_for_hard_opponent():

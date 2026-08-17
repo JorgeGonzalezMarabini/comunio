@@ -12,5 +12,5 @@ __pycache__/
 # Sistema
 .DS_Store
 
-# Nota: db/comunio.db y logs/ SÍ se versionan a propósito
+# Nota: db/futmondo.db y logs/ SÍ se versionan a propósito
 # (persistencia simple + auditoría de decisiones), no se ignoran aquí.

@@ -38,46 +38,56 @@ def tmp_db(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def squad_player_factory():
+def roster_player_factory():
     """
-    Fábrica de items realistas de ComunioClient.get_squad()["items"]:
-    posición en inglés (keeper/defender/midfielder/striker), precio en
-    "quotedprice"/"recommendedprice" (minúsculas), `purchaseInfo` real
-    (None si el jugador no se compró vía puja) — formas confirmadas por
-    captura real, ver clients/comunio_client.py.
+    Fábrica de items realistas de FutmondoClient.get_roster()["answer"]:
+    rol en ESPAÑOL (portero/defensa/centrocampista/delantero), precio en
+    "value", precio de referencia en "buyPrice", y el flag propio de roster
+    "market" (si TÚ lo has puesto en venta) -- formas confirmadas por
+    captura real, ver clients/futmondo_client.py.
     """
 
     def make(
         id,
         name="Jugador",
-        position="defender",
-        status="ACTIVE",
-        status_info="",
-        quotedprice=1_000_000,
-        recommendedprice=None,
+        role="defensa",
+        status="",
+        value=1_000_000,
+        buy_price=0,
         points=10,
         last_points=2,
         average_points=2.0,
         on_market=False,
-        purchase_info=None,
-        club="Equipo",
-        linedup=False,
+        team="Equipo",
+        slug=None,
     ):
         return {
             "id": id,
             "name": name,
-            "club": {"name": club},
-            "position": position,
-            "status": status,
-            "statusInfo": status_info,
+            "slug": slug or f"jugador-{id}",
+            "role": role,
+            "role2": "",
+            "photo": "",
             "points": points,
-            "lastPoints": last_points,
-            "averagePoints": average_points,
-            "quotedprice": quotedprice,
-            "recommendedprice": recommendedprice if recommendedprice is not None else quotedprice,
-            "onMarket": on_market,
-            "purchaseInfo": purchase_info,
-            "linedup": linedup,
+            "value": value,
+            "team": team,
+            "logo": "",
+            "status": status,
+            "rating": 0,
+            "average": {
+                "average": average_points,
+                "homeAverage": average_points,
+                "awayAverage": average_points,
+                "averageLastFive": average_points,
+                "matches": 1,
+                "fitness": [last_points] if last_points is not None else [],
+            },
+            "change": 0,
+            "computer": False,
+            "buyPrice": buy_price,
+            "market": on_market,
+            "direct": False,
+            "teamId": team,
         }
 
     return make
@@ -86,36 +96,55 @@ def squad_player_factory():
 @pytest.fixture
 def market_player_factory():
     """
-    Fábrica de `_embedded.player` de ComunioClient.get_market()["items"]:
-    camelCase distinto de squad ("quotedPrice"/"recommendedPrice") y SIN
-    campo "onMarket" (confirmado real — ver bug de on_market en
-    jobs/sync_data.py, corregido a raíz de esto).
+    Fábrica de items realistas de FutmondoClient.get_market()["answer"]:
+    mismo shape base que roster (rol en español, "value") pero SIN
+    "buyPrice"/"market" (exclusivos de roster) y con los campos exclusivos
+    de mercado: "price", "numberOfBids", "creationDate"/"expirationDate" --
+    formas confirmadas por captura real, ver clients/futmondo_client.py.
     """
 
     def make(
         id,
         name="Jugador Mercado",
-        position="striker",
-        status="ACTIVE",
-        status_info="",
-        quoted_price=1_000_000,
-        recommended_price=None,
+        role="delantero",
+        status="",
+        value=1_000_000,
+        price=None,
         points=10,
-        club="Equipo",
+        team="Equipo",
+        slug=None,
+        is_clause=False,
+        number_of_bids="-",
     ):
         return {
             "id": id,
             "name": name,
-            "club": {"name": club},
-            "position": position,
-            "status": status,
-            "statusInfo": status_info,
+            "slug": slug or f"jugador-{id}",
+            "role": role,
+            "role2": "",
+            "photo": "",
             "points": points,
-            "quotedPrice": quoted_price,
-            "recommendedPrice": recommended_price if recommended_price is not None else quoted_price,
-            "trend": 0,
-            "purchasePrice": None,
-            "onWatchlist": "false",
+            "value": value,
+            "team": team,
+            "logo": "",
+            "status": status,
+            "rating": 0,
+            "average": {
+                "average": 0,
+                "homeAverage": 0,
+                "awayAverage": 0,
+                "averageLastFive": 0,
+                "matches": 0,
+                "fitness": [],
+            },
+            "change": 0,
+            "computer": False,
+            "creationDate": "2026-08-15T00:00:00+00:00",
+            "expirationDate": "2026-08-19T00:00:00+00:00",
+            "price": price if price is not None else value,
+            "isClause": is_clause,
+            "type": "market",
+            "numberOfBids": number_of_bids,
         }
 
     return make
@@ -141,7 +170,7 @@ class FakeResponse:
 
 class FakeSession:
     """
-    Sustituye a requests.Session dentro de un ComunioClient de prueba.
+    Sustituye a requests.Session dentro de un FutmondoClient de prueba.
     `response_fn(method, url, payload) -> FakeResponse` decide qué
     devolver; `calls` guarda cada llamada hecha para poder comprobar en el
     test qué verbo/URL/body se usó de verdad.
@@ -149,7 +178,7 @@ class FakeSession:
 
     def __init__(self, response_fn=None, default_response=None):
         self.response_fn = response_fn
-        self.default_response = default_response or FakeResponse(200, {"status": "OK"})
+        self.default_response = default_response or FakeResponse(200, {"answer": {"code": "api.general.ok"}})
         self.calls = []
 
     def _handle(self, method, url, payload=None, params=None):
@@ -171,16 +200,20 @@ class FakeSession:
 @pytest.fixture
 def fake_client():
     """
-    ComunioClient ya "logueado" (token/user_id de mentira) con una
-    FakeSession en vez de requests.Session real — para probar
-    place_bid/withdraw_bid/set_lineup/list_for_sale/etc. sin red.
-    Cada test puede sustituir `client.session.response_fn` para simular
-    la respuesta que necesite.
+    FutmondoClient con token/user_id/championship_id/userteam_id de mentira
+    (pasados directo al constructor, no hay login()) y una FakeSession en
+    vez de requests.Session real -- para probar
+    place_bid/list_for_sale/cancel_sale/pay_clause/change_lineup/etc. sin
+    red. Cada test puede sustituir `client.session.response_fn` para
+    simular la respuesta que necesite.
     """
-    from clients.comunio_client import ComunioClient
+    from clients.futmondo_client import FutmondoClient
 
-    client = ComunioClient(email="x", password="y", community_id="5243734")
-    client.token = "fake-token"
-    client.user_id = "21161679"
+    client = FutmondoClient(
+        token="fake-token",
+        user_id="fake-user-id",
+        championship_id="6a82c086b4e159a76ab3b3d8",
+        userteam_id="6a82c08704b95c71b37179a4",
+    )
     client.session = FakeSession()
     return client

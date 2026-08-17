@@ -1,24 +1,24 @@
 """
 Job: identifica jugadores de la plantilla con plusvalía suficiente y los
-pone en venta. Vender es la ÚNICA fuente de ingresos en Comunio (ver
-README, "Economía de Comunio") — sin esto, el presupuesto del bot solo
-puede reducirse con el tiempo, nunca crecer.
+pone en venta. Vender es una fuente clave de ingresos en Futmondo, igual
+que en Comunio (ver README, "Economía") — sin esto, el presupuesto del bot
+solo puede reducirse con el tiempo, nunca crecer.
 
-No es venta instantánea (ver clients/comunio_client.py: list_for_sale):
+No es venta instantánea (ver clients/futmondo_client.py: list_for_sale):
 poner en venta solo deja al jugador listado, visible para que otro manager
 (o el "Computer") lo compre. jobs/sync_data.py reconcilia después si la
 venta se completó (comparando la plantilla en cada sync).
 
-Solo se consideran jugadores comprados por el propio bot (con
-`purchaseInfo` real, ver engine/selling_strategy.py) — nunca se pone en
-venta a ciegas un jugador de la plantilla inicial sin saber su precio de
-compra real.
+A diferencia de Comunio, no se filtra por "solo jugadores comprados por el
+bot" — Futmondo no tiene un campo confirmado que distinga eso (ver TODO en
+engine/selling_strategy.py) — cualquier jugador con `buyPrice > 0` y
+plusvalía suficiente es candidato.
 """
 from datetime import datetime, timezone
 
 import requests
 
-from clients.comunio_client import ComunioClient, ComunioOfferError
+from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
 from engine.selling_strategy import decide_sales
 from notifier import notify
@@ -44,16 +44,15 @@ def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
 
 
 def run():
-    client = ComunioClient()
-    client.login()
+    client = FutmondoClient()
 
-    squad = client.get_squad()
-    squad_items = squad.get("items", [])
-    if not squad_items:
+    roster = client.get_roster()
+    roster_items = roster.get("answer", [])
+    if not roster_items:
         notify("run_sales: la plantilla vino vacía, nada que evaluar.")
         return
 
-    decisions = decide_sales(squad_items)
+    decisions = decide_sales(roster_items)
     if not decisions:
         notify("run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución.")
         return
@@ -67,7 +66,7 @@ def run():
                 client.list_for_sale(decision["player_id"], decision["asking_price"])
                 _persist_sale(conn, decision, "listed", now)
                 listed.append(decision)
-            except (requests.RequestException, ComunioOfferError) as e:
+            except (requests.RequestException, FutmondoOfferError) as e:
                 _persist_sale(conn, decision, "failed", now)
                 failed.append((decision, str(e)))
 
@@ -75,7 +74,7 @@ def run():
     for d in listed:
         summary.append(
             f"  - jugador {d['player_id']}: pide {d['asking_price']} "
-            f"(comprado a {d['purchase_price']}, {d['profit_pct']:+.1%})"
+            f"(referencia de compra {d['purchase_price']}, {d['profit_pct']:+.1%})"
         )
     if failed:
         summary.append(f"{len(failed)} fallido(s):")

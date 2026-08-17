@@ -10,35 +10,36 @@ from engine.selling_strategy import decide_sales
 
 def _full_442_squad():
     """
-    Plantilla 4-4-2 base (todos ACTIVE, sin purchaseInfo -> ningún
-    candidato de venta por sí sola) sobre la que cada test modifica sus
-    propios casos.
+    Plantilla 4-4-2 base (todos sanos, buyPrice=0 -> ningún candidato de
+    venta por sí sola, ver TODO en engine/selling_strategy.py: a diferencia
+    de Comunio, aquí NO se filtra por "comprado por el bot", solo se exige
+    buyPrice > 0) sobre la que cada test modifica sus propios casos.
     """
-    squad = [{"id": 1, "name": "Portero", "position": "keeper", "status": "ACTIVE", "quotedprice": 500_000, "purchaseInfo": None}]
+    squad = [{"id": 1, "name": "Portero", "role": "portero", "status": "", "value": 500_000, "buyPrice": 0}]
     squad += [
-        {"id": 10 + i, "name": f"Defensa{i}", "position": "defender", "status": "ACTIVE", "quotedprice": 500_000, "purchaseInfo": None}
+        {"id": 10 + i, "name": f"Defensa{i}", "role": "defensa", "status": "", "value": 500_000, "buyPrice": 0}
         for i in range(4)
     ]
     squad += [
-        {"id": 20 + i, "name": f"Medio{i}", "position": "midfielder", "status": "ACTIVE", "quotedprice": 500_000, "purchaseInfo": None}
+        {"id": 20 + i, "name": f"Medio{i}", "role": "centrocampista", "status": "", "value": 500_000, "buyPrice": 0}
         for i in range(4)
     ]
     squad += [
-        {"id": 30 + i, "name": f"Delantero{i}", "position": "striker", "status": "ACTIVE", "quotedprice": 500_000, "purchaseInfo": None}
+        {"id": 30 + i, "name": f"Delantero{i}", "role": "delantero", "status": "", "value": 500_000, "buyPrice": 0}
         for i in range(2)
     ]
     return squad
 
 
-def test_decide_sales_ignores_players_without_purchase_info():
+def test_decide_sales_ignores_players_without_buy_price():
     squad = _full_442_squad()
     assert decide_sales(squad, formation="4-4-2") == []
 
 
 def test_decide_sales_below_profit_threshold_is_ignored():
     squad = _full_442_squad()
-    squad[5]["purchaseInfo"] = {"price": 500_000}  # Medio0
-    squad[5]["quotedprice"] = 520_000  # +4%, bajo el 10% por defecto
+    squad[5]["buyPrice"] = 500_000  # Medio0
+    squad[5]["value"] = 520_000  # +4%, bajo el 10% por defecto
     assert decide_sales(squad, formation="4-4-2", min_profit_pct=0.10) == []
 
 
@@ -50,7 +51,7 @@ def test_decide_sales_blocks_sale_that_would_leave_position_uncovered():
     tenga mucha plusvalía.
     """
     squad = _full_442_squad()
-    squad[0]["purchaseInfo"] = {"price": 300_000}  # portero comprado barato, ahora vale 500k (+66%)
+    squad[0]["buyPrice"] = 300_000  # portero comprado barato, ahora vale 500k (+66%)
 
     decisions = decide_sales(squad, formation="4-4-2")
     assert decisions == []
@@ -58,10 +59,10 @@ def test_decide_sales_blocks_sale_that_would_leave_position_uncovered():
 
 def test_decide_sales_allows_sale_when_position_has_spare_bench():
     squad = _full_442_squad()
-    squad[5]["purchaseInfo"] = {"price": 700_000}  # Medio0, MED tiene sobra (4 para 4)... añado un 5º abajo
-    squad[5]["quotedprice"] = 900_000  # +28.5%
+    squad[5]["buyPrice"] = 700_000  # Medio0, MED tiene sobra (4 para 4)... añado un 5º abajo
+    squad[5]["value"] = 900_000  # +28.5%
     squad.append(
-        {"id": 25, "name": "Medio Extra", "position": "midfielder", "status": "ACTIVE", "quotedprice": 500_000, "purchaseInfo": None}
+        {"id": 25, "name": "Medio Extra", "role": "centrocampista", "status": "", "value": 500_000, "buyPrice": 0}
     )
     decisions = decide_sales(squad, formation="4-4-2")
     assert len(decisions) == 1
@@ -72,10 +73,10 @@ def test_decide_sales_allows_sale_when_position_has_spare_bench():
 def test_decide_sales_prioritizes_most_profitable_when_bench_is_scarce():
     """Dos candidatos rentables en la misma posición, pero sin margen -> ninguno se vende; con 1 de margen, gana el más rentable."""
     squad = _full_442_squad()
-    squad[1]["purchaseInfo"] = {"price": 1_000_000}  # Defensa0: comprado a 1M
-    squad[1]["quotedprice"] = 2_000_000  # ahora 2M, +100% -- el más rentable
-    squad[2]["purchaseInfo"] = {"price": 1_000_000}  # Defensa1: comprado a 1M
-    squad[2]["quotedprice"] = 1_200_000  # ahora 1.2M, +20% -- menos rentable
+    squad[1]["buyPrice"] = 1_000_000  # Defensa0: comprado a 1M
+    squad[1]["value"] = 2_000_000  # ahora 2M, +100% -- el más rentable
+    squad[2]["buyPrice"] = 1_000_000  # Defensa1: comprado a 1M
+    squad[2]["value"] = 1_200_000  # ahora 1.2M, +20% -- menos rentable
 
     # DEF: 4 disponibles para 4 titulares -> bench=0, SIN margen -- ningún defensa debe venderse
     decisions = decide_sales(squad, formation="4-4-2")
@@ -83,7 +84,7 @@ def test_decide_sales_prioritizes_most_profitable_when_bench_is_scarce():
 
     # Añado un 5º defensa de sobra -> ahora hay bench=1, solo cabe 1 venta
     squad.append(
-        {"id": 15, "name": "Defensa Extra", "position": "defender", "status": "ACTIVE", "quotedprice": 500_000, "purchaseInfo": None}
+        {"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000, "buyPrice": 0}
     )
     decisions = decide_sales(squad, formation="4-4-2")
     assert len(decisions) == 1
@@ -93,9 +94,9 @@ def test_decide_sales_prioritizes_most_profitable_when_bench_is_scarce():
 def test_decide_sales_allows_selling_injured_profitable_player_freely():
     """Un lesionado no contaba como 'disponible' para cubrir su posición -> venderlo no empeora nada."""
     squad = _full_442_squad()
-    squad[9]["status"] = "INJURED"  # Delantero0
-    squad[9]["purchaseInfo"] = {"price": 300_000}
-    squad[9]["quotedprice"] = 500_000  # +66%, pero lesionado
+    squad[9]["status"] = "injured"  # Delantero0
+    squad[9]["buyPrice"] = 300_000
+    squad[9]["value"] = 500_000  # +66%, pero lesionado
 
     decisions = decide_sales(squad, formation="4-4-2")
     assert len(decisions) == 1
