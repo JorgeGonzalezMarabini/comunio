@@ -113,6 +113,8 @@ módulo para el razonamiento completo.
 """
 from __future__ import annotations
 
+import time
+
 import requests
 
 import config
@@ -221,10 +223,45 @@ class FutmondoClient:
             "query": {"championshipId": self.championship_id, "userteamId": self.userteam_id, **extra_query},
         }
 
-    def _post(self, path: str, extra_query: dict = None) -> dict:
-        resp = self.session.post(f"{self.base_url}{path}", json=self._body(extra_query or {}), timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+    def _post(self, path: str, extra_query: dict = None, max_retries: int = 0) -> dict:
+        """
+        `max_retries`: reintentos ante fallo de CONEXIÓN (`requests.
+        exceptions.ConnectionError` — incluye `RemoteDisconnected`/
+        `ProtocolError` de urllib3) con backoff corto (1s, 2s, 4s...).
+
+        Caso real confirmado en producción (GitHub Actions, 2026-08-17,
+        `jobs/run_market.py` cayó entero sin notificar nada): Futmondo cerró
+        la conexión sin responder a `/1/userteam/information`, sin relación
+        aparente con los datos de la petición (probablemente un hiccup de
+        red transitorio o un bloqueo puntual de la IP del runner) — sin
+        ningún reintento, un solo fallo de este tipo tumbaba el job entero.
+
+        Deliberadamente **0 por defecto** (solo lo activan explícitamente
+        los métodos de LECTURA, ver más abajo): un ConnectionError puede
+        pasar DESPUÉS de que Futmondo ya procesara la petición de verdad —
+        se perdió la respuesta, no necesariamente la petición — así que
+        reintentar una ESCRITURA no idempotente (place_bid, changeplayer...)
+        podría duplicar el efecto (pujar dos veces, mandar el mismo cambio
+        de alineación dos veces). No confirmado si eso sería inofensivo o
+        no, así que no vale la pena arriesgarlo sin haberlo probado — las
+        escrituras se quedan en 0 reintentos automáticos, igual que antes.
+
+        HTTPError (4xx/5xx CON respuesta, ver `raise_for_status()`) nunca se
+        reintenta aquí — ya hubo respuesta del servidor, repetir la misma
+        petición no cambiaría el resultado.
+        """
+        body = self._body(extra_query or {})
+        attempt = 0
+        while True:
+            try:
+                resp = self.session.post(f"{self.base_url}{path}", json=body, timeout=15)
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.ConnectionError:
+                if attempt >= max_retries:
+                    raise
+                time.sleep(2**attempt)
+                attempt += 1
 
     @staticmethod
     def _check_ok(result: dict) -> dict:
@@ -246,8 +283,11 @@ class FutmondoClient:
         Plantilla propia. **100% confirmado** (2026-08-17, captura real).
         Respuesta: {"answer": [...jugadores...]} — ver docstring del
         módulo para la forma de cada item (incluye `buyPrice`, `market`).
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
         """
-        return self._post("/1/userteam/roster")
+        return self._post("/1/userteam/roster", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
     def get_information(self) -> dict:
         """
@@ -258,8 +298,13 @@ class FutmondoClient:
              ...}, ...}}
         `budget` es el saldo TOTAL (no descuenta pujas pendientes, igual que
         el "credit" de Comunio — ver total_pending_bid_amount()).
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`) — el
+        propio fallo real que motivó esto (2026-08-17) fue justo en esta
+        llamada, ver `_post`.
         """
-        return self._post("/1/userteam/information")
+        return self._post("/1/userteam/information", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
     def get_lineup(self) -> dict:
         """
@@ -268,8 +313,11 @@ class FutmondoClient:
         Comunio), "players": [{..., "position": <int 0..10>}, ...]}}.
         Ver engine/lineup_optimizer.py para el mapeo de `position`
         confirmado (solo para 4-4-2, ver TODO ahí).
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
         """
-        return self._post("/1/userteam/lineup")
+        return self._post("/1/userteam/lineup", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
     def get_market(self) -> dict:
         """
@@ -277,8 +325,11 @@ class FutmondoClient:
         Respuesta: {"answer": [...jugadores...]} — ver docstring del
         módulo para la forma de cada item (incluye `price`, `numberOfBids`,
         `expirationDate`).
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
         """
-        return self._post("/1/market/players")
+        return self._post("/1/market/players", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
     def get_my_players_in_market(self) -> dict:
         """
@@ -287,8 +338,11 @@ class FutmondoClient:
         list_for_sale(); no se ha vuelto a leer después para confirmar la
         forma exacta del item en este caso — se espera igual que un item de
         roster).
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
         """
-        return self._post("/1/market/myplayers")
+        return self._post("/1/market/myplayers", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
     def get_player_summary(self, player_id: str) -> dict:
         """
@@ -298,8 +352,11 @@ class FutmondoClient:
         `prices` es el histórico de valor de mercado día a día — `c`/`s`
         sin confirmar qué representan exactamente (¿compras/ventas del
         día?), no se usan todavía.
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
         """
-        return self._post("/1/player/summary", {"playerId": player_id})
+        return self._post("/1/player/summary", {"playerId": player_id}, max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
     # --- escritura ---
 

@@ -574,6 +574,39 @@ pytest                                 # corre todo salvo el test marcado @pytes
 pytest -m network                      # opcional: confirma que Understat sigue respondiendo de verdad
 ```
 
+## Resiliencia ante fallos de red (reintentos + aviso de caída)
+
+Fallo real en producción (GitHub Actions, 2026-08-17): `jobs/run_market.py`
+cayó entero con `http.client.RemoteDisconnected` al llamar a
+`/1/userteam/information` — Futmondo cerró la conexión sin responder, sin
+relación con los datos de la petición. Sin ningún reintento ni aviso, el
+job murió en silencio: la única forma de enterarse era revisar los logs de
+Actions a mano.
+
+Dos arreglos, ninguno oculta el fallo si de verdad hace falta que se vea:
+
+- **Reintentos ante `ConnectionError`** (`clients/futmondo_client.py:
+  FutmondoClient._post`, `config.FUTMONDO_READ_MAX_RETRIES`, 2 por
+  defecto, backoff 1s/2s): solo en las llamadas de LECTURA
+  (`get_roster`/`get_information`/`get_lineup`/`get_market`/
+  `get_my_players_in_market`/`get_player_summary`). Las ESCRITURAS
+  (`place_bid`, `change_lineup`...) se quedan a propósito en 0 reintentos:
+  un `ConnectionError` ahí puede pasar DESPUÉS de que Futmondo ya procesara
+  la petición de verdad (se perdió la respuesta, no la petición), y
+  reintentar podría duplicar el efecto (pujar dos veces, mandar el mismo
+  cambio de alineación dos veces). Un `HTTPError` (4xx/5xx CON respuesta)
+  tampoco se reintenta nunca — ya hubo respuesta, repetir no cambiaría nada.
+
+- **Aviso inmediato de caída** (`notifier.notify_on_crash`, envuelve el
+  `if __name__ == "__main__":` de los 5 jobs): si `run()` deja escapar
+  cualquier excepción no controlada (agotados los reintentos o de otro
+  tipo), se notifica por Telegram ANTES de dejarla propagar — GitHub
+  Actions sigue marcando el job en rojo igual, esto solo evita depender de
+  mirar los logs a mano para enterarse. Cada job ya notificaba siempre sus
+  fallos "esperados" (rechazo de una puja, envío parcial de la
+  alineación...) vía `notify()` al final de `run()`; esto cubre el hueco de
+  los fallos que ni siquiera llegan a esa última línea.
+
 ## Activar el cron en GitHub Actions
 
 `.env` es SOLO para ejecuciones locales — GitHub Actions no lo lee. El cron

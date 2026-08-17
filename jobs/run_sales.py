@@ -21,7 +21,7 @@ import requests
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
 from engine.selling_strategy import decide_sales
-from notifier import notify
+from notifier import notify, notify_on_crash
 
 
 def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
@@ -85,4 +85,5 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    with notify_on_crash("run_sales"):
+        run()

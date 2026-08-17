@@ -37,6 +37,16 @@ FUTMONDO_BASE_URL = os.getenv("FUTMONDO_BASE_URL", "https://api.futmondo.com")
 FUTMONDO_CHAMPIONSHIP_ID = os.getenv("FUTMONDO_CHAMPIONSHIP_ID")
 FUTMONDO_USERTEAM_ID = os.getenv("FUTMONDO_USERTEAM_ID")
 
+# Reintentos ante fallo de CONEXIÓN (no HTTP 4xx/5xx, que ya tuvo
+# respuesta) en las llamadas de SOLO LECTURA de Futmondo (ver
+# clients/futmondo_client.py:FutmondoClient._post()). Caso real confirmado
+# en producción (GitHub Actions, 2026-08-17): la API cerró la conexión sin
+# responder a mitad de jobs/run_market.py (`RemoteDisconnected`), tumbando
+# el job entero sin ningún reintento. Las escrituras (place_bid,
+# change_lineup...) NO usan esto — se quedan siempre en 0 reintentos
+# automáticos a propósito, ver docstring de `_post`.
+FUTMONDO_READ_MAX_RETRIES = int(os.getenv("FUTMONDO_READ_MAX_RETRIES", "2"))
+
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")

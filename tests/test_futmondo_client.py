@@ -5,7 +5,9 @@ respuesta capturada de verdad durante la sesión (ver docstrings de
 clients/futmondo_client.py para la fuente de cada una).
 """
 import pytest
+import requests
 
+import config
 from clients.futmondo_client import (
     FUTMONDO_POSITION_MAP,
     FutmondoAuthError,
@@ -275,3 +277,84 @@ def test_total_pending_bid_amount_sums_amounts():
 
 def test_total_pending_bid_amount_empty_list():
     assert total_pending_bid_amount([]) == 0
+
+
+# --- Reintentos ante fallo de conexión transitorio (ver clients/futmondo_client.py:_post) ---
+# Regresión del fallo real en producción (GitHub Actions, 2026-08-17):
+# jobs/run_market.py cayó entero por un RemoteDisconnected sin ningún
+# reintento al llamar a /1/userteam/information.
+
+def test_read_method_retries_on_connection_error_then_succeeds(fake_client, monkeypatch):
+    monkeypatch.setattr(config, "FUTMONDO_READ_MAX_RETRIES", 2)
+    monkeypatch.setattr("clients.futmondo_client.time.sleep", lambda seconds: None)
+
+    attempts = {"n": 0}
+
+    def flaky(method, url, payload):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise requests.exceptions.ConnectionError("Remote end closed connection without response")
+        return FakeResponse(200, {"answer": {"budget": 20_000_000}})
+
+    fake_client.session.response_fn = flaky
+    result = fake_client.get_information()
+
+    assert result["answer"]["budget"] == 20_000_000
+    assert attempts["n"] == 3  # 2 fallos + 1 éxito, dentro del margen (max_retries=2)
+
+
+def test_read_method_exhausts_retries_and_raises(fake_client, monkeypatch):
+    monkeypatch.setattr(config, "FUTMONDO_READ_MAX_RETRIES", 2)
+    monkeypatch.setattr("clients.futmondo_client.time.sleep", lambda seconds: None)
+
+    attempts = {"n": 0}
+
+    def always_fails(method, url, payload):
+        attempts["n"] += 1
+        raise requests.exceptions.ConnectionError("Remote end closed connection without response")
+
+    fake_client.session.response_fn = always_fails
+    with pytest.raises(requests.exceptions.ConnectionError):
+        fake_client.get_information()
+
+    assert attempts["n"] == 3  # intento inicial + 2 reintentos, ninguno recuperó
+
+
+def test_write_method_never_retries_on_connection_error(fake_client, monkeypatch):
+    """
+    Las escrituras (place_bid...) NO deben reintentar nunca, aunque
+    FUTMONDO_READ_MAX_RETRIES esté activado -- un ConnectionError ahí puede
+    pasar DESPUÉS de que Futmondo ya procesara la puja de verdad, y
+    reintentar podría duplicarla (ver docstring de _post).
+    """
+    monkeypatch.setattr(config, "FUTMONDO_READ_MAX_RETRIES", 2)
+
+    attempts = {"n": 0}
+
+    def always_fails(method, url, payload):
+        attempts["n"] += 1
+        raise requests.exceptions.ConnectionError("boom")
+
+    fake_client.session.response_fn = always_fails
+    with pytest.raises(requests.exceptions.ConnectionError):
+        fake_client.place_bid("1", "jugador-1", 100)
+
+    assert attempts["n"] == 1  # ni un solo reintento
+
+
+def test_http_error_with_real_response_is_never_retried(fake_client, monkeypatch):
+    """Un 4xx/5xx CON respuesta real del servidor no debe reintentarse -- repetir no cambiaría el resultado."""
+    monkeypatch.setattr(config, "FUTMONDO_READ_MAX_RETRIES", 2)
+    monkeypatch.setattr("clients.futmondo_client.time.sleep", lambda seconds: None)
+
+    attempts = {"n": 0}
+
+    def server_error(method, url, payload):
+        attempts["n"] += 1
+        return FakeResponse(500, {})
+
+    fake_client.session.response_fn = server_error
+    with pytest.raises(requests.HTTPError):
+        fake_client.get_information()
+
+    assert attempts["n"] == 1
