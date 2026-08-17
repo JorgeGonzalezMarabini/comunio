@@ -167,6 +167,21 @@ cambios ya aplicados que los titulares (ver arriba) — aunque ese criterio
 en concreto (sustituir un suplente ya puesto) no se ha probado en vivo
 específicamente para banquillo, solo para titulares.
 
+**IMPORTANTE — el suplente colocado no hace nada por sí solo**: según la
+[FAQ oficial](https://help.futmondo.com/article/159-entrenador-automatico),
+la sustitución real de un titular que no juega (0 minutos) por su suplente
+de la misma posición la hace el **"entrenador automático"** — una función
+APARTE, de pago (1.000 mondos/jornada, gratis en modo PRO), que no está
+activada por defecto. `GET .../lineup` de la liga de prueba usada en esta
+sesión devuelve `"bench": {"enabled": true, "automatic": false, ...}` —
+con `automatic: false`, el suplente que coloca el bot es decorativo: si un
+titular no juega, nadie entra a sustituirlo. **TODO sin investigar
+todavía**: si se puede activar el entrenador automático vía API (¿toggle
+en algún endpoint de configuración?), y si la liga real de destino es
+PRO (gratis) o tocaría gestionar mondos — sin esto, `pick_substitutes()`/
+`build_bench_changes()` calculan y envían el suplente correcto, pero no
+garantizan que llegue a jugar nunca.
+
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en
 "Mis ventas"):
