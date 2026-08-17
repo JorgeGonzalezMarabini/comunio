@@ -151,6 +151,7 @@ _LEAGUE_DATA = {
         {"player_name": "Kylian Mbappe-Lottin", "team_title": "Real Madrid", "id": "u5", "position": "F"},
         {"player_name": "Marc Bola", "team_title": "Watford", "id": "u6", "position": "D"},  # apellido único en la liga, para probar el filtro de posición
         {"player_name": "Iker Solano", "team_title": "Getafe", "id": "u7"},  # apellido único, sin "position" -- para probar que el filtro no bloquea sin dato
+        {"player_name": "Robin Le Normand", "team_title": "Atletico Madrid", "id": "u8", "position": "D"},  # apellido compuesto, dos palabras
     ]
 }
 
@@ -239,6 +240,22 @@ def test_match_player_fuzzy_rejects_when_position_conflicts():
     player, strategy = match_player("Kylian Mbappe Lottin", "Real Madrid", index, position="POR")
     assert player is None
     assert strategy == "sin_match"
+
+
+def test_match_player_compound_surname_matches_via_last_word():
+    """
+    Caso real detectado en producción (2026-08-17): Futmondo muestra el
+    apellido compuesto completo ("Le Normand"), pero build_player_index()
+    solo indexa por la ÚLTIMA palabra del nombre completo de Understat
+    ("normand") -- sin el reintento por última palabra, este jugador nunca
+    cruzaría aunque sí esté en el índice. Aquí el nombre de equipo tampoco
+    coincide en texto ("Atlético de Madrid" vs "Atletico Madrid"), así que
+    debe resolverse por "surname_unique", no por "surname+team".
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Le Normand", "Atlético de Madrid", index, position="DEF")
+    assert strategy == "surname_unique"
+    assert player["id"] == "u8"
 
 
 def test_match_player_position_missing_on_understat_side_does_not_block():

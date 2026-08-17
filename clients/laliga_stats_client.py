@@ -262,12 +262,19 @@ def match_player(
          ambos juegan en el mismo equipo (nombre de equipo normalizado) —
          cubre el caso más habitual: Futmondo mostrando solo el apellido de
          un jugador conocido (ej. "Cairney" -> "Tom Cairney" del Fulham).
-      3. "surname_unique": igual que el anterior pero sin poder confirmar
-         equipo (los nombres de equipo de las dos fuentes no coinciden en
-         texto, o Futmondo no trae equipo) — solo se acepta si ese apellido
-         es único en TODA la liga Y (si se pasó `position`) la posición es
-         compatible, para no arriesgarse a mezclar a dos jugadores
-         homónimos de equipos distintos.
+         Si Futmondo muestra un apellido COMPUESTO de varias palabras (ej.
+         "Le Normand", "Van Dijk") y no hay match con el nombre tal cual, se
+         reintenta usando solo su última palabra ("Normand", "Dijk") — es la
+         misma aproximación (última palabra) que ya usa build_player_index()
+         para extraer el apellido del nombre completo de Understat, así que
+         ambos lados quedan comparables.
+      3. "surname_unique": igual que el anterior (con el mismo reintento por
+         última palabra) pero sin poder confirmar equipo (los nombres de
+         equipo de las dos fuentes no coinciden en texto, o Futmondo no trae
+         equipo) — solo se acepta si ese apellido es único en TODA la liga Y
+         (si se pasó `position`) la posición es compatible, para no
+         arriesgarse a mezclar a dos jugadores homónimos de equipos
+         distintos.
       4. "fuzzy": similitud de texto (`difflib.SequenceMatcher`) contra los
          jugadores del MISMO equipo — aceptado solo si el mejor candidato
          supera `fuzzy_threshold`, saca claramente más nota que el segundo
@@ -292,12 +299,24 @@ def match_player(
     if exact:
         return exact, "exact"
 
-    same_team_same_surname = index["by_team_and_surname"].get((normalized_team, normalized_name), [])
-    if len(same_team_same_surname) == 1:
-        return same_team_same_surname[0], "surname+team"
+    # Apellidos a probar como clave, de más a menos literal: el nombre tal
+    # cual (caso habitual, Futmondo mostrando un apellido de una palabra) y,
+    # si es distinto, solo su última palabra (apellido compuesto -- "Le
+    # Normand", "Van Dijk" -- ver docstring). build_player_index() solo
+    # indexa por la última palabra del nombre completo de Understat, así
+    # que sin este segundo intento un apellido compuesto nunca cruzaría
+    # aunque el jugador sí esté en el índice.
+    last_word = normalized_name.split(" ")[-1]
+    surname_candidates = [normalized_name] if last_word == normalized_name else [normalized_name, last_word]
 
-    if not same_team_same_surname:
-        same_surname_anywhere = index["by_surname"].get(normalized_name, [])
+    for surname in surname_candidates:
+        same_team_same_surname = index["by_team_and_surname"].get((normalized_team, surname), [])
+        if len(same_team_same_surname) == 1:
+            return same_team_same_surname[0], "surname+team"
+        if same_team_same_surname:
+            continue  # ambiguo incluso con equipo -- no probar este apellido sin equipo tampoco
+
+        same_surname_anywhere = index["by_surname"].get(surname, [])
         if len(same_surname_anywhere) == 1:
             candidate = same_surname_anywhere[0]
             if _position_is_compatible(position, candidate.get("position")):
