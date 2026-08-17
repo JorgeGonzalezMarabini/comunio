@@ -53,6 +53,10 @@ from notifier import notify, notify_on_crash
 
 
 def run():
+    if not config.ENABLE_BOT:
+        print("set_lineup: ENABLE_BOT=false, no se ejecuta.")
+        return
+
     client = FutmondoClient()
 
     roster_response = client.get_roster()

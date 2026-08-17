@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import config
 import jobs.run_sales as run_sales
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
@@ -97,3 +98,19 @@ def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):
         run_sales.run()
 
     assert "plantilla vino vacía" in captured[0]
+
+
+def test_run_sales_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    class BoomClient(FutmondoClient):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("no debería construirse FutmondoClient con ENABLE_BOT=false")
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", BoomClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert captured == []
+    assert "ENABLE_BOT=false" in capsys.readouterr().out

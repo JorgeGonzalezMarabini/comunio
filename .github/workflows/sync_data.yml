@@ -19,6 +19,10 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m jobs.sync_data
         env:
+          # Pausa rápida de los 5 jobs sin tocar el `schedule:` de cada
+          # workflow (ver README, "Pausar el bot sin tocar los 5
+          # workflows"). Poner ENABLE_BOT=false como GitHub Variable.
+          ENABLE_BOT: ${{ vars.ENABLE_BOT }}
           FUTMONDO_TOKEN: ${{ secrets.FUTMONDO_TOKEN }}
           FUTMONDO_USER_ID: ${{ secrets.FUTMONDO_USER_ID }}
           FUTMONDO_CHAMPIONSHIP_ID: ${{ vars.FUTMONDO_CHAMPIONSHIP_ID }}

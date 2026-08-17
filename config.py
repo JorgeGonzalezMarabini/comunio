@@ -11,6 +11,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# --- Interruptor general del bot ---
+# Con esto en false, TODOS los jobs (sync_data, run_market, run_sales,
+# set_lineup, manage_substitutes) hacen return inmediato al principio de
+# run() sin tocar la red ni la BD -- pensado como pausa rápida sin tener
+# que entrar a desactivar el `schedule:` de cada uno de los 5 workflows de
+# GitHub Actions por separado (incómodo: hay que editar 5 archivos .yml y
+# volver a activarlos luego). Basta con poner/quitar la GitHub Variable
+# `ENABLE_BOT=false` en un solo sitio (Settings del repo, ver README,
+# "Activar el cron en GitHub Actions") -- los `schedule:` siguen
+# disparándose igual (GitHub no permite pausarlos vía variable), pero cada
+# ejecución termina en el acto sin hacer nada. No notifica por Telegram al
+# saltarse (evitaría el propósito de silenciarlo) -- solo un print visible
+# en el log de Actions si alguien lo revisa a mano.
+#
+# Parseo deliberadamente distinto del resto de flags ENABLE_XXX (que son
+# "false" por defecto y se activan explícitamente con "true"): este es
+# "true" por defecto y hay que apagarlo explícitamente, porque en GitHub
+# Actions una Variable NO definida (`${{ vars.ENABLE_BOT }}` sin haberla
+# creado) se resuelve como cadena VACÍA, no se omite -- así que llega
+# `ENABLE_BOT=""` al proceso. `os.getenv(..., "true") == "true"` fallaría
+# ahí (compara "" contra "true"), apagando el bot solo por no haber creado
+# todavía la Variable, justo lo contrario de lo que se busca. Por eso se
+# comprueba que NO sea explícitamente una cadena "falsy" en vez de exigir
+# que sea "true": vacío/no definida -> sigue activo.
+ENABLE_BOT = os.getenv("ENABLE_BOT", "true").strip().lower() not in ("false", "0", "no")
+
 # --- Futmondo ---
 # Capturado con Chrome DevTools el 2026-08-17 (sesión real en app.futmondo.com,
 # app Flutter Web contra un único dominio: api.futmondo.com).

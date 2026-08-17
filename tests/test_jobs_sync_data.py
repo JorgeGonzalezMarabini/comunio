@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import config
 import jobs.sync_data as sync_data
 from clients.futmondo_client import FutmondoClient
 from db.models import get_connection, get_player_features
@@ -148,3 +149,19 @@ def test_run_crosses_with_understat_by_surname_and_reports_breakdown(tmp_db, ros
     with get_connection() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM external_stats WHERE player_id = ?", ("1001",)).fetchone()
     assert row["n"] == 1
+
+
+def test_sync_data_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    class BoomClient(FutmondoClient):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("no debería construirse FutmondoClient con ENABLE_BOT=false")
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", BoomClient), patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)):
+        sync_data.run()
+
+    assert captured == []
+    assert "ENABLE_BOT=false" in capsys.readouterr().out

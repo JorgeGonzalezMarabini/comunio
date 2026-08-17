@@ -231,3 +231,19 @@ def test_manage_substitutes_submit_error_is_audited_without_crashing(tmp_db, mon
     with get_connection() as conn:
         row = conn.execute("SELECT submitted_to_futmondo FROM substitution_decisions").fetchone()
     assert row["submitted_to_futmondo"] == 0
+
+
+def test_manage_substitutes_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    class BoomClient(FutmondoClient):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("no debería construirse FutmondoClient con ENABLE_BOT=false")
+
+    captured = []
+    with patch("jobs.manage_substitutes.FutmondoClient", BoomClient), patch("jobs.manage_substitutes.notify", side_effect=lambda m: captured.append(m)):
+        manage_substitutes.run()
+
+    assert captured == []
+    assert "ENABLE_BOT=false" in capsys.readouterr().out

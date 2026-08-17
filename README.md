@@ -607,6 +607,25 @@ Dos arreglos, ninguno oculta el fallo si de verdad hace falta que se vea:
   alineación...) vía `notify()` al final de `run()`; esto cubre el hueco de
   los fallos que ni siquiera llegan a esa última línea.
 
+## Pausar el bot sin tocar los 5 workflows (`ENABLE_BOT`)
+
+GitHub no deja pausar un `schedule:` desde una variable — para dejar de
+disparar un workflow hay que editar su `.yml` (comentar la línea
+`schedule:`) o desactivarlo a mano uno a uno desde la pestaña `Actions`,
+incómodo teniendo 5 workflows independientes (`sync_data`, `run_market`,
+`run_sales`, `set_lineup`, `manage_substitutes`).
+
+`config.ENABLE_BOT` (por defecto `true`) es el atajo: con la GitHub
+Variable `ENABLE_BOT=false` puesta UNA vez (`Settings → Secrets and
+variables → Actions → Variables`), los 5 `schedule:` se siguen disparando
+igual (GitHub los lanza de todos modos), pero cada `run()` hace return en
+la primera línea sin tocar la red ni la BD — pausa efectiva en un solo
+sitio, sin editar ni reactivar workflows. No notifica por Telegram al
+saltarse (spamearía en cada disparo mientras esté pausado a propósito) —
+solo un `print` visible en el log de Actions si alguien lo revisa a mano.
+Volver a poner `ENABLE_BOT=true` (o borrar la variable) reactiva todo tal
+cual estaba.
+
 ## Activar el cron en GitHub Actions
 
 `.env` es SOLO para ejecuciones locales — GitHub Actions no lo lee. El cron
@@ -620,7 +639,8 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
 2. **Variables** (misma sección, pestaña `Variables` — no son secretas, solo
    IDs): `FUTMONDO_CHAMPIONSHIP_ID`, `FUTMONDO_USERTEAM_ID`. Opcional:
    `ENABLE_REAL_LINEUP_CHECK=true` (por defecto `false`, no hace falta
-   definirla mientras no se active).
+   definirla mientras no se active) y `ENABLE_BOT=false` para pausar todo
+   (ver sección anterior).
 3. Hacer `git push` de este repo a `origin` (el agente que escribió este
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).

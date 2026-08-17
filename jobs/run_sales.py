@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 import requests
 
+import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
 from engine.selling_strategy import decide_sales
@@ -44,6 +45,10 @@ def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
 
 
 def run():
+    if not config.ENABLE_BOT:
+        print("run_sales: ENABLE_BOT=false, no se ejecuta.")
+        return
+
     client = FutmondoClient()
 
     roster = client.get_roster()

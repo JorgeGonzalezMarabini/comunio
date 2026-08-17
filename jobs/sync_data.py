@@ -20,6 +20,7 @@ distinguir con los datos disponibles).
 """
 from datetime import datetime, timezone
 
+import config
 from clients.futmondo_client import FutmondoClient, FUTMONDO_POSITION_MAP
 from clients.laliga_stats_client import build_player_index, get_league_data_with_fallback, match_player
 from db.models import init_db, get_connection, get_open_bids, update_bid_status, get_open_sales, update_sale_status
@@ -167,6 +168,10 @@ def _upsert_external_stats(conn, player_id: str, understat_player: dict, season:
 
 
 def run():
+    if not config.ENABLE_BOT:
+        print("sync_data: ENABLE_BOT=false, no se ejecuta.")
+        return
+
     init_db()
 
     client = FutmondoClient()

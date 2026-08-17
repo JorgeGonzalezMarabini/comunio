@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import config
 import jobs.run_market as run_market
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
@@ -242,3 +243,19 @@ def test_run_market_prioritizes_candidate_that_would_upgrade_lineup(tmp_db):
     assert "mejora el once titular" not in rows.get("def_normal", "")
     # Ninguna posición estaba en riesgo de cantidad -- el boost es solo por calidad.
     assert "prioridad riesgo de plantilla" not in rows.get("med_upgrade", "")
+
+
+def test_run_market_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    class BoomClient(FutmondoClient):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("no debería construirse FutmondoClient con ENABLE_BOT=false")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", BoomClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert captured == []  # no debe notificar nada -- pausado a propósito, no un fallo
+    assert "ENABLE_BOT=false" in capsys.readouterr().out

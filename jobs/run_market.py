@@ -65,6 +65,10 @@ def _persist_bid(conn, decision: dict, status: str, now: str) -> None:
 
 
 def run():
+    if not config.ENABLE_BOT:
+        print("run_market: ENABLE_BOT=false, no se ejecuta.")
+        return
+
     client = FutmondoClient()
 
     raw_candidates = get_player_features(only_on_market=True)

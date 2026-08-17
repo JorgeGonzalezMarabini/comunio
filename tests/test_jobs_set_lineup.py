@@ -264,3 +264,19 @@ def test_set_lineup_submit_failure_is_audited_without_crashing(tmp_db, monkeypat
     with get_connection() as conn:
         row = conn.execute("SELECT submitted_to_futmondo FROM lineup_decisions").fetchone()
     assert row["submitted_to_futmondo"] == 0
+
+
+def test_set_lineup_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    class BoomClient(FutmondoClient):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("no debería construirse FutmondoClient con ENABLE_BOT=false")
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", BoomClient), patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)):
+        set_lineup.run()
+
+    assert captured == []
+    assert "ENABLE_BOT=false" in capsys.readouterr().out

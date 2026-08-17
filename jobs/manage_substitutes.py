@@ -65,6 +65,10 @@ from notifier import notify, notify_on_crash
 
 
 def run():
+    if not config.ENABLE_BOT:
+        print("manage_substitutes: ENABLE_BOT=false, no se ejecuta.")
+        return
+
     client = FutmondoClient()
 
     current_lineup_answer = client.get_lineup().get("answer", {})
