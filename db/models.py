@@ -233,11 +233,11 @@ def get_bids_risked_today() -> int:
 
     OJO: esto es solo el RITMO de gasto por jornada (un límite
     autoimpuesto, conservador), NO la protección real de saldo — para eso
-    hace falta `get_pending_bid_amount()` (ver también
-    clients.futmondo_client.total_pending_bid_amount y
-    jobs/run_market.py). Esta función solo mira las pujas colocadas HOY;
-    una puja de AYER que Futmondo todavía no haya resuelto no aparece
-    aquí.
+    hace falta `get_pending_bid_amount()` cruzado con
+    `clients.futmondo_client.real_pending_bid_amount()` (ver TODO.md #3,
+    resuelto, y jobs/run_market.py). Esta función solo mira las pujas
+    colocadas HOY; una puja de AYER que Futmondo todavía no haya resuelto
+    no aparece aquí.
     """
     from datetime import datetime, timezone
 
@@ -255,15 +255,17 @@ def get_pending_bid_amount() -> int:
     Suma el importe de TODAS las pujas que seguimos creyendo pendientes
     (status='placed'), sin importar el día en que se colocaron.
 
-    A diferencia de Comunio (que exponía `GET .../offers?current` con la
-    lista real de ofertas pendientes, fuente de verdad externa), Futmondo
-    no tiene un endpoint equivalente confirmado (ver
-    clients.futmondo_client.total_pending_bid_amount) — esta es nuestra
-    única aproximación al "dinero ya comprometido pero no descontado del
-    saldo todavía", y depende por completo de que jobs/sync_data.py
-    reconcilie el estado ('placed' -> 'won'/'lost') en cada ejecución. Si
-    la reconciliación se retrasa o falla, esto puede sobreestimar el
-    compromiso real (nunca subestimarlo, que sería el caso peligroso).
+    Resuelve TODO.md #3 (junto con `clients.futmondo_client.
+    real_pending_bid_amount()`): Futmondo NO tiene un endpoint dedicado
+    como el `GET .../offers?current` de Comunio, pero cada item de
+    `get_market()` en el que tenemos puja pendiente sí trae el importe real
+    en un campo `"bid"` (confirmado en vivo 2026-08-18) — esa es ahora la
+    fuente PRIMARIA en `jobs/run_market.py` (más fuerte: viene del propio
+    Futmondo, no depende de reconciliación). Esta función local se sigue
+    usando como colchón adicional (`max()` con la fuente real) por si la
+    consulta al mercado fallara — sigue dependiendo de que
+    `jobs/sync_data.py` reconcilie el estado ('placed' -> 'won'/'lost') a
+    tiempo para no arrastrar pujas ya resueltas indefinidamente.
     """
     with get_connection() as conn:
         row = conn.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM bids WHERE status = 'placed'").fetchone()

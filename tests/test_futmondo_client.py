@@ -14,6 +14,7 @@ from clients.futmondo_client import (
     FutmondoClient,
     FutmondoOfferError,
     is_injury_status,
+    real_pending_bid_amount,
     total_pending_bid_amount,
 )
 from tests.conftest import FakeResponse, FakeSession
@@ -282,6 +283,37 @@ def test_total_pending_bid_amount_sums_amounts():
 
 def test_total_pending_bid_amount_empty_list():
     assert total_pending_bid_amount([]) == 0
+
+
+def test_real_pending_bid_amount_sums_only_items_with_bid_field():
+    """
+    Resuelve TODO.md #3: forma real confirmada en vivo (2026-08-18) del
+    campo "bid" de get_market() -- {"id": ..., "price": ...} solo en los
+    items donde tenemos puja propia pendiente, ausente en el resto.
+    """
+    market_items = [
+        {"id": "1", "name": "Con puja", "bid": {"id": "abc", "price": 1_044_999}},
+        {"id": "2", "name": "Sin puja"},
+        {"id": "3", "name": "Otra con puja", "bid": {"id": "def", "price": 7_265_939}},
+    ]
+    assert real_pending_bid_amount(market_items) == 8_310_938
+
+
+def test_real_pending_bid_amount_ignores_stale_amount_after_a_silent_no_op_rebid():
+    """
+    Regresión del hallazgo real (2026-08-18): pujar dos veces sobre el
+    mismo jugador no actualiza "bid.price" en el mercado (Futmondo ignora
+    la segunda llamada en silencio) -- esta función debe reflejar el
+    importe REAL server-side (el de la primera puja), no lo que la BD
+    local pudiera creer tras una "escalada" que en realidad no surtió
+    efecto.
+    """
+    market_items = [{"id": "1", "bid": {"id": "abc", "price": 15_000_000}}]  # primera puja, la que de verdad cuenta
+    assert real_pending_bid_amount(market_items) == 15_000_000
+
+
+def test_real_pending_bid_amount_empty_market():
+    assert real_pending_bid_amount([]) == 0
 
 
 # --- Reintentos ante fallo de conexión transitorio (ver clients/futmondo_client.py:_post) ---

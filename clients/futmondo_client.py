@@ -63,7 +63,8 @@ Vistos en la captura pero NO usados por el bot (fuera de alcance de esta
 primera versión, documentados por si hacen falta más adelante):
     POST /1/market/rosterbids        -> ofertas de cláusula que otros managers han hecho sobre TU plantilla
                                          (type="roster" en la query; distinto de "mis pujas de compra", que
-                                         no tienen endpoint propio, ver nota en total_pending_bid_amount())
+                                         no tienen endpoint propio dedicado -- se leen del campo "bid" de
+                                         cada item de /1/market/players, ver real_pending_bid_amount())
     POST /1/league/championshipteams -> equipos/managers de la liga
     POST /5/league/championshipplayers -> plantillas de todos los managers de la liga
 
@@ -186,30 +187,55 @@ def total_pending_bid_amount(bids_placed_locally: list[dict]) -> int:
     """
     Suma el importe de nuestras propias pujas de compra que seguimos
     creyendo pendientes, según NUESTRA PROPIA tabla `bids` (status=
-    'placed'), NO según un endpoint de Futmondo.
+    'placed'), NO según un endpoint de Futmondo. Ver `real_pending_bid_amount()`
+    más abajo para la fuente confirmada del lado de Futmondo (resuelve
+    TODO.md #3) — esta función local se mantiene como colchón/fallback si
+    esa consulta al mercado fallara, no como la única fuente ya.
 
-    A diferencia de Comunio (`clients.comunio_client.
-    total_pending_purchase_amount`, que sí tiene un endpoint real
-    `GET .../offers?current` con la lista de ofertas pendientes propias),
-    no se ha encontrado un endpoint equivalente en Futmondo: la única pista
-    real es que cada item de `get_market()` puede traer un campo "bid" con
-    la puja propia sobre ESE jugador en concreto (visto documentado así en
-    vicenteqa/futmondo-utils, `player.bid.id` / `player.bid`), pero no se ha
-    podido confirmar en captura propia la forma exacta de ese sub-objeto
-    (¿trae el importe? ¿"price"?) ni si de verdad está siempre filtrado a
-    "tu" puja o podría incluir la puja ganadora de otro manager.
-
-    Por eso, de momento, la protección de presupuesto (ver
-    engine.bidding_strategy.max_biddable_amount) se apoya en
-    `db.models.get_open_bids_total()` — nuestra propia auditoría local de
-    pujas 'placed' — confiando en que `jobs/sync_data.py` reconcilia el
-    estado a 'won'/'lost' en cada ejecución. Es una protección más débil
-    que la de Comunio (si la BD se pierde o no se reconcilia a tiempo,
-    podría subestimar el compromiso real), pero es lo único verificable con
-    los datos que tenemos. `bids_placed_locally`: filas de
-    `db.models.get_open_bids()`.
+    `bids_placed_locally`: filas de `db.models.get_open_bids()`.
     """
     return sum(b.get("amount", 0) for b in bids_placed_locally)
+
+
+def real_pending_bid_amount(market_items: list[dict]) -> int:
+    """
+    Resuelve TODO.md #3: suma del importe REAL que Futmondo reconoce como
+    puja propia pendiente en cada listado del mercado, confirmado por fetch
+    autenticado real (2026-08-18, liga de prueba, 12 pujas propias
+    realmente colocadas ese día y el anterior).
+
+    Cada item de `get_market()` en el que TENEMOS una puja pendiente trae
+    un campo extra `"bid": {"id": <str>, "price": <int>}` que no aparece en
+    absoluto en los items donde no hemos pujado (confirmado cruzando los 14
+    items con `"bid"` contra nuestra propia tabla `bids`: coinciden 1:1,
+    ningún "bid" huérfano de otro manager) — así que, a diferencia de lo
+    que se sospechaba antes de esta confirmación, SÍ es una fuente
+    equivalente al `GET .../offers?current` de Comunio: una lista de nuestras
+    propias ofertas pendientes servida por el propio Futmondo, más fuerte
+    que la auditoría local porque no depende de que `jobs/sync_data.py`
+    haya reconciliado a tiempo ni de que la BD local no se haya perdido.
+
+    HALLAZGO IMPORTANTE (mismo fetch, 2026-08-18): en 5 de los 12 casos
+    reales, el bot había pujado DOS VECES sobre el mismo listado todavía
+    abierto (una escalada de precio decidida por `decide_bids_for_market`
+    en dos ejecuciones distintas del cron). Las dos llamadas a `place_bid()`
+    devolvieron `"api.general.ok"` (no se detecta como fallo), pero
+    `"bid.price"` en el mercado siempre coincide con el importe de la
+    PRIMERA puja, nunca con el de la segunda (más alta o más baja según el
+    caso) — Futmondo acepta la llamada pero no actualiza el precio de una
+    puja ya abierta sobre el mismo jugador. Por eso `jobs/run_market.py`
+    ahora excluye de los candidatos a cualquier jugador con una puja local
+    ya `'placed'` (ver `db.models.get_open_bids()`), en vez de reintentar
+    una "mejora" que Futmondo ignora en silencio — y por eso esta función
+    (fuente del propio Futmondo) es más fiable que sumar la tabla `bids`
+    local sin más: esta última duplicaría el compromiso de esos 5
+    jugadores (cuenta las dos filas 'placed'), mientras que esta función
+    refleja el importe real por el que Futmondo nos haría pagar si
+    ganáramos cada listado.
+
+    `market_items`: la lista `answer` de `get_market()` tal cual.
+    """
+    return sum(item["bid"]["price"] for item in market_items if "bid" in item)
 
 
 class FutmondoClient:
@@ -312,7 +338,7 @@ class FutmondoClient:
              "league": {...}, "configuration": {"budget", "numberOfPlayers",
              ...}, ...}}
         `budget` es el saldo TOTAL (no descuenta pujas pendientes, igual que
-        el "credit" de Comunio — ver total_pending_bid_amount()).
+        el "credit" de Comunio — ver real_pending_bid_amount()).
 
         Idempotente (solo lectura) -> reintenta ante fallo de conexión
         transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`) — el
@@ -388,8 +414,19 @@ class FutmondoClient:
 
         Lanza FutmondoOfferError si `answer.code` no es "api.general.ok".
         No hay id de oferta que devolver (a diferencia de Comunio) — ver
-        total_pending_bid_amount() para cómo afecta esto al seguimiento de
+        real_pending_bid_amount() para cómo afecta esto al seguimiento de
         pujas pendientes.
+
+        OJO, confirmado en vivo (2026-08-18, ver real_pending_bid_amount()):
+        llamar dos veces sobre el MISMO jugador mientras la primera puja
+        sigue abierta responde igualmente `"api.general.ok"` (no lanza
+        FutmondoOfferError), pero Futmondo NO actualiza el precio de la
+        puja ya abierta — el importe real que se pagaría si se gana el
+        listado se queda en el de la primera llamada, pase lo que pase en
+        la segunda. No hay forma de "subir" una puja propia ya colocada;
+        `jobs/run_market.py` evita esta llamada por completo cuando ya hay
+        una puja local `'placed'` sobre ese jugador, en vez de confiar en
+        el código de respuesta para detectar el no-op.
         """
         result = self._post(
             "/1/market/bid",

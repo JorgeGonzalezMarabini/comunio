@@ -129,6 +129,11 @@ def test_run_market_respects_pending_committed_from_local_db(tmp_db):
         def get_information(self):
             return {"answer": {"budget": 20_000_000}}
 
+        def get_market(self):
+            # Sin campo "bid" -- el mercado en vivo no aporta compromiso
+            # extra aquí, la protección viene solo de la BD local.
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 1_000_000}]}
+
     captured = []
     with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
         run_market.run()
@@ -137,6 +142,78 @@ def test_run_market_respects_pending_committed_from_local_db(tmp_db):
     assert "comprometido en pujas pendientes=17500000" in captured[0]
     with get_connection() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM bids WHERE status != 'placed' OR player_id != '9999'").fetchone()["n"] == 0
+
+
+def test_run_market_respects_pending_committed_from_live_market_bid_field(tmp_db):
+    """
+    Resuelve TODO.md #3: si la BD local no sabe nada (perdida/no
+    reconciliada) pero el propio Futmondo SÍ reporta una puja pendiente
+    real vía el campo "bid" de get_market(), la protección de presupuesto
+    debe verla igualmente -- no depender solo de la auditoría local.
+    """
+    _seed_player("4069", "DEF", price=1_000_000)
+    # BD local vacía a propósito -- nada en la tabla `bids`.
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {"id": "4069", "slug": "jugador-4069", "value": 1_000_000},
+                    # Puja pendiente real sobre OTRO jugador que la BD local desconoce.
+                    {"id": "9999", "slug": "jugador-9999", "value": 1_000_000, "bid": {"id": "x", "price": 17_500_000}},
+                ]
+            }
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "sin pujas esta ejecución" in captured[0]
+    assert "comprometido en pujas pendientes=17500000" in captured[0]
+
+
+def test_run_market_skips_candidate_with_already_open_local_bid(tmp_db):
+    """
+    Regresión del hallazgo real (2026-08-18): pujar dos veces sobre el
+    mismo jugador no actualiza el importe en Futmondo (ver
+    clients.futmondo_client.real_pending_bid_amount) -- run_market no debe
+    ni intentarlo. Un candidato con puja local 'placed' se excluye antes de
+    evaluar, aunque siga en el mercado.
+    """
+    _seed_player("4069", "DEF", price=1_000_000)
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("4069", 1_044_999, "placed", NOW),
+        )
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 1_000_000, "bid": {"id": "x", "price": 1_044_999}}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería intentar pujar de nuevo sobre un candidato ya con puja abierta")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "puja local ya" in captured[0]
+    with get_connection() as conn:
+        # Sigue habiendo solo la puja original -- no se insertó una segunda fila.
+        assert conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"] == 1
 
 
 def test_run_market_prioritizes_at_risk_position_over_higher_score(tmp_db):

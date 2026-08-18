@@ -29,25 +29,36 @@ similar):
      cada uno por separado los dejaría en escalas distintas, no
      comparables entre sí — ver engine/evaluator.py:normalize_pool).
 
-El presupuesto disponible se calcula restando una aproximación a TODAS las
-pujas pendientes sin resolver (db.models.get_pending_bid_amount() — nuestra
-propia auditoría local, ver TODO en clients/futmondo_client.py sobre por
-qué no hay una fuente externa mejor todavía en Futmondo), no solo lo
-arriesgado hoy (get_bids_risked_today, que sigue usándose como ritmo de
-gasto por jornada, no como protección de saldo).
+El presupuesto disponible se calcula restando TODAS las pujas pendientes
+sin resolver — resuelve TODO.md #3: combina `db.models.
+get_pending_bid_amount()` (auditoría local) con `clients.futmondo_client.
+real_pending_bid_amount()` (confirmado del propio Futmondo, campo "bid" de
+`get_market()`, ver ese docstring) tomando el MAYOR de los dos, nunca solo
+uno — así una BD perdida/no reconciliada a tiempo no puede hacer que se
+subestime el compromiso real. No es solo lo arriesgado hoy
+(get_bids_risked_today, que sigue usándose como ritmo de gasto por
+jornada, no como protección de saldo).
 
 place_bid() está **100% confirmado** (ver clients/futmondo_client.py) —
 puede fallar por HTTP (requests.RequestException) o por rechazo de negocio
 con HTTP 200 (FutmondoOfferError); cada intento va en su propio try/except
 para que un fallo de una puja no tumbe las demás ni la ejecución completa.
+
+También confirmado en vivo (2026-08-18, ver `clients.futmondo_client.
+real_pending_bid_amount()`): pujar dos veces sobre el mismo jugador
+mientras la primera puja sigue abierta no la actualiza (Futmondo responde
+"ok" pero ignora el nuevo importe) — por eso este job excluye de los
+candidatos a cualquier jugador con una puja local todavía `'placed'`
+(`db.models.get_open_bids()`) antes de evaluar, en vez de reintentar una
+"mejora" que no tiene ningún efecto real.
 """
 from datetime import datetime, timezone
 
 import requests
 
 import config
-from clients.futmondo_client import FutmondoClient, FutmondoOfferError
-from db.models import get_connection, get_bids_risked_today, get_pending_bid_amount, get_player_features
+from clients.futmondo_client import FutmondoClient, FutmondoOfferError, real_pending_bid_amount
+from db.models import get_connection, get_bids_risked_today, get_open_bids, get_pending_bid_amount, get_player_features
 from engine.bidding_strategy import apply_position_priority, decide_bids_for_market, dynamic_player_cap
 from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
@@ -74,6 +85,21 @@ def run():
     raw_candidates = get_player_features(only_on_market=True)
     if not raw_candidates:
         notify("run_market: no hay candidatos en mercado en la BD (¿corrió sync_data antes?).")
+        return
+
+    # Excluye candidatos con una puja local todavía 'placed' -- confirmado
+    # en vivo que pujar dos veces sobre el mismo jugador no actualiza el
+    # importe (ver docstring del módulo / clients.futmondo_client.
+    # real_pending_bid_amount()), así que reintentarlo no tiene efecto real
+    # y solo ensucia la auditoría con filas duplicadas.
+    already_bid_ids = {b["player_id"] for b in get_open_bids()}
+    skipped_already_bid = [p for p in raw_candidates if p["id"] in already_bid_ids]
+    raw_candidates = [p for p in raw_candidates if p["id"] not in already_bid_ids]
+    if not raw_candidates:
+        notify(
+            f"run_market: {len(skipped_already_bid)} candidato(s) en mercado, todos con puja local ya "
+            "pendiente -- nada nuevo que evaluar esta ejecución."
+        )
         return
 
     # Riesgo de plantilla: posiciones sin ningún suplente sano (ver
@@ -114,7 +140,15 @@ def run():
     information = client.get_information()
     remaining_budget = information.get("answer", {}).get("budget", 0)
     already_risked = get_bids_risked_today()
-    pending_committed = get_pending_bid_amount()
+
+    # Presupuesto: se pide el mercado ya aquí (no solo más abajo para
+    # pujar) para poder cruzar la auditoría local con la fuente confirmada
+    # del propio Futmondo (TODO.md #3, resuelto) -- se toma el MAYOR de
+    # las dos, nunca solo la local, para que una BD perdida/desincronizada
+    # no pueda hacer que se subestime el compromiso real.
+    market_items = client.get_market().get("answer", [])
+    market_by_id = {str(p["id"]): p for p in market_items}
+    pending_committed = max(get_pending_bid_amount(), real_pending_bid_amount(market_items))
 
     # Tope por jugador dinámico (ver engine.bidding_strategy.
     # dynamic_player_cap) en vez del antiguo tope fijo de 15M -- combina
@@ -139,8 +173,8 @@ def run():
 
     # `player_slug` no viene en `get_player_features()` (columnas de BD),
     # hace falta el candidato de mercado tal cual para pujar (place_bid lo
-    # exige, ver clients/futmondo_client.py) -- se cruza por id.
-    market_by_id = {str(p["id"]): p for p in client.get_market().get("answer", [])}
+    # exige, ver clients/futmondo_client.py) -- se cruza por id, reusando
+    # `market_by_id` ya calculado arriba (mismo fetch que para pending_committed).
 
     now = datetime.now(timezone.utc).isoformat()
     placed, failed = [], []

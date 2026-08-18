@@ -98,26 +98,64 @@ de alineación a Futmondo.
 
 ---
 
-## 3. Protección de presupuesto en pujas más débil que en Comunio
+## 3. ~~Protección de presupuesto en pujas más débil que en Comunio~~ (confirmado en vivo y arreglado, 2026-08-18)
 
-**Qué pasa**: Futmondo no expone (que se haya encontrado) un endpoint
-equivalente al de Comunio para consultar "mis ofertas/pujas pendientes"
-(Comunio sí tenía `GET .../offers?current` + regla oficial de penalización
-por saldo negativo). La única pista es un campo `bid`/`player.bid` en items
-de mercado, sin confirmar su forma exacta.
+**Qué pasaba**: Futmondo no expone (que se hubiera encontrado hasta ahora)
+un endpoint equivalente al de Comunio para consultar "mis ofertas/pujas
+pendientes" (Comunio sí tenía `GET .../offers?current` + regla oficial de
+penalización por saldo negativo). La única pista era un campo `bid`/
+`player.bid` en items de mercado, sin confirmar su forma exacta. La
+protección de presupuesto (`pending_committed`) se apoyaba solo en la
+auditoría local en BD, más débil que consultar el estado real en el
+servidor.
 
-**Por qué importa**: la protección de presupuesto (`pending_committed`) se
-apoya solo en la auditoría local en BD (`db.models.get_open_bids_total()`),
-que es más débil que consultar el estado real en el servidor. Si la BD se
-pierde o no reconcilia a tiempo, podría subestimarse el compromiso real y
-sobrepujar con dinero real.
+**Investigado con una llamada de solo lectura contra la cuenta real**
+(2026-08-18, `get_market()`, 12 pujas propias ya colocadas ese día y el
+anterior): confirmado que cada item de `get_market()` en el que tenemos
+puja pendiente trae `"bid": {"id": <str>, "price": <int>}`, ausente por
+completo en los items donde no hemos pujado — cruzado 1:1 contra nuestra
+tabla `bids` local, sin ningún "bid" huérfano de otro manager. Sí es,
+efectivamente, el equivalente de Futmondo al `GET .../offers?current` de
+Comunio.
+
+**Hallazgo adicional durante la misma investigación**: en 5 de los 12
+casos reales el bot había pujado DOS VECES sobre el mismo jugador todavía
+sin resolver (una "escalada" de precio entre dos ejecuciones del cron).
+Ambas llamadas a `place_bid()` devolvieron `"api.general.ok"` (ninguna
+lanzó error), pero `"bid.price"` en el mercado en vivo siempre coincidía
+con el importe de la PRIMERA puja, nunca con el de la segunda — Futmondo
+acepta la llamada pero ignora el nuevo importe si ya había una puja
+abierta sobre ese jugador. Esto también significa que la auditoría local
+(sumar `bids.amount` sin más) duplicaba el compromiso real de esos 5
+jugadores.
+
+**Arreglado**:
+- `clients/futmondo_client.py`: nueva `real_pending_bid_amount(market_items)`,
+  suma `item["bid"]["price"]` de la respuesta de `get_market()` — fuente
+  confirmada del propio Futmondo.
+- `jobs/run_market.py`: `pending_committed` ahora es
+  `max(db.models.get_pending_bid_amount(), real_pending_bid_amount(...))`
+  — nunca solo la auditoría local, así que una BD perdida/no reconciliada
+  a tiempo ya no puede subestimar el compromiso real. Además, excluye de
+  los candidatos a evaluar cualquier jugador con una puja local todavía
+  `'placed'` (`db.models.get_open_bids()`), evitando reintentar una
+  "mejora" de puja que Futmondo ignora en silencio.
+
+**Verificado con tests**: `tests/test_futmondo_client.py`
+(`test_real_pending_bid_amount_*`), `tests/test_jobs_run_market.py`
+(cross-check BD-vacía-pero-mercado-real y skip de candidato ya pujado). No
+se ha podido confirmar todavía si existe alguna otra vía distinta de "ya
+tenía una puja abierta" para que `place_bid()` ignore el importe (p. ej.
+algún límite de incremento mínimo) — bajo impacto porque ahora se evita
+por completo la re-puja sobre un candidato ya pendiente.
 
 **Afecta a**: `engine/bidding_strategy.py` (`max_biddable_amount`,
-`decide_bids_for_market`), `jobs/run_market.py` (presupuesto disponible).
+`decide_bids_for_market`), `jobs/run_market.py` (presupuesto disponible y
+selección de candidatos), `clients/futmondo_client.py` (`place_bid`).
 
-**Dónde**: `clients/futmondo_client.py:170-197`
-(`total_pending_bid_amount`), `engine/bidding_strategy.py:124,333`,
-`jobs/run_market.py:34`.
+**Dónde**: `clients/futmondo_client.py` (`real_pending_bid_amount`,
+`place_bid`), `engine/bidding_strategy.py`, `jobs/run_market.py`,
+`tests/test_futmondo_client.py`, `tests/test_jobs_run_market.py`.
 
 ---
 

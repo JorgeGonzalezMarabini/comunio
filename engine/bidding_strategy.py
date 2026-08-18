@@ -115,18 +115,18 @@ def max_biddable_amount(
 
     `pending_committed`: aproximación a TODAS tus pujas de compra todavía
     pendientes (sin resolver), sea de hoy o de días anteriores — ver
-    db.models.get_pending_bid_amount() / clients.futmondo_client.
-    total_pending_bid_amount(). En Comunio esto estaba confirmado por su
-    propia FAQ oficial (saldo negativo al cierre de jornada = 0 puntos esa
-    jornada entera) y por un endpoint real que listaba las ofertas
-    pendientes; en Futmondo no se ha encontrado ni la regla exacta de
-    penalización por saldo negativo confirmada en una fuente oficial ni un
-    endpoint equivalente (ver TODO en clients/futmondo_client.py) — se
-    mantiene la misma resta defensiva por precaución: si el saldo
-    (`budget`/`information`) tampoco se descuenta hasta resolver el
-    mercado (razonable asumirlo, visto que el `budget` que devuelve
-    `/2/userteam/changeplayer` no cambia al pujar), un bot que ignore esto
-    podría comprometer más de lo que el saldo real soporta.
+    db.models.get_pending_bid_amount() cruzado con clients.futmondo_client.
+    real_pending_bid_amount() (TODO.md #3, resuelto: el segundo SÍ viene
+    confirmado del propio Futmondo, vía el campo "bid" de get_market()).
+    En Comunio esto estaba confirmado por su propia FAQ oficial (saldo
+    negativo al cierre de jornada = 0 puntos esa jornada entera); en
+    Futmondo no se ha encontrado esa regla exacta de penalización por
+    saldo negativo en una fuente oficial — se mantiene la misma resta
+    defensiva por precaución: si el saldo (`budget`/`information`) tampoco
+    se descuenta hasta resolver el mercado (razonable asumirlo, visto que
+    el `budget` que devuelve `/2/userteam/changeplayer` no cambia al
+    pujar), un bot que ignore esto podría comprometer más de lo que el
+    saldo real soporta.
     """
     limits = config.BIDDING_SAFETY_LIMITS
     if player_cap is None:
@@ -330,13 +330,15 @@ def decide_bids_for_market(
     llamada ni varias llamadas en la misma jornada pueden superar el límite
     configurado entre todas.
 
-    `pending_committed`: la protección de saldo (defensiva, ver TODO en
-    clients/futmondo_client.py) — aproximación a TODAS las pujas de compra
-    pendientes sin resolver ahora mismo (ver db.models.
-    get_pending_bid_amount(), no solo las de hoy). Se pasa tal cual a cada
-    decide_bid() por si Futmondo tampoco descuenta el saldo hasta que una
-    puja se resuelve (razonable asumirlo, sin confirmar la regla exacta de
-    penalización por saldo negativo — ver README).
+    `pending_committed`: la protección de saldo (ver TODO.md #3, resuelto)
+    — TODAS las pujas de compra pendientes sin resolver ahora mismo,
+    combinando `db.models.get_pending_bid_amount()` (auditoría local) con
+    `clients.futmondo_client.real_pending_bid_amount()` (confirmado del
+    propio Futmondo vía el campo "bid" de get_market()), no solo las de
+    hoy. Se pasa tal cual a cada decide_bid() por si Futmondo tampoco
+    descuenta el saldo hasta que una puja se resuelve (razonable asumirlo,
+    sin confirmar la regla exacta de penalización por saldo negativo — ver
+    README).
 
     `player_cap`: tope dinámico por jugador ya calculado para esta pasada
     (ver dynamic_player_cap()) — se pasa tal cual a cada decide_bid().

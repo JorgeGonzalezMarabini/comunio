@@ -442,13 +442,22 @@ con Understat (120 exact, 20 surname+team, 2 fuzzy)") — una proporción
 alta de `fuzzy`/`surname_unique` frente a `exact`/`surname+team` sería
 señal de revisarlo.
 
-## Reconciliación de pujas y ventas (sin endpoint externo de "mis ofertas")
+## Reconciliación de pujas y ventas, y protección de presupuesto (TODO.md #3, resuelto)
 
 Comunio exponía `GET .../offers?current` con la lista real de ofertas
-pendientes propias, con id — permitía saber con certeza si una puja seguía
-viva. **Futmondo no tiene un endpoint equivalente confirmado** (ni en la
-captura propia ni en la referencia comunitaria). `jobs/sync_data.py`
-reconcilia por pertenencia, con las limitaciones que eso implica:
+pendientes propias, con id. **Futmondo no tiene un endpoint dedicado
+equivalente**, pero SÍ trae el mismo dato por otra vía, confirmada en vivo
+(2026-08-18): cada item de `get_market()` en el que tenemos puja
+pendiente trae un campo `"bid": {"id": ..., "price": ...}`, ausente por
+completo si no hemos pujado — cruzado 1:1 contra nuestra propia tabla
+`bids` sin ningún "bid" huérfano de otro manager. Es, en la práctica, el
+mismo dato que daba el endpoint de Comunio, solo que embebido en el
+listado del mercado en vez de en un endpoint propio (ver
+`clients.futmondo_client.real_pending_bid_amount()`).
+
+`jobs/sync_data.py` sigue reconciliando el HISTÓRICO de cada puja
+(`'placed'` -> `'won'`/`'lost'`) por pertenencia, ya que eso sí necesita
+guardarse más allá de que el listado siga vivo o no:
 
 - Una puja `'placed'` se marca `'won'` si el jugador ya aparece en la
   plantilla (`get_roster()`).
@@ -459,16 +468,21 @@ reconcilia por pertenencia, con las limitaciones que eso implica:
 - Si sigue en el mercado y no en la plantilla, se asume que la puja sigue
   abierta y no se toca.
 
-Consecuencia directa para la protección de presupuesto
-(`engine.bidding_strategy.max_biddable_amount`): en vez de sumar ofertas
-pendientes reales desde una fuente externa (como hacía
-`total_pending_purchase_amount` con Comunio), `db.models.
-get_pending_bid_amount()` suma nuestra **propia** tabla `bids` local
-(`status='placed'`, sin filtro de fecha). Es una protección más débil que
-la de Comunio — si la reconciliación se retrasa o la BD se pierde, podría
-desincronizarse — pero es la única fuente disponible, y por diseño solo
-puede sobreestimar el compromiso (nunca subestimarlo, que sería el caso
-peligroso).
+Para la protección de presupuesto en sí
+(`engine.bidding_strategy.max_biddable_amount`), `jobs/run_market.py` ya
+NO depende solo de la auditoría local: `pending_committed` es el MAYOR
+entre `db.models.get_pending_bid_amount()` (tabla `bids` local) y
+`real_pending_bid_amount()` (el mercado en vivo) — así una BD
+perdida/desincronizada no puede hacer que se subestime el compromiso
+real, igual de fuerte que la protección de Comunio.
+
+**Hallazgo relacionado, confirmado en el mismo fetch real**: pujar dos
+veces sobre el mismo jugador mientras la primera puja sigue abierta
+responde `"api.general.ok"` las dos veces, pero Futmondo NO actualiza el
+importe — se queda en el de la primera llamada. `jobs/run_market.py` por
+eso excluye de los candidatos a cualquier jugador con una puja local
+todavía `'placed'`, en vez de reintentar una "mejora" sin ningún efecto
+real (y que además duplicaría el compromiso en la auditoría local).
 
 ## `buyPrice`: por qué `run_sales` filtra "comprados por el bot" sin usar ese campo
 
