@@ -192,6 +192,27 @@ BIDDING_POSITION_RISK_BOOST = float(os.getenv("BIDDING_POSITION_RISK_BOOST", "0.
 # a la vez. Ver engine.bidding_strategy.apply_position_priority.
 BIDDING_UPGRADE_BOOST = float(os.getenv("BIDDING_UPGRADE_BOOST", "0.15"))
 
+# Cancelar una puja abierta para pujar por un candidato mejor bloqueado
+# solo por presupuesto/tope (ver clients.futmondo_client.cancel_bid,
+# TODO.md #13, y engine.bidding_strategy.find_cancel_swap_candidates).
+# Feature nueva sin histórico de producción todavía -- valores deliberadamente
+# conservadores, pensados para afinarse con datos reales.
+BIDDING_CANCEL_SWAP_MIN_MARGIN = float(os.getenv("BIDDING_CANCEL_SWAP_MIN_MARGIN", "0.25"))
+# Margen exigido entre el score del candidato bloqueado y el de la puja
+# abierta más floja antes de sacrificarla -- deliberadamente por ENCIMA de
+# BIDDING_POSITION_RISK_BOOST/BIDDING_UPGRADE_BOOST (0.15 cada uno) para que
+# un boost puntual no baste por sí solo para disparar una cancelación.
+
+# Horas mínimas hasta que expire una puja abierta para considerarla
+# sacrificable -- si está a punto de resolverse, mejor dejarla terminar
+# (podríamos ganarla barata) que arriesgarse a cancelar justo antes.
+BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY = float(os.getenv("BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY", "6"))
+
+# Máximo de cancelaciones-para-pujar-mejor por ejecución de run_market --
+# 1 a propósito mientras no hay histórico real de esta feature; nada de
+# cascadas la primera vez que corre contra la cuenta real.
+BIDDING_MAX_CANCEL_SWAPS_PER_RUN = int(os.getenv("BIDDING_MAX_CANCEL_SWAPS_PER_RUN", "1"))
+
 # --- Venta de jugadores (engine/selling_strategy.py) ---
 # % mínimo de plusvalía (precio actual vs. precio de referencia,
 # "buyPrice" de roster) para considerar vender un jugador. Vender es la

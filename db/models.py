@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS bids (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
     amount          INTEGER NOT NULL,
-    status          TEXT NOT NULL,         -- 'placed' | 'won' | 'lost' | 'failed'
+    status          TEXT NOT NULL,         -- 'placed' | 'won' | 'lost' | 'failed' | 'cancelled'
     score           REAL,                  -- score del evaluator que justificó la puja
     reason          TEXT,                  -- explicación legible para auditoría
     created_at      TEXT NOT NULL
@@ -296,20 +296,36 @@ def get_pending_bid_amount() -> int:
 
 def get_open_bids() -> list[dict]:
     """
-    Pujas que seguimos creyendo pendientes (status='placed'). Pensado para
-    jobs.sync_data._reconcile_bids(): comparar cada `player_id` contra la
-    plantilla y el mercado actuales (client.get_roster()/get_market()) para
-    saber si ya se resolvió (ganada/perdida) desde la última vez — sin id
-    de oferta que consultar (Futmondo no devuelve uno, ver
-    clients/futmondo_client.py), el criterio es indirecto por diseño.
+    Pujas que seguimos creyendo pendientes (status='placed'): `id` (fila
+    local, PK autoincrement -- NO es el id de oferta de Futmondo),
+    `player_id`, `score` y `amount`.
+
+    Pensado para dos consumidores:
+      - jobs.sync_data._reconcile_bids(): comparar cada `player_id` contra
+        la plantilla y el mercado actuales (client.get_roster()/get_market())
+        para saber si ya se resolvió (ganada/perdida) desde la última vez —
+        criterio indirecto por diseño, `id`/`score`/`amount` no le hacen
+        falta.
+      - engine.bidding_strategy.find_cancel_swap_candidates() (vía
+        jobs/run_market.py): necesita `score` para decidir qué puja abierta
+        sacrificar (la más floja) y `player_id` para cruzar con
+        `get_market()` y sacar el id REAL de oferta de Futmondo (campo
+        `"bid": {"id": ...}` de cada item -- ver clients.futmondo_client.
+        cancel_bid/real_pending_bid_amount) que esta tabla local no guarda.
     """
     with get_connection() as conn:
-        rows = conn.execute("SELECT id, player_id FROM bids WHERE status = 'placed'").fetchall()
+        rows = conn.execute("SELECT id, player_id, score, amount FROM bids WHERE status = 'placed'").fetchall()
         return [dict(r) for r in rows]
 
 
 def update_bid_status(bid_id: int, status: str) -> None:
-    """Actualiza el status de una puja ya persistida (ver get_open_bids/reconciliación)."""
+    """
+    Actualiza el status de una puja ya persistida. Usado tanto por la
+    reconciliación (jobs.sync_data._reconcile_bids, -> 'won'/'lost') como
+    por engine.bidding_strategy.find_cancel_swap_candidates vía
+    jobs.run_market.run() (-> 'cancelled', ver TODO.md #13 y
+    clients.futmondo_client.cancel_bid).
+    """
     with get_connection() as conn:
         conn.execute("UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
 

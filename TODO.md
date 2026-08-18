@@ -507,23 +507,41 @@ de endpoints confirmados del docstring del módulo y a la tabla de `README.md`
 (que además tenía `cancel_sale` marcado como "solo referencia comunitaria"
 por desactualización — corregido de paso a "captura propia", ver TODO.md #6).
 
+**Integrado en `jobs/run_market.py` (mismo día, 2026-08-18)**: nueva fase
+"cancelar+pujar mejor", DESPUÉS del loop normal de pujas, para candidatos
+buenos (`engine.bidding_strategy.is_price_worth_bidding`, score/precio
+válidos) que se quedan fuera solo por presupuesto/tope — no por calidad. La
+decisión de qué sacrificar es pura (`engine.bidding_strategy.
+find_cancel_swap_candidates`, testeada a fondo sin red): solo propone
+cancelar la puja abierta MÁS FLOJA si el candidato la supera en score por
+`config.BIDDING_CANCEL_SWAP_MIN_MARGIN` (0.25 por defecto — bastante por
+encima de cualquier boost de prioridad, 0.15 cada uno, para no cancelar por
+ruido) y si a esa puja le quedan más de
+`config.BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY` (6h) antes de expirar.
+Nunca cancela una puja sin id real de Futmondo confirmado en el
+`get_market()` de esa misma pasada — excluye automáticamente cualquier puja
+colocada en el mismo run. Tope de `config.BIDDING_MAX_CANCEL_SWAPS_PER_RUN`
+(1 por defecto) mientras no hay histórico real de esta feature. Un fallo a
+medias (cancela pero `place_bid()` posterior falla) queda auditado en
+`bids` como `'cancelled'`+`'failed'`, nunca silencioso.
+
 **Sin confirmar todavía**:
 - Qué código de error devuelve si se intenta cancelar una puja que ya no
   existe (ganada, perdida, o cancelada antes) — no se dio ese caso en la
   prueba real.
-- `cancel_bid()` no está integrado en ningún job todavía — solo existe como
-  primitiva en el cliente. Usarlo desde `jobs/run_market.py` (p. ej. para la
-  idea de "cancelar la puja peor para pujar la mejor" que motivó esta
-  investigación) requeriría además pasar por `real_pending_bid_amount()` (o
-  equivalente) para obtener el `bid_id` de cada puja abierta, no solo el
-  `player_id` que ya maneja `db.models.get_open_bids()` — y decidir un
-  margen mínimo de mejora antes de cancelar, para no generar thrashing (ver
-  discusión en el hilo que motivó esto).
+- Los valores de margen/horas/máximo de swaps son de partida, sin histórico
+  real todavía — pensados para afinarse con los primeros `notify()` de
+  producción (el resumen del job ya reporta explícitamente cada swap
+  ejecutado o fallido).
 
-**Afecta a**: `clients/futmondo_client.py` (`cancel_bid`).
+**Afecta a**: `clients/futmondo_client.py` (`cancel_bid`), `jobs/run_market.py`,
+`engine/bidding_strategy.py`, `db/models.py` (`get_open_bids`,
+`update_bid_status`), `config.py`.
 
-**Dónde**: `clients/futmondo_client.py` (`cancel_bid`), `README.md` (tabla
-de endpoints).
+**Dónde**: `clients/futmondo_client.py` (`cancel_bid`), `jobs/run_market.py`
+(`run`), `engine/bidding_strategy.py` (`is_price_worth_bidding`,
+`find_cancel_swap_candidates`), `db/models.py`, `config.py`, `README.md`
+(tabla de endpoints).
 
 ---
 

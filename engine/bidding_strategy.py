@@ -9,6 +9,8 @@ fundir el equipo.
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 import config
 
 
@@ -356,3 +358,109 @@ def decide_bids_for_market(
         decisions.append(decision)
         risked += decision["amount"]
     return decisions
+
+
+def is_price_worth_bidding(player: dict, min_score_threshold: float = None) -> bool:
+    """
+    Repite SOLO los dos primeros checks de decide_bid() (score y precio),
+    sin el cap de presupuesto/tope -- para distinguir un candidato
+    "bueno pero bloqueado por límite" de uno simplemente malo. Ver
+    find_cancel_swap_candidates(), que usa esto para decidir qué
+    candidatos merece la pena considerar para un swap (cancelar una puja
+    floja para poder pujar por este) en vez de descartarlos sin más.
+
+    Deliberadamente NO calcula `cap`/`amount` — solo evalúa si el
+    candidato PASARÍA esos dos filtros si hubiera presupuesto/tope
+    suficiente, no si de hecho lo hay.
+    """
+    min_score_threshold = config.BIDDING_MIN_SCORE_THRESHOLD if min_score_threshold is None else min_score_threshold
+    if player.get("score", 0) < min_score_threshold:
+        return False
+    return (player.get("price") or 0) > 0
+
+
+def find_cancel_swap_candidates(
+    blocked_candidates: list[dict],
+    sacrificable_bids: list[dict],
+    now,
+    min_margin: float = None,
+    min_hours_before_expiry: float = None,
+    max_swaps: int = None,
+) -> list[dict]:
+    """
+    Decide qué pujas abiertas merece la pena cancelar para poder pujar por
+    un candidato mejor bloqueado solo por presupuesto/tope (ver TODO.md
+    #13 y clients.futmondo_client.cancel_bid). Función pura: no llama a
+    Futmondo ni toca la BD -- jobs/run_market.py ejecuta las propuestas.
+
+    `blocked_candidates`: candidatos ya rankeados (score descendente, mismo
+    orden que decide_bids_for_market) que `is_price_worth_bidding()` acepta
+    pero que NO están en las decisiones de esta pasada -- bloqueados por
+    límite, no por calidad. Cada uno necesita "id"/"score"/"price".
+
+    `sacrificable_bids`: pujas locales abiertas con su id REAL de oferta de
+    Futmondo ya resuelto por el llamador (cruzando `db.models.get_open_bids()`
+    con el campo `"bid"` de cada item de `get_market()` -- ver docstring de
+    `clients.futmondo_client.real_pending_bid_amount()`). Cada una necesita
+    "player_id"/"score"/"bid_id"/"expires_at" (datetime consciente de zona
+    horaria, o None si se desconoce -- se trata como NO sacrificable por
+    precaución, nunca se cancela sin poder confirmar cuánto le queda).
+
+    `now`: hora actual INYECTADA (no datetime.now() aquí dentro) para que
+    esto siga siendo una función pura y testeable sin reloj real.
+
+    Nunca ofrece la misma puja para más de un candidato, ni más de
+    `max_swaps` propuestas en total (config.BIDDING_MAX_CANCEL_SWAPS_PER_RUN
+    por defecto — deliberadamente 1 mientras esta feature no tiene
+    histórico real, ver config.py).
+
+    Devuelve una lista de `{"candidate": ..., "sacrifice": ..., "reason": ...}`
+    en el mismo orden (mejor candidato primero) -- jobs/run_market.py decide
+    qué hacer si la cancelación o la puja posterior fallan a medias.
+    """
+    min_margin = config.BIDDING_CANCEL_SWAP_MIN_MARGIN if min_margin is None else min_margin
+    min_hours_before_expiry = (
+        config.BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY
+        if min_hours_before_expiry is None
+        else min_hours_before_expiry
+    )
+    max_swaps = config.BIDDING_MAX_CANCEL_SWAPS_PER_RUN if max_swaps is None else max_swaps
+
+    min_remaining = timedelta(hours=min_hours_before_expiry)
+    eligible = [
+        b
+        for b in sacrificable_bids
+        if b.get("expires_at") is not None and (b["expires_at"] - now) >= min_remaining
+    ]
+    eligible.sort(key=lambda b: b["score"])  # la más floja primero
+
+    proposals = []
+    used_bid_ids = set()
+    for candidate in blocked_candidates:
+        if len(proposals) >= max_swaps:
+            break
+        for sacrifice in eligible:
+            if sacrifice["bid_id"] in used_bid_ids:
+                continue
+            if candidate.get("score", 0) - sacrifice["score"] < min_margin:
+                # `eligible` está ordenada por score ascendente: si esta ni
+                # siquiera llega al margen, ninguna peor lo hará tampoco
+                # para este candidato -- probamos con la siguiente puja más
+                # floja igualmente por si acaso el orden de scores tiene
+                # empates, pero en la práctica corta rápido.
+                continue
+            proposals.append(
+                {
+                    "candidate": candidate,
+                    "sacrifice": sacrifice,
+                    "reason": (
+                        f"candidato {candidate.get('id')} score={candidate.get('score', 0):.3f} supera "
+                        f"en >= {min_margin} a la puja abierta sobre {sacrifice['player_id']} "
+                        f"(score={sacrifice['score']:.3f}); bloqueado por límite de presupuesto/tope, "
+                        "no por calidad"
+                    ),
+                }
+            )
+            used_bid_ids.add(sacrifice["bid_id"])
+            break
+    return proposals

@@ -1,8 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 from engine.bidding_strategy import (
     apply_position_priority,
     decide_bid,
     decide_bids_for_market,
     dynamic_player_cap,
+    find_cancel_swap_candidates,
+    is_price_worth_bidding,
     max_biddable_amount,
 )
 
@@ -255,3 +259,122 @@ def test_decide_bid_uses_dynamic_player_cap_to_allow_bid_above_old_fixed_cap():
     )
     assert decision is not None
     assert decision["amount"] >= player["price"]
+
+
+# --- is_price_worth_bidding / find_cancel_swap_candidates (TODO.md #13) ---
+
+
+def test_is_price_worth_bidding_rejects_low_score_and_missing_price():
+    assert is_price_worth_bidding({"score": 0.9, "price": 0}, min_score_threshold=0.15) is False
+    assert is_price_worth_bidding({"score": 0.1, "price": 1_000_000}, min_score_threshold=0.15) is False
+    assert is_price_worth_bidding({"score": 0.5, "price": 1_000_000}, min_score_threshold=0.15) is True
+
+
+def test_is_price_worth_bidding_uses_config_default(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "BIDDING_MIN_SCORE_THRESHOLD", 0.5)
+    assert is_price_worth_bidding({"score": 0.4, "price": 1_000_000}) is False
+    assert is_price_worth_bidding({"score": 0.6, "price": 1_000_000}) is True
+
+
+def _open_bid(player_id, score, bid_id, hours_to_expiry=48, amount=1_000_000):
+    now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    return {
+        "local_row_id": 1,
+        "player_id": player_id,
+        "score": score,
+        "amount": amount,
+        "bid_id": bid_id,
+        "expires_at": None if hours_to_expiry is None else now + timedelta(hours=hours_to_expiry),
+    }
+
+
+NOW = datetime(2026, 8, 18, tzinfo=timezone.utc)
+
+
+def test_find_cancel_swap_candidates_proposes_swap_when_margin_is_met():
+    candidate = {"id": "new", "score": 0.80, "price": 5_000_000}
+    worst_open_bid = _open_bid("old", score=0.40, bid_id="bid-old")
+
+    proposals = find_cancel_swap_candidates(
+        [candidate], [worst_open_bid], now=NOW, min_margin=0.25, min_hours_before_expiry=6
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["candidate"]["id"] == "new"
+    assert proposals[0]["sacrifice"]["bid_id"] == "bid-old"
+
+
+def test_find_cancel_swap_candidates_respects_min_margin():
+    candidate = {"id": "new", "score": 0.55, "price": 5_000_000}  # solo +0.15 sobre la puja abierta
+    open_bid = _open_bid("old", score=0.40, bid_id="bid-old")
+
+    proposals = find_cancel_swap_candidates([candidate], [open_bid], now=NOW, min_margin=0.25)
+
+    assert proposals == []
+
+
+def test_find_cancel_swap_candidates_excludes_bids_expiring_soon():
+    candidate = {"id": "new", "score": 0.90, "price": 5_000_000}
+    about_to_expire = _open_bid("old", score=0.10, bid_id="bid-old", hours_to_expiry=2)
+
+    proposals = find_cancel_swap_candidates(
+        [candidate], [about_to_expire], now=NOW, min_margin=0.25, min_hours_before_expiry=6
+    )
+
+    assert proposals == []
+
+
+def test_find_cancel_swap_candidates_excludes_bids_with_unknown_expiry():
+    """Nunca se sacrifica una puja sin fecha de expiración confirmada (ver docstring)."""
+    candidate = {"id": "new", "score": 0.90, "price": 5_000_000}
+    unknown_expiry = _open_bid("old", score=0.10, bid_id="bid-old", hours_to_expiry=None)
+
+    proposals = find_cancel_swap_candidates([candidate], [unknown_expiry], now=NOW, min_margin=0.25)
+
+    assert proposals == []
+
+
+def test_find_cancel_swap_candidates_picks_the_worst_open_bid_first():
+    candidate = {"id": "new", "score": 0.90, "price": 5_000_000}
+    ok_bid = _open_bid("mid", score=0.50, bid_id="bid-mid")
+    worst_bid = _open_bid("worst", score=0.10, bid_id="bid-worst")
+
+    proposals = find_cancel_swap_candidates([candidate], [ok_bid, worst_bid], now=NOW, min_margin=0.25)
+
+    assert len(proposals) == 1
+    assert proposals[0]["sacrifice"]["bid_id"] == "bid-worst"
+
+
+def test_find_cancel_swap_candidates_respects_max_swaps_and_never_reuses_a_bid():
+    candidates = [
+        {"id": "a", "score": 0.95, "price": 1_000_000},
+        {"id": "b", "score": 0.90, "price": 1_000_000},
+        {"id": "c", "score": 0.85, "price": 1_000_000},
+    ]
+    open_bids = [
+        _open_bid("x", score=0.10, bid_id="bid-x"),
+        _open_bid("y", score=0.20, bid_id="bid-y"),
+    ]
+
+    proposals = find_cancel_swap_candidates(candidates, open_bids, now=NOW, min_margin=0.25, max_swaps=2)
+
+    assert len(proposals) == 2
+    used_bid_ids = {p["sacrifice"]["bid_id"] for p in proposals}
+    assert used_bid_ids == {"bid-x", "bid-y"}  # nunca la misma puja para dos candidatos
+    candidate_ids = {p["candidate"]["id"] for p in proposals}
+    assert candidate_ids == {"a", "b"}  # los dos mejores candidatos, no "c"
+
+
+def test_find_cancel_swap_candidates_uses_config_defaults(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "BIDDING_CANCEL_SWAP_MIN_MARGIN", 0.5)
+    monkeypatch.setattr(config, "BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY", 6)
+    monkeypatch.setattr(config, "BIDDING_MAX_CANCEL_SWAPS_PER_RUN", 1)
+
+    candidate = {"id": "new", "score": 0.60, "price": 1_000_000}  # +0.20, no llega al margen de 0.5
+    open_bid = _open_bid("old", score=0.40, bid_id="bid-old")
+
+    assert find_cancel_swap_candidates([candidate], [open_bid], now=NOW) == []
