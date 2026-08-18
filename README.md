@@ -732,23 +732,51 @@ en vez de en punto/en múltiplos de 20 exactos.
 
 Ese cambio es seguro para esos dos jobs porque ninguno tiene un deadline
 externo real — solo necesitan correr "con frecuencia suficiente", no en un
-instante exacto. Los otros 3 jobs sí dependen de una hora límite externa
-real (cierre de mercado, cierre de jornada), así que ahí un delay de ~30
-min sí puede importar. Ranking de criticidad (de más a menos sensible al
-delay):
+instante exacto.
 
-1. **`set_lineup`** (CRÍTICO) — corre UNA VEZ por semana
-   (`0 18 * * 5`), antes del cierre de jornada. Si el delay lo empuja
-   después del cierre real, la alineación de toda la semana se queda mal
-   fijada y no hay ninguna otra ejecución que lo corrija hasta el viernes
-   siguiente. Sin red de seguridad (a diferencia de `manage_substitutes`,
-   que se repite cada 20 min).
-2. **`run_market`** (ALTO) — 2x/día (`0 8,20 * * *`), pensado para correr
-   antes del cierre real de mercado. Si el delay lo deja correr después del
-   cierre, se pierde ESE ciclo completo de pujas (hasta 12h sin poder
-   pujar) — recuperable, pero con coste real (candidatos buenos que se
-   habrían fichado, perdidos).
-3. **`manage_substitutes`** (MEDIO, mitigado por frecuencia) — el cron a
+**`set_lineup` y `run_market` sí tenían, en teoría, un deadline externo
+real** — se investigó cuál es exactamente en la FAQ oficial de Futmondo
+(help.futmondo.com) en vez de suponerlo, con resultado bien distinto para
+cada uno:
+
+- **Mercado de fichajes (`run_market`): NO existe un cierre diario único.**
+  Cada jugador puesto en venta tiene su propio temporizador individual (1,
+  2 o 3 días, configurable por el admin de la liga — confirmado también en
+  el propio código, `expirationDate` por item en
+  `clients/futmondo_client.py:get_market()`). No hay ninguna hora a la que
+  "ajustar" el cron: con el listado más corto posible (1 día), 2
+  pasadas/día ya dan margen de sobra. Por eso baja de criticidad frente a
+  lo que se pensó en un primer momento.
+- **Alineación (`set_lineup`): SÍ hay un límite real, pero no es una hora
+  de reloj fija.** La FAQ oficial (help.futmondo.com/article/92) lo dice
+  literalmente: "el inicio de la jornada siempre coincide con el primer
+  partido de la misma". Y el primer partido de una jornada de LaLiga varía
+  cada semana — puede arrancar viernes desde ~19:00 CEST (17:00 UTC). El
+  cron que había antes (`0 18 * * 5` = 18:00 UTC = **20:00 CEST**) podía
+  quedar DESPUÉS de un primer partido a esa hora — un problema estructural
+  independiente de cualquier delay de GitHub. Se adelantó a `0 10 * * 5`
+  (10:00 UTC) para dejar horas de margen frente a cualquier horario
+  plausible; los cambios de última hora (lesión/no convocado confirmado ya
+  cerca del partido) los sigue cubriendo `manage_substitutes.yml` por
+  separado, así que adelantar `set_lineup` no pierde calidad de decisión.
+  **Sigue sin ser un dato dinámico real** — no hay en el código ninguna
+  fuente que consulte el calendario real de cada jornada (a diferencia de
+  Fotmob para "quién juega hoy", no se usa nada equivalente para "cuándo
+  empieza la jornada"); si alguna jornada excepcional empezara antes de
+  las 10:00 UTC del viernes (inusual, pero no imposible), seguiría sin
+  cubrirse. La solución completa sería leer ese calendario real en vez de
+  asumir un día/hora fijos — no implementado.
+
+Ranking de criticidad actualizado (de más a menos sensible al delay):
+
+1. **`set_lineup`** (CRÍTICO) — corre UNA VEZ por semana. Sin red de
+   seguridad propia (a diferencia de `manage_substitutes`, que se repite
+   cada 20 min) — si esta única ejecución llega tarde, la alineación de
+   toda la semana queda mal fijada hasta el viernes siguiente. Ver arriba:
+   el riesgo principal ya no es tanto el delay de GitHub (mitigado con el
+   margen de horas al adelantarlo a las 10:00 UTC) sino jornadas
+   excepcionales que empiecen antes de esa hora.
+2. **`manage_substitutes`** (MEDIO, mitigado por frecuencia) — el cron a
    20 min ya está para esto: si UNA pasada llega tarde, la siguiente (20
    min después) puede seguir cubriendo la ventana. El riesgo no es un
    fallo puntual sino que el delay ACUMULADO reduzca el margen frente a la
@@ -756,6 +784,9 @@ delay):
    +10/+15 min de delay por pasada, dos pasadas seguidas con mala suerte
    podrían acercarse a ese límite. Mitigado (no eliminado) con el cambio de
    minuto de este mismo apartado.
+3. **`run_market`** (BAJO, corregido — ver arriba) — sin cierre diario
+   real al que llegar tarde; 2x/día da margen de sobra frente a listados
+   de 1-3 días.
 4. **`run_sales`** (BAJO) — 2x/día, 1h después de `run_market` a
    propósito. Un delay de ~30 min en cualquiera de los dos no invierte el
    orden porque el hueco entre ambos (1h) es mayor que el delay típico
@@ -776,15 +807,14 @@ tocado aquí porque arreglarlo de verdad es un cambio de arquitectura
 (p. ej., que cada job llame a `sync_data.run()` él mismo en vez de confiar
 en el cron), no de horario — se deja anotado para si se decide abordar.
 
-**Pendiente de un dato real para terminar de ajustar `set_lineup` y
-`run_market`**: sus cron (`0 18 * * 5` y `0 8,20 * * *`) llevan desde el
+**Resuelto (2026-08-18)** — `set_lineup` y `run_market` llevaban desde el
 principio comentados como "ajustar al cierre real de jornada/mercado" sin
-que se haya confirmado nunca esa hora real contra la liga de destino. Sin
-ese dato no se puede calcular un margen de seguridad frente al delay con
-sentido (adelantarlos a ciegas podría, según el caso, alejarlos más del
-momento útil en vez de acercarlos). Mientras no se confirme, cuanto más
-margen se deje antes del cierre real, mejor se absorbe un delay de ~30 min
-como el observado.
+que se hubiera confirmado nunca esa hora contra la FAQ oficial de
+Futmondo. Ya confirmado (ver arriba) y ajustado en `set_lineup.yml` /
+`run_market.yml`. Pendiente real que queda, y que no se resuelve con
+horario: una fuente que consulte el calendario real de cada jornada, para
+que `set_lineup` no dependa de asumir "siempre viernes, siempre antes de
+las 10:00 UTC".
 
 ## Estructura
 

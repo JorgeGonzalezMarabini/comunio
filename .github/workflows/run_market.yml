@@ -3,7 +3,15 @@ name: run_market
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 8,20 * * *"  # dos veces al día; ajustar al horario real de cierre de mercado
+    # Confirmado en la FAQ oficial de Futmondo (help.futmondo.com/article/141):
+    # el mercado NO tiene una hora de cierre diaria única -- cada jugador
+    # puesto en venta tiene su propio temporizador individual (1, 2 o 3
+    # días configurable por el admin de la liga, ver también
+    # `expirationDate` en clients/futmondo_client.py:get_market()). No hay
+    # "cierre real" al que ajustar este cron: con el listado más corto (1
+    # día), 2 pasadas/día ya da margen de sobra para no perder ningún
+    # candidato entre que sale y que expira.
+    - cron: "0 8,20 * * *"  # dos veces al día -- margen de sobra frente a listados de 1-3 días
 
 permissions:
   contents: write

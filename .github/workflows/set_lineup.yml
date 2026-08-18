@@ -3,7 +3,22 @@ name: set_lineup
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 18 * * 5"  # viernes 18:00 UTC; ajustar al cierre real de jornada (antes del primer partido)
+    # Viernes 10:00 UTC (antes 18:00 UTC) -- confirmado en la FAQ oficial de
+    # Futmondo (help.futmondo.com/article/92): el cierre real es "el inicio
+    # de la jornada, que siempre coincide con el primer partido", NO una
+    # hora de reloj fija. Un partido de viernes de LaLiga puede arrancar
+    # desde ~19:00 CEST (17:00 UTC) -- el cron anterior (18:00 UTC =
+    # 20:00 CEST) podía quedar DESPUÉS del primer partido en jornadas así,
+    # sin que hiciera falta ningún delay de GitHub para llegar tarde.
+    # 10:00 UTC deja horas de margen frente a cualquier horario real
+    # plausible (+ el delay de GitHub, ver README) sin perder calidad de
+    # decisión: los cambios de última hora (lesión/no convocado confirmado
+    # cerca del partido) los cubre manage_substitutes.yml por separado.
+    # Sigue sin ser un dato dinámico real -- si una jornada empezara antes
+    # de esta hora (inusual pero no imposible: mitad de semana tras un
+    # parón), seguiría sin cubrirse; la solución completa requeriría leer
+    # el calendario real de la jornada, no implementado todavía.
+    - cron: "0 10 * * 5"
 
 permissions:
   contents: write
