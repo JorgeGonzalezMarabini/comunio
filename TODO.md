@@ -12,31 +12,42 @@ Cada entrada indica **qué pasa**, **por qué importa**, **a qué afecta** y
 
 ---
 
-## 1. Bug confirmado en producción: rotar titulares ya colocados en el campo falla
+## 1. ~~Bug confirmado en producción: rotar titulares ya colocados en el campo falla~~ (arreglado 2026-08-18)
 
-**Qué pasa**: `change_lineup()` sustituye un slot ocupado usando `"from"` sin
-problema si el jugador que entra viene del banquillo. Pero si ya está en el
-campo en otra posición (rotación entre varios titulares, ej. A pasa a la
-posición de B, B pasa a la de C), Futmondo devuelve `api.error.in_field`.
+**Qué pasaba**: `change_lineup()` sustituye un slot ocupado usando `"from"`
+sin problema si el jugador que entra viene del banquillo. Pero si ya está en
+el campo en otra posición, Futmondo devuelve `api.error.in_field`.
 
-**Por qué importa**: es el único bug de esta lista confirmado ocurriendo en
-producción (2026-08-17), sin resolver y sin workaround implementado.
-`build_lineup_changes()` evita forzar este caso en el flujo normal (deja
-quietos a los jugadores ya bien colocados), pero si llegara a necesitarse una
-rotación así, la llamada fallaría. Solución probable no probada: mandar
-primero al banquillo como paso intermedio.
+**Análisis**: revisando el código, la rotación "clásica" entre titulares que
+ya estaban bien colocados (ej. tres defensas cambiando de slot entre sí) ya
+estaba cubierta por diseño — `build_lineup_changes()` no reasigna slots de un
+grupo desde cero, solo toca los que de verdad quedan libres, así que nunca
+generaba ese `change` peligroso. El caso real que quedaba abierto era más
+concreto: un titular NUEVO de esta semana que ya está en el campo ahora
+mismo, pero en el slot de OTRO grupo de posición (jugador "multiposition").
 
-**Aviso extra**: hay una posible inconsistencia entre comentarios — el texto
-de `futmondo_client.py:497` dice que "la numeración de slots del banquillo no
-está confirmada (ver TODO en lineup_optimizer.py)", pero en
-`lineup_optimizer.py` (`BENCH_SLOT_BY_POSITION`) esa numeración ya está
-marcada como "confirmado al 100%". Puede ser un comentario desactualizado —
-revisarlo puede simplificar la solución.
+**Arreglado**: `build_lineup_changes()` ahora detecta ese caso y manda
+primero un `change` intermedio al slot de banquillo de su posición
+(`BENCH_SLOT_BY_POSITION`, numeración ya confirmada) y solo después el
+`change` final — que así entra desde el banquillo, el único caso 100%
+confirmado. Si el slot de banquillo de esa posición también está ocupado,
+NO se encadenan más cambios sin confirmar contra la API real: el titular se
+deja sin colocar esa jornada y se reporta en un nuevo parámetro `conflicts`,
+que `jobs/set_lineup.py` ya incluye en la notificación de Telegram.
 
-**Afecta a**: envío de cambios de alineación (`set_lineup` / `manage_substitutes`).
+**Sigue sin confirmar con una prueba real** (documentado explícitamente en
+el código): que Futmondo acepte de verdad mandar a un jugador del campo a un
+slot de banquillo vacío. Si no lo acepta, ese `change` intermedio fallaría
+igual que cualquier otro — auditado, no en silencio — y el titular quedaría
+sin colocar esa jornada (mismo resultado que antes del fix, pero ahora
+explicado y visible en vez de un `api.error.in_field` opaco). Validar esto
+con una prueba real es lo único que queda pendiente de este punto.
+
+**Afecta a**: envío de cambios de alineación (`jobs/set_lineup.py`).
 
 **Dónde**: `engine/lineup_optimizer.py` (`build_lineup_changes`),
-`clients/futmondo_client.py:487-503` (`change_lineup`).
+`clients/futmondo_client.py:442-518` (`change_lineup`),
+`tests/test_lineup_optimizer.py` (tests de regresión del fix).
 
 ---
 

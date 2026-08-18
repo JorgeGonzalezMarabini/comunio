@@ -484,23 +484,36 @@ class FutmondoClient:
         `"from"` para sustituir a alguien que ya ocupa el slot, y
         `isBench` para el banquillo.
 
-        **Tercer hallazgo real el mismo día (2026-08-17), sin resolver
-        todavía**: sustituir un slot ocupado incluyendo `"from"` funciona
-        bien cuando el jugador que ENTRA no está ya en el campo en otra
-        posición — pero si SÍ lo está (una rotación entre varios jugadores
-        ya colocados, ej. A pasa a la posición de B y B a la de C), la API
-        rechaza esos cambios con `"api.error.in_field"` ("este jugador ya
-        está en el campo"), aunque cada `change` individual lleve su
-        `"from"` correcto. Probablemente haga falta primero mandar al
-        jugador al banquillo (con `isBench: true`) como paso intermedio
-        antes de colocarlo en su nueva posición, pero la numeración de
-        slots del banquillo no está confirmada (ver TODO en
-        engine/lineup_optimizer.py) — no se ha intentado resolver esto
-        todavía para no seguir escribiendo a ciegas contra una cuenta
-        real. `change_lineup()` audita el fallo de cada jugador afectado
-        (`answer_or_error` trae literalmente `"api.error.in_field"`) en
-        vez de fallar en silencio, así que el síntoma queda siempre
-        visible aunque la causa de fondo siga sin arreglarse.
+        **Tercer hallazgo real el mismo día (2026-08-17)**: sustituir un
+        slot ocupado incluyendo `"from"` funciona bien cuando el jugador
+        que ENTRA no está ya en el campo en otra posición — pero si SÍ lo
+        está (una rotación entre varios jugadores ya colocados, ej. A pasa
+        a la posición de B y B a la de C), la API rechaza esos cambios con
+        `"api.error.in_field"` ("este jugador ya está en el campo"), aunque
+        cada `change` individual lleve su `"from"` correcto.
+
+        `engine.lineup_optimizer.build_lineup_changes()` ya evita por
+        construcción la rotación falsa entre titulares que ya estaban bien
+        colocados (nunca genera `change` para ellos). Para el caso que
+        queda — un titular nuevo de esta semana que ya está en el campo en
+        el slot de OTRO grupo de posición (jugador "multiposition") —
+        manda primero un `change` intermedio al banquillo (numeración
+        CONFIRMADA, ver `BENCH_SLOT_BY_POSITION` en
+        engine/lineup_optimizer.py) y después el `change` final, que así
+        entra desde el banquillo (el caso confirmado). Esto asume, sin
+        confirmar todavía con una prueba real, que un jugador del campo SÍ
+        puede mandarse a un slot de banquillo vacío — si fuera falso, ese
+        `change` intermedio fallaría (auditado igual que cualquier otro,
+        no en silencio) y el titular se quedaría sin colocar esa jornada.
+        Si el slot de banquillo de esa posición ya está ocupado por otro
+        jugador, `build_lineup_changes()` NO intenta resolverlo (encadenar
+        más cambios sin confirmar sería escribir a ciegas contra una
+        cuenta real) — deja al titular sin colocar y lo reporta en
+        `conflicts`. `change_lineup()` audita el fallo de cada jugador
+        afectado (`answer_or_error` trae literalmente
+        `"api.error.in_field"`) en vez de fallar en silencio, así que el
+        síntoma queda siempre visible aunque el paso intermedio no
+        funcionara como se espera.
 
         "rc" en la respuesta no se ha confirmado qué significa (visto
         siempre "-1" en la prueba real).

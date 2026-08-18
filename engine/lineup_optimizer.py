@@ -77,7 +77,13 @@ def apply_fixture_difficulty(
 LINEUP_SLOT_POSITION_ORDER = ["DEL", "MED", "DEF", "POR"]
 
 
-def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_by_position: dict = None) -> list[dict]:
+def build_lineup_changes(
+    players: list[dict],
+    starter_ids: list,
+    current_lineup_by_position: dict = None,
+    current_bench_by_position: dict = None,
+    conflicts: list = None,
+) -> list[dict]:
     """
     Construye la lista `changes` que espera
     clients.futmondo_client.FutmondoClient.change_lineup(), con la
@@ -89,9 +95,19 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
 
     `current_lineup_by_position` (opcional): {position: player_id_actual},
     la alineación YA guardada en Futmondo justo antes de este cambio (ver
-    `FutmondoClient.get_lineup()`).
+    `FutmondoClient.get_lineup()`). `current_bench_by_position` (opcional,
+    mismo shape que en build_bench_changes()): el banquillo YA guardado —
+    solo hace falta para el caso raro de más abajo (paso intermedio por
+    banquillo); si no se pasa, se asume que todos los slots de banquillo
+    están libres.
 
-    Dos bugs/límites reales confirmados en producción el mismo día
+    `conflicts` (opcional): si se pasa una lista, se le añade un mensaje
+    legible por cada titular que esta pasada NO pudo colocarse (ver caso
+    3 más abajo) — para que el llamador lo audite/notifique en vez de que
+    quede en silencio. Si no se pasa, esos casos simplemente no generan
+    `change` (mismo efecto que antes de este fix, pero sin visibilidad).
+
+    Tres bugs/límites reales confirmados en producción el mismo día
     (2026-08-17, ver README y clients/futmondo_client.py:change_lineup
     para el detalle completo):
 
@@ -103,6 +119,11 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
          con `"api.error.in_field"`, aunque el `"from"` sea correcto —
          confirmado que sustituir SIEMPRE funciona si el que entra viene
          del banquillo, nunca si viene de otro slot del campo.
+      3. Corolario de (2), antes sin resolver: un titular nuevo de esta
+         semana que YA está en el campo ahora mismo pero en el slot de
+         OTRO grupo de posición (p.ej. un jugador "multiposition" que la
+         semana pasada jugó de MED y esta se evalúa como DEF) chocaría
+         con (2) igual que una rotación normal.
 
     Por eso esta función NO reasigna los slots de un grupo de posición
     desde cero cada vez (lo que forzaba rotaciones falsas entre jugadores
@@ -114,20 +135,35 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
     emparejados con los titulares nuevos que entran — que en el caso
     normal (evaluación semanal, la posición de un jugador no cambia de
     una semana a otra) siempre vienen del banquillo, nunca de otro slot
-    del campo que se esté tocando en la misma pasada. Si aun así un
-    jugador entrante estuviera en el campo en otra posición en este
-    mismo momento (caso raro no cubierto), esa `change` en concreto
-    volvería a fallar con `"api.error.in_field"` — `jobs/set_lineup.py`
-    lo audita igual que cualquier otro fallo, no lo oculta.
+    del campo que se esté tocando en la misma pasada. Esto ya evita por
+    construcción el caso (2): si un jugador "entra" a un grupo es porque
+    no ocupaba NINGÚN slot de ESE grupo, así que si además está en el
+    campo, tiene que ser en el slot de OTRO grupo — el caso (3).
+
+    Para el caso (3), se manda primero un `change` intermedio al slot de
+    banquillo de su posición (BENCH_SLOT_BY_POSITION) — el mismo patrón,
+    en sentido inverso, ya usado en build_substitution_changes() — y
+    DESPUÉS el `change` final a su slot de campo, que ahora sí cae en el
+    caso confirmado (entra desde el banquillo). Esto solo se intenta si
+    ese slot de banquillo está libre en este momento (`current_bench_by_
+    position`); si ya lo ocupa otro jugador, resolverlo encadenaría más
+    cambios sin confirmar contra la API real, así que esta función NO
+    escribe a ciegas: deja al titular nuevo sin colocar esta pasada (el
+    slot de campo se queda con quien lo ocupaba) y lo apunta en
+    `conflicts` si se pasó la lista — jobs/set_lineup.py lo audita igual
+    que cualquier otro fallo, no lo oculta.
 
     Si no se pasa `current_lineup_by_position` (p.ej. no se pudo leer la
     alineación actual), se asume que todos los slots están vacíos —
     jobs/set_lineup.py siempre debería pasarlo cuando pueda.
 
-    No incluye banquillo/suplentes — ver build_bench_changes() más abajo,
-    con su propia numeración (fija, no depende de la formación).
+    No incluye banquillo/suplentes como tal — ver build_bench_changes()
+    más abajo, con su propia numeración (fija, no depende de la
+    formación); el paso intermedio del caso (3) reutiliza esa misma
+    numeración pero vive aquí porque depende de quién entra al campo.
     """
     current_lineup_by_position = current_lineup_by_position or {}
+    current_bench_by_position = current_bench_by_position or {}
     by_id = {p["id"]: p for p in players}
     starters_by_position = {pos: [] for pos in LINEUP_SLOT_POSITION_ORDER}
     for player_id in starter_ids:
@@ -142,6 +178,12 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
         count = len(starters_by_position[position])
         slot_ranges[position] = list(range(next_slot, next_slot + count))
         next_slot += count
+
+    # Reverse lookup de TODO el campo (no solo el grupo que se esté
+    # procesando en cada vuelta) -- hace falta para detectar el caso (3)
+    # del docstring: un entrante que ya está en el campo en el slot de
+    # OTRO grupo de posición.
+    current_slot_by_player = {pid: slot for slot, pid in current_lineup_by_position.items() if pid is not None}
 
     changes = []
     for position in LINEUP_SLOT_POSITION_ORDER:
@@ -158,6 +200,26 @@ def build_lineup_changes(players: list[dict], starter_ids: list, current_lineup_
 
         for slot, player_id in zip(free_slots, entering_players):
             occupant = occupant_by_slot[slot]
+
+            # Caso (3): el entrante ya está en el campo ahora mismo, en
+            # el slot de otro grupo (ver docstring) -- colocarlo
+            # directamente fallaría con "api.error.in_field".
+            current_field_slot = current_slot_by_player.get(player_id)
+            if current_field_slot is not None:
+                bench_slot = BENCH_SLOT_BY_POSITION[position]
+                bench_occupant = current_bench_by_position.get(bench_slot)
+                if bench_occupant is not None:
+                    if conflicts is not None:
+                        conflicts.append(
+                            f"{by_id[player_id].get('name', player_id)} ({position}) ya está en el campo en otra "
+                            f"posición y su slot de banquillo está ocupado -- no se pudo colocar esta jornada "
+                            f"(ver TODO en engine/lineup_optimizer.py)."
+                        )
+                    continue
+                changes.append(
+                    {"cpt": False, "to": player_id, "position": bench_slot, "isBench": True, "multiposition": False}
+                )
+
             change = {"cpt": False, "to": player_id, "position": slot, "isBench": False, "multiposition": False}
             if occupant is not None:
                 change["from"] = occupant

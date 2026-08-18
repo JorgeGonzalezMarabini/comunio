@@ -207,6 +207,90 @@ def test_build_lineup_changes_keeps_unchanged_starters_in_their_current_slot():
     assert changes[0]["position"] == 9  # el slot que ocupaba def3
 
 
+def test_build_lineup_changes_benches_entrant_already_on_field_in_another_group():
+    """
+    Regresión del fix de TODO.md #1 / "tercer hallazgo" en
+    clients.futmondo_client.FutmondoClient.change_lineup(): un titular
+    nuevo de esta semana que YA está en el campo ahora mismo, pero en el
+    slot de OTRO grupo de posición (ej. "multiposition"), no puede
+    colocarse directamente -- "api.error.in_field". build_lineup_changes()
+    debe mandarlo primero al banquillo (slot fijo de su posición,
+    BENCH_SLOT_BY_POSITION) y solo DESPUÉS al slot de campo final, en ese
+    orden (change_lineup() manda una llamada HTTP por `change`, en orden).
+    """
+    squad = _squad_442()
+    # "med_multi" es de posición MED esta semana, pero ahora mismo está en
+    # el campo en un slot de DEL (grupo 0-1) -- ej. jugador "multiposition".
+    squad_this_week = [p for p in squad if p["id"] != "med3"] + [
+        {"id": "med_multi", "position": "MED", "expected_score": 0.9}
+    ]
+    lineup = pick_lineup(squad_this_week, formation="4-4-2")
+    assert "med_multi" in lineup["starters"]
+
+    current_lineup_by_position = {
+        0: "del0", 1: "med_multi",  # med_multi ocupa un slot de DEL, no de MED
+        2: "med0", 3: "med1", 4: "med2", 5: "med3",
+        6: "def0", 7: "def1", 8: "def2", 9: "def3",
+        10: "por1",
+    }
+    # del1 sigue siendo titular esta semana pero perdió su slot -- no importa aquí.
+    current_bench_by_position = {}  # banquillo de MED (slot 0) libre
+
+    changes = build_lineup_changes(
+        squad_this_week, lineup["starters"], current_lineup_by_position, current_bench_by_position
+    )
+
+    med_multi_changes = [c for c in changes if c["to"] == "med_multi"]
+    assert len(med_multi_changes) == 2
+    bench_change, field_change = med_multi_changes  # el orden importa: banquillo primero
+
+    assert bench_change == {
+        "cpt": False, "to": "med_multi", "position": BENCH_SLOT_BY_POSITION["MED"],
+        "isBench": True, "multiposition": False,
+    }
+    assert field_change["isBench"] is False
+    assert field_change["position"] in {2, 3, 4, 5}  # slot del grupo MED
+    # Viene del banquillo tras el paso intermedio -- no necesita "from" del
+    # slot de campo que ocupaba antes (grupo DEL, ya gestionado aparte).
+
+
+def test_build_lineup_changes_reports_conflict_when_bench_slot_also_occupied():
+    """
+    Si el slot de banquillo de la posición del entrante también está
+    ocupado, build_lineup_changes() NO debe escribir a ciegas encadenando
+    más cambios sin confirmar -- debe dejarlo sin colocar y avisarlo en
+    `conflicts`.
+    """
+    squad = _squad_442()
+    squad_this_week = [p for p in squad if p["id"] != "med3"] + [
+        {"id": "med_multi", "position": "MED", "expected_score": 0.9}
+    ]
+    lineup = pick_lineup(squad_this_week, formation="4-4-2")
+
+    current_lineup_by_position = {
+        0: "del0", 1: "med_multi",
+        2: "med0", 3: "med1", 4: "med2", 5: "med3",
+        6: "def0", 7: "def1", 8: "def2", 9: "def3",
+        10: "por1",
+    }
+    current_bench_by_position = {BENCH_SLOT_BY_POSITION["MED"]: "otro_suplente"}  # banquillo de MED ocupado
+
+    conflicts = []
+    changes = build_lineup_changes(
+        squad_this_week, lineup["starters"], current_lineup_by_position, current_bench_by_position, conflicts
+    )
+
+    assert not any(c["to"] == "med_multi" for c in changes)
+    assert len(conflicts) == 1
+    assert "med_multi" in conflicts[0]
+
+    # Sin pasar `conflicts`, el mismo caso no debe romper ni generar el `change`.
+    changes_without_reporting = build_lineup_changes(
+        squad_this_week, lineup["starters"], current_lineup_by_position, current_bench_by_position
+    )
+    assert not any(c["to"] == "med_multi" for c in changes_without_reporting)
+
+
 # --- Banquillo: pick_substitutes() / build_bench_changes() ---
 #
 # CONFIRMADO AL 100% (2026-08-17): un slot FIJO por posición

@@ -32,6 +32,14 @@ rechaza el cambio con `"api.error.not_allowed"`. Por eso este job SIEMPRE
 lee `client.get_lineup()` antes de construir los cambios: sin saber qué
 hay ya en cada slot, no se puede rellenar `"from"` cuando hace falta.
 
+Tercer bug/límite real del mismo día: un titular nuevo que ya está en el
+campo ahora mismo en el slot de OTRO grupo de posición (p.ej. un jugador
+"multiposition") se rechaza con `"api.error.in_field"`.
+`build_lineup_changes()` lo resuelve mandándolo primero al banquillo como
+paso intermedio cuando ese slot está libre; si también está ocupado, no
+se coloca esta pasada y queda en `conflicts` — se notifica igual que
+cualquier otro fallo, ver más abajo.
+
 También manda el banquillo/suplentes: un slot FIJO por posición (ver
 `engine.lineup_optimizer.BENCH_SLOT_BY_POSITION`), CONFIRMADO AL 100%
 (2026-08-17, los 4 añadidos uno a uno desde la web + relectura con
@@ -122,6 +130,7 @@ def run():
     submit_error = None
     failed_players = []  # [(nombre, motivo)] -- cambios individuales que fallaron, ver docstring del módulo
     changes_needed = 0  # 0 si la alineación actual ya coincidía del todo (ver build_lineup_changes)
+    lineup_conflicts = []  # titulares que no se pudieron colocar sin escribir a ciegas, ver build_lineup_changes
 
     if config.ENABLE_LINEUP_AUTO_SUBMIT:
         try:
@@ -130,7 +139,9 @@ def run():
             current_bench_by_position = {
                 p["position"]: p["id"] for p in current_lineup_answer.get("bench", {}).get("players", [])
             }
-            changes = build_lineup_changes(adjusted, lineup["starters"], current_lineup_by_position)
+            changes = build_lineup_changes(
+                adjusted, lineup["starters"], current_lineup_by_position, current_bench_by_position, lineup_conflicts
+            )
             changes += build_bench_changes(substitutes_by_position, current_bench_by_position)
             changes_needed = len(changes)
             results = client.change_lineup(changes)
@@ -166,6 +177,10 @@ def run():
             message.extend(f"  - {name}: {error}" for name, error in failed_players)
     else:
         message.append("NO enviada a Futmondo (ENABLE_LINEUP_AUTO_SUBMIT=false).")
+
+    if lineup_conflicts:
+        message.append("⚠️ Titular(es) sin colocar esta jornada (ver TODO en engine/lineup_optimizer.py):")
+        message.extend(f"  - {c}" for c in lineup_conflicts)
 
     if risk_warnings:
         message.append("⚠️ Riesgo de plantilla (posición sin suplente disponible):")

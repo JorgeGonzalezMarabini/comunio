@@ -134,14 +134,20 @@ la web** — los tres documentados con detalle en el docstring de
    `"api.error.not_allowed"` — corregido leyendo `get_lineup()` antes de
    construir los cambios y solo generando `change` para los slots que de
    verdad hacen falta.
-3. **Sin resolver todavía**: si el jugador que entra en un slot ya está
-   en el campo en OTRA posición que también se está cambiando en la misma
-   pasada (una rotación entre varios titulares, no una sustitución simple
-   desde el banquillo), la API rechaza esos cambios con
-   `"api.error.in_field"` pese a llevar el `"from"` correcto. Probablemente
-   haga falta un paso intermedio (banquillo) para "liberar" al jugador
-   antes de recolocarlo, pero eso depende de la numeración de slots del
-   banquillo, sin confirmar (ver más abajo).
+3. Si el jugador que entra en un slot ya está en el campo en OTRA
+   posición, la API rechaza el cambio con `"api.error.in_field"` pese a
+   llevar el `"from"` correcto. La rotación "clásica" entre titulares ya
+   bien colocados no llega a darse: `build_lineup_changes()` nunca
+   reasigna slots de un grupo desde cero, solo los que de verdad quedan
+   libres. El caso real que quedaba (un titular nuevo ya en el campo en
+   el slot de OTRO grupo, jugador "multiposition") — **arreglado
+   2026-08-18**: se manda primero al banquillo (slot fijo de su posición,
+   numeración ya confirmada) como paso intermedio, y solo después al slot
+   de campo, que así entra desde el banquillo (caso confirmado). Sigue
+   sin confirmar con una prueba real que Futmondo acepte ese paso
+   intermedio (campo -> banquillo vacío); si no lo aceptara, el titular
+   quedaría sin colocar esa jornada, auditado y notificado en vez de
+   fallar en silencio (ver `TODO.md` #1 para el detalle completo).
 
 **Solo se soporta 4-4-2** (`engine/lineup_optimizer.FORMATIONS`): es la
 única formación gratis y siempre disponible en Futmondo, confirmado en su
