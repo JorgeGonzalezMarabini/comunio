@@ -8,6 +8,7 @@ from db.models import (
     get_pending_bid_amount,
     get_player_features,
     get_real_lineup_check,
+    get_won_bid_prices,
     save_real_lineup_check,
     update_bid_status,
     update_sale_status,
@@ -146,6 +147,40 @@ def test_get_open_sales_and_update_status_roundtrip(tmp_db):
 
     update_sale_status(open_sales[0]["id"], "sold")
     assert get_open_sales() == []
+
+
+def test_get_won_bid_prices_only_includes_won_bids(tmp_db):
+    """Resuelve TODO.md #4: `bought_by_bot` para decide_sales() sale solo de pujas 'won', no de 'placed'/'lost'/'failed'."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 500_000, "won", NOW),
+        )
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("2", 300_000, "placed", NOW),
+        )
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("3", 200_000, "lost", NOW),
+        )
+
+    assert get_won_bid_prices() == {"1": 500_000}
+
+
+def test_get_won_bid_prices_keeps_most_recent_when_bought_more_than_once(tmp_db):
+    """Vendido y recomprado más tarde -> se queda con la puja 'won' más reciente, no la primera."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 500_000, "won", "2026-08-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 700_000, "won", NOW),
+        )
+
+    assert get_won_bid_prices() == {"1": 700_000}
 
 
 def test_get_real_lineup_check_returns_none_when_never_checked(tmp_db):

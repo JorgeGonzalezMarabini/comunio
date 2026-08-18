@@ -121,24 +121,50 @@ sobrepujar con dinero real.
 
 ---
 
-## 4. `buyPrice` no distingue "comprado por el bot" de "plantilla inicial"
+## 4. ~~`buyPrice` no distingue "comprado por el bot" de "plantilla inicial"~~ (resuelto sin depender de ese campo, 2026-08-18)
 
-**Qué pasa**: en Comunio, `purchaseInfo == null` identificaba de forma
+**Qué pasaba**: en Comunio, `purchaseInfo == null` identificaba de forma
 fiable a los jugadores de la plantilla inicial (no comprados). En Futmondo,
 `buyPrice` aparece en ambos casos (plantilla inicial y compra real por puja),
 a veces con valor 0 en plantilla inicial y a veces no, sin haber podido
-confirmarlo ganando una puja de prueba.
+confirmarlo ganando una puja de prueba. `decide_sales()` trataba cualquier
+`buyPrice > 0` como precio de referencia válido, sin filtrar por origen —
+una asunción de negocio sin confirmar que afectaba directamente a
+decisiones de venta con dinero real.
 
-**Por qué importa**: es un cambio deliberado de comportamiento respecto a
-Comunio — `decide_sales()` trata cualquier `buyPrice > 0` como precio de
-referencia válido, sin filtrar por origen. Es una asunción de negocio sin
-confirmar que afecta directamente a decisiones de venta con dinero real, y
-está documentada como reversible si se confirma el campo más adelante.
+**Arreglado**: en vez de seguir esperando a confirmar el significado exacto
+de `buyPrice` (nunca se pudo ganar una puja de prueba para eso), se
+encontró una fuente propia que ya resolvía el mismo problema sin depender
+de ningún campo ambiguo de Futmondo: la tabla local `bids`, que
+`jobs/sync_data.py` ya reconcilia a `status='won'` cuando el bot gana una
+puja real (comparando la plantilla antes/después de cada sync, ver TODO
+#1 más abajo para el mecanismo). Esa tabla es exactamente "qué compró el
+bot y a qué precio" — el mismo dato que `purchaseInfo != null` daba en
+Comunio, pero de nuestra propia auditoría, no de la API de Futmondo.
 
-**Afecta a**: `engine/selling_strategy.py` (`decide_sales`).
+Se añadió `db.models.get_won_bid_prices()` (última puja `'won'` por
+jugador, por si se vendió y se recompró más tarde) y
+`engine/selling_strategy.decide_sales()` ahora recibe ese resultado como
+`bought_by_bot: dict[player_id, precio_pagado]` — solo esos jugadores son
+candidatos, y el precio de referencia de la plusvalía es el importe
+realmente pagado, no `buyPrice`. `jobs/run_sales.py` pasa
+`get_won_bid_prices()` en cada ejecución.
 
-**Dónde**: `clients/futmondo_client.py:100-112`, `engine/selling_strategy.py:9`,
-`jobs/run_sales.py:13`, `db/models.py:45,96`, `tests/test_selling_strategy.py:14`.
+**Verificado con tests**: `tests/test_db_models.py`
+(`test_get_won_bid_prices_*`), `tests/test_selling_strategy.py` (reescrito
+para pasar `bought_by_bot` en vez de `buyPrice` en el squad, incluyendo un
+test explícito de que un `buyPrice > 0` sin puja ganada ya NO cuenta) y
+`tests/test_jobs_run_sales.py` (reescrito para registrar pujas `'won'` en
+BD en vez de anotar `buyPrice` en el roster falso). Sin poder confirmar
+todavía contra una puja real ganada en producción (sigue pendiente de que
+se dé el caso), pero el mecanismo ya no depende de esa confirmación.
+
+**Afecta a**: `engine/selling_strategy.py` (`decide_sales`), `jobs/run_sales.py`.
+
+**Dónde**: `clients/futmondo_client.py:100-113`, `engine/selling_strategy.py`,
+`jobs/run_sales.py`, `db/models.py` (`get_won_bid_prices`),
+`tests/test_selling_strategy.py`, `tests/test_jobs_run_sales.py`,
+`tests/test_db_models.py`.
 
 ---
 

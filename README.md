@@ -470,7 +470,7 @@ desincronizarse — pero es la única fuente disponible, y por diseño solo
 puede sobreestimar el compromiso (nunca subestimarlo, que sería el caso
 peligroso).
 
-## `buyPrice`: por qué `run_sales` ya no filtra "solo comprados por el bot"
+## `buyPrice`: por qué `run_sales` filtra "comprados por el bot" sin usar ese campo
 
 En Comunio, `purchaseInfo == null` distinguía sin ambigüedad "plantilla
 inicial" de "comprado por el bot vía puja" — `engine/selling_strategy.py`
@@ -483,13 +483,15 @@ apunta a que `buyPrice` es más bien "valor de referencia al entrar al
 equipo" (incluida la asignación inicial), no "importe pagado en una puja
 real nuestra".
 
-Sin poder ganar una puja de prueba real en el tiempo disponible para
-confirmarlo del todo, `engine/selling_strategy.py` trata cualquier
-`buyPrice > 0` como precio de referencia válido para calcular plusvalía,
-**sin filtrar por origen** — un cambio de comportamiento deliberado y
-documentado, no un descuido. Si más adelante se confirma que `buyPrice`
-sí distingue el origen (comparando el roster antes/después de ganar una
-puja real), habría que volver a filtrar como hacía la versión de Comunio.
+En vez de esperar a poder ganar una puja de prueba real para confirmarlo
+(TODO.md #4), la solución fue dejar de depender de `buyPrice` para esto:
+`engine/selling_strategy.decide_sales()` recibe ahora `bought_by_bot`
+(`db.models.get_won_bid_prices()`), el registro **local** de pujas que el
+propio bot colocó y `jobs/sync_data.py` ya reconcilia como `'won'` en la
+tabla `bids`. Solo esos jugadores son candidatos a venta, y el precio de
+referencia es el importe realmente pagado en esa puja — misma semántica
+que `purchaseInfo != null` en Comunio, sin necesitar confirmar el
+significado exacto de un campo de la API de Futmondo.
 
 ## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
 

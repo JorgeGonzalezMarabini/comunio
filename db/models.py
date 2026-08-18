@@ -42,9 +42,11 @@ CREATE TABLE IF NOT EXISTS futmondo_snapshots (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
     price           INTEGER,                -- "value" (VM actual)
-    buy_price       INTEGER,                -- "buyPrice" — ver TODO en clients/futmondo_client.py:
-                                             -- no distingue con certeza "comprado por el bot" de
-                                             -- "asignado con la plantilla inicial"
+    buy_price       INTEGER,                -- "buyPrice" tal cual lo da Futmondo (ver
+                                             -- clients/futmondo_client.py): NO distingue "comprado
+                                             -- por el bot" de "asignado con la plantilla inicial",
+                                             -- solo se guarda para referencia/auditoría; para eso
+                                             -- se usa get_won_bid_prices() (tabla `bids`) en su lugar
     points          INTEGER,                -- "points" acumulados
     last_points     INTEGER,                -- último valor de "average.fitness" (orden cronológico sin confirmar)
     average_points  REAL,                   -- "average.average"
@@ -93,7 +95,7 @@ CREATE TABLE IF NOT EXISTS sales (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
     asking_price    INTEGER NOT NULL,       -- precio pedido ("value" en el momento de listar)
-    purchase_price  INTEGER,                -- precio de referencia ("buyPrice" de roster, ver TODO arriba)
+    purchase_price  INTEGER,                -- importe realmente pagado en la puja ganada, ver get_won_bid_prices()
     profit          INTEGER,                -- asking_price - purchase_price
     profit_pct      REAL,
     status          TEXT NOT NULL,          -- 'listed' | 'sold' | 'delisted' | 'failed'
@@ -286,6 +288,36 @@ def update_bid_status(bid_id: int, status: str) -> None:
     """Actualiza el status de una puja ya persistida (ver get_open_bids/reconciliación)."""
     with get_connection() as conn:
         conn.execute("UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
+
+
+def get_won_bid_prices() -> dict[str, int]:
+    """
+    Fuente local fiable de "qué jugadores ha comprado el bot y a qué precio
+    real" (resuelve TODO.md #4): a diferencia de `buyPrice` de Futmondo
+    (aparece también en jugadores de la plantilla inicial, a veces >0 —
+    ver clients/futmondo_client.py), esta tabla `bids` solo tiene filas de
+    pujas que el propio bot colocó, y jobs.sync_data._reconcile_bids() ya
+    las marca 'won' comparándolas contra la plantilla real. Si un jugador
+    tiene más de una puja ganada en su historial (vendido y recomprado más
+    adelante), se queda con la más reciente (mayor `id`).
+
+    Devuelve {player_id: amount} solo para jugadores con al menos una puja
+    'won' — exactamente el conjunto que engine.selling_strategy.
+    decide_sales() debe tratar como "comprado por el bot", igual que
+    `purchaseInfo != null` hacía en Comunio.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            WITH latest_won AS (
+                SELECT player_id, amount, ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY id DESC) AS rn
+                FROM bids
+                WHERE status = 'won'
+            )
+            SELECT player_id, amount FROM latest_won WHERE rn = 1
+            """
+        ).fetchall()
+        return {row["player_id"]: row["amount"] for row in rows}
 
 
 def get_open_sales() -> list[dict]:

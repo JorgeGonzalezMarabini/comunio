@@ -6,21 +6,20 @@ En Futmondo, igual que en Comunio (ver README, "Economía"), vender
 jugadores es la vía principal para generar dinero: se compra
 barato/infravalorado y se vende cuando el valor sube.
 
-TODO importante, sin resolver (ver clients/futmondo_client.py para el
-razonamiento completo): en Comunio, `purchaseInfo == null` distinguía sin
-ambigüedad "plantilla inicial" de "comprado por el bot", así que
-`decide_sales()` solo consideraba jugadores con precio de compra real
-conocido. En Futmondo NO se ha encontrado un campo equivalente confiable
-— `buyPrice` aparece tanto en jugadores de la plantilla inicial (a veces
-0, a veces no) como, se espera, en jugadores comprados por puja real (sin
-haber podido confirmar esto último ganando una puja de prueba en el
-tiempo disponible). Por eso `decide_sales()` aquí trata cualquier
-`buyPrice > 0` como precio de referencia válido para calcular plusvalía,
-SIN filtrar por "solo comprados por el bot" — una diferencia deliberada de
-comportamiento frente a Comunio, no un descuido. Si más adelante se
-confirma que `buyPrice` sí puede distinguir el origen (p.ej. comparando el
-roster antes/después de ganar una puja real), esta función debería volver
-a filtrar como hacía la versión de Comunio.
+Resuelve TODO.md #4 (`buyPrice` no distingue "comprado por el bot" de
+"plantilla inicial"): en Comunio, `purchaseInfo == null` distinguía sin
+ambigüedad ambos casos. En Futmondo no se encontró un campo equivalente
+confiable — `buyPrice` aparece tanto en plantilla inicial (a veces 0, a
+veces no) como en compras reales, sin poder distinguir el origen por ese
+campo (ver clients/futmondo_client.py). En vez de eso, `decide_sales()`
+recibe `bought_by_bot` (ver `db.models.get_won_bid_prices()`): el registro
+LOCAL de pujas que el propio bot colocó y ganó (tabla `bids`,
+reconciliada en `jobs/sync_data.py`), independiente de `buyPrice`. Un
+jugador solo es candidato a venta si aparece ahí, y el precio de
+referencia usado es el importe realmente pagado en esa puja (más fiable
+que `buyPrice`, que ni siquiera se necesita ya para esta decisión) — misma
+semántica que `purchaseInfo != null` en Comunio, alcanzada sin depender de
+un campo de Futmondo sin confirmar.
 
 Riesgo de plantilla (ver engine/squad_risk.py): vender es una acción tan
 capaz de dejarte sin cobertura en una posición como que te "clausulen" un
@@ -38,15 +37,25 @@ from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_injury_status
 from engine.squad_risk import assess_squad_depth
 
 
-def decide_sales(squad: list[dict], min_profit_pct: float = None, formation: str = None) -> list[dict]:
+def decide_sales(
+    squad: list[dict], min_profit_pct: float = None, formation: str = None, bought_by_bot: dict[str, int] = None
+) -> list[dict]:
     """
     `squad`: items reales de FutmondoClient.get_roster()["answer"] (necesita
-    "id", "name", "role", "status", "value", "buyPrice") tal cual, sin
-    normalizar antes; aquí dentro se traduce la posición
-    (FUTMONDO_POSITION_MAP) para poder cruzarla con engine.squad_risk.
+    "id", "name", "role", "status", "value") tal cual, sin normalizar
+    antes; aquí dentro se traduce la posición (FUTMONDO_POSITION_MAP) para
+    poder cruzarla con engine.squad_risk.
 
-    Devuelve una decisión por jugador cuya revalorización (`value` vs.
-    `buyPrice`) supera `min_profit_pct` (por defecto
+    `bought_by_bot`: {player_id: precio pagado} — normalmente
+    `db.models.get_won_bid_prices()`. Solo los jugadores presentes aquí son
+    candidatos a venta (equivalente a `purchaseInfo != null` en Comunio,
+    ver docstring del módulo); el precio de referencia para la plusvalía es
+    el importe de ese dict, no `buyPrice` de Futmondo. Si se omite (o llega
+    vacío/None), no hay ningún candidato — nunca se recurre a `buyPrice`
+    como fallback silencioso, para no reintroducir la ambigüedad original.
+
+    Devuelve una decisión por jugador cuya revalorización (`value` vs. el
+    precio pagado en `bought_by_bot`) supera `min_profit_pct` (por defecto
     config.SELLING_MIN_PROFIT_PCT) Y cuya posición sigue teniendo margen de
     suplentes sanos después de la venta:
         {"player_id", "asking_price", "purchase_price", "profit",
@@ -66,25 +75,26 @@ def decide_sales(squad: list[dict], min_profit_pct: float = None, formation: str
     parecido, pero no hay motivo para pedir un precio distinto al VM).
     """
     min_profit_pct = config.SELLING_MIN_PROFIT_PCT if min_profit_pct is None else min_profit_pct
+    bought_by_bot = bought_by_bot or {}
 
     candidates = []
     for player in squad:
-        purchase_price = player.get("buyPrice") or 0
+        purchase_price = bought_by_bot.get(str(player["id"])) or 0
         current_price = player.get("value", 0)
         if purchase_price <= 0 or current_price <= 0:
-            continue  # sin precio de referencia > 0 no hay plusvalía calculable
+            continue  # no comprado por el bot (o sin precio de referencia): no es candidato
 
         profit = current_price - purchase_price
         profit_pct = profit / purchase_price
         if profit_pct < min_profit_pct:
             continue
 
-        candidates.append((player, profit, profit_pct))
+        candidates.append((player, purchase_price, profit, profit_pct))
 
     # Más rentables primero: si el margen de plantilla en una posición no
     # alcanza para vender a todos los candidatos de esa posición, se
     # prioriza el de mayor plusvalía.
-    candidates.sort(key=lambda c: c[2], reverse=True)
+    candidates.sort(key=lambda c: c[3], reverse=True)
 
     # Margen de suplentes sanos por posición ANTES de vender nada (ver
     # engine.squad_risk.assess_squad_depth) — se va descontando según se
@@ -95,7 +105,7 @@ def decide_sales(squad: list[dict], min_profit_pct: float = None, formation: str
     bench_remaining = {position: info["bench"] for position, info in depth.items()}
 
     decisions = []
-    for player, profit, profit_pct in candidates:
+    for player, purchase_price, profit, profit_pct in candidates:
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
         is_injured_or_doubtful = is_injury_status(player.get("status"))
 
@@ -111,11 +121,11 @@ def decide_sales(squad: list[dict], min_profit_pct: float = None, formation: str
             {
                 "player_id": player["id"],
                 "asking_price": player.get("value", 0),
-                "purchase_price": player["buyPrice"],
+                "purchase_price": purchase_price,
                 "profit": profit,
                 "profit_pct": profit_pct,
                 "reason": (
-                    f"referencia de compra {player['buyPrice']}, ahora {player.get('value', 0)} "
+                    f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
                     f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
                 ),
             }

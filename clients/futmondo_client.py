@@ -104,18 +104,19 @@ Nombres de campo reales confirmados por fetch autenticado real:
             visto en captura real).
     }
 
-TODO abierto e importante para engine/selling_strategy.py: en Comunio,
+TODO.md #4, resuelto sin necesitar confirmar este campo: en Comunio,
 `purchaseInfo == null` distinguía sin ambigüedad "plantilla inicial" de
 "comprado por el bot". Aquí, `buyPrice` NO sirve para eso tal cual: se ha
 visto tanto un jugador de la plantilla inicial con buyPrice=0 (Matz Sels)
 como otro también inicial con buyPrice>0 (Tzolakis, 14.017.740€ en su
 ficha de alineación) — buyPrice parece ser más bien "valor de referencia
 en el momento de entrar al equipo" (incluida la asignación inicial de
-plantilla), no "importe pagado en una puja real nuestra". Sin poder ganar
-una puja real de prueba en el tiempo disponible para confirmarlo,
-`engine/selling_strategy.py` trata cualquier `buyPrice > 0` como precio de
-referencia válido para calcular plusvalía, SIN filtrar por "solo
-comprados por el bot" (a diferencia de Comunio) — ver docstring de ese
+plantilla), no "importe pagado en una puja real nuestra". En vez de
+esperar a poder confirmarlo ganando una puja real, `engine/
+selling_strategy.py` dejó de mirar `buyPrice` para esta decisión: usa el
+registro LOCAL de pujas ganadas por el bot (tabla `bids`, ver
+`db.models.get_won_bid_prices()`), que es una fuente propia e
+independiente de la ambigüedad de este campo — ver docstring de ese
 módulo para el razonamiento completo.
 """
 from __future__ import annotations

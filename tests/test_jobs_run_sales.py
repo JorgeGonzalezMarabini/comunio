@@ -6,17 +6,27 @@ from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
 
 ROSTER_442_BASE = (
-    [{"id": 1, "role": "portero", "status": "", "value": 500_000, "buyPrice": 0}]
-    + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000, "buyPrice": 0} for i in range(4)]
-    + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000, "buyPrice": 0} for i in range(4)]
-    + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000, "buyPrice": 0} for i in range(2)]
+    [{"id": 1, "role": "portero", "status": "", "value": 500_000}]
+    + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+    + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+    + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
 )
+
+
+def _mark_won(player_id, amount):
+    """Registra una puja ya ganada por el bot (ver db.models.get_won_bid_prices) -- la
+    fuente que ahora usa run_sales/decide_sales en vez de `buyPrice` de Futmondo."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            (str(player_id), amount, "won", "2026-08-01T00:00:00+00:00"),
+        )
 
 
 def test_run_sales_no_profitable_candidates_notifies_and_returns(tmp_db):
     class FakeClient(FutmondoClient):
         def get_roster(self):
-            return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # nadie con buyPrice > 0 -> nada que vender
+            return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # nadie comprado por el bot -> nada que vender
 
     captured = []
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
@@ -29,7 +39,8 @@ def test_run_sales_no_profitable_candidates_notifies_and_returns(tmp_db):
 
 def test_run_sales_lists_profitable_player_and_persists(tmp_db):
     roster = [dict(p) for p in ROSTER_442_BASE]
-    roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000, "buyPrice": 700_000})
+    roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
+    _mark_won(25, 700_000)
 
     class FakeClient(FutmondoClient):
         def get_roster(self):
@@ -53,7 +64,7 @@ def test_run_sales_lists_profitable_player_and_persists(tmp_db):
 def test_run_sales_never_lists_player_that_would_leave_position_uncovered(tmp_db):
     """Regresión de nivel job: el único portero, aunque rentable, no debe listarse jamás."""
     roster = [dict(p) for p in ROSTER_442_BASE]
-    roster[0]["buyPrice"] = 300_000  # portero, +66% de plusvalía
+    _mark_won(1, 300_000)  # portero, +66% de plusvalía
 
     class FakeClient(FutmondoClient):
         def get_roster(self):
@@ -70,7 +81,8 @@ def test_run_sales_never_lists_player_that_would_leave_position_uncovered(tmp_db
 
 def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_db):
     roster = [dict(p) for p in ROSTER_442_BASE]
-    roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000, "buyPrice": 700_000})
+    roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
+    _mark_won(25, 700_000)
 
     class FakeClient(FutmondoClient):
         def get_roster(self):

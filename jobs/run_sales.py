@@ -9,10 +9,11 @@ poner en venta solo deja al jugador listado, visible para que otro manager
 (o el "Computer") lo compre. jobs/sync_data.py reconcilia después si la
 venta se completó (comparando la plantilla en cada sync).
 
-A diferencia de Comunio, no se filtra por "solo jugadores comprados por el
-bot" — Futmondo no tiene un campo confirmado que distinga eso (ver TODO en
-engine/selling_strategy.py) — cualquier jugador con `buyPrice > 0` y
-plusvalía suficiente es candidato.
+Igual que en Comunio, solo se consideran candidatos los jugadores
+"comprados por el bot" — aquí, en vez de un campo de Futmondo (`buyPrice`
+no sirve para distinguir origen, ver TODO.md #4/engine/selling_strategy.py),
+se usa el registro LOCAL de pujas ganadas (`db.models.get_won_bid_prices()`)
+como fuente de verdad de qué se compró y a qué precio.
 """
 from datetime import datetime, timezone
 
@@ -20,7 +21,7 @@ import requests
 
 import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
-from db.models import get_connection
+from db.models import get_connection, get_won_bid_prices
 from engine.selling_strategy import decide_sales
 from notifier import notify, track_job_run
 
@@ -57,7 +58,7 @@ def run():
         notify("run_sales: la plantilla vino vacía, nada que evaluar.")
         return
 
-    decisions = decide_sales(roster_items)
+    decisions = decide_sales(roster_items, bought_by_bot=get_won_bid_prices())
     if not decisions:
         notify("run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución.")
         return
