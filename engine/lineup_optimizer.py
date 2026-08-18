@@ -431,30 +431,44 @@ def build_substitution_changes(
     solo puede decidirse cerca de cada partido (lesión/sanción confirmada),
     no una semana antes.
 
-    Se apoya en la regla ya CONFIRMADA en producción (ver docstring de
-    clients.futmondo_client.FutmondoClient.change_lineup): sustituir
-    SIEMPRE funciona si el que entra viene del banquillo, nunca si viene
-    de otro slot del campo ("api.error.in_field"). El suplente que entra
-    aquí siempre viene del banquillo, así que el PRIMER `change` de cada
-    pareja generada cae dentro del caso confirmado. El titular que sale,
-    en cambio, sí está en ese momento en el campo — por eso el SEGUNDO
-    `change` de la pareja (mandarlo al slot de banquillo que el suplente
-    deja libre) depende de que se ejecute DESPUÉS del primero como llamada
-    HTTP real independiente (nunca en la misma pasada), para que al
-    procesarlo ya no esté "en el campo": es justo lo que
-    FutmondoClient.change_lineup() ya hace (una llamada por `change`, en
-    el orden de la lista) — el orden de los dos `changes` de cada pareja
-    en la lista devuelta importa, no reordenarlo.
+    **ROTO, confirmado con una prueba real contra la liga de pruebas
+    (2026-08-18)** — ver TODO.md #1: el shape que genera esta función
+    (par de `changes` con `"from"` cruzado entre campo y banquillo) NO
+    funciona hoy contra la API real, en NINGÚN orden:
 
-    Sin confirmar todavía con una prueba real (sin caso de lesión
-    disponible en la liga de prueba, pretemporada): que Futmondo vacíe de
-    verdad el slot de banquillo de origen al mover a su ocupante al campo
-    en el primer `change`. Por eso el segundo `change` NO lleva "from"
-    (mismo criterio que build_bench_changes(): solo incluirlo si hiciera
-    falta) — si esto fuera falso, ese segundo `change` fallaría con
-    "api.error.not_allowed", y jobs/manage_substitutes.py lo auditaría
-    como cualquier otro fallo, sin ocultarlo. Ver config.
-    ENABLE_SUBSTITUTE_AUTO_SUBMIT.
+      - Suplente (banquillo) -> slot de campo ocupado, con `"from"` =
+        titular que sale: `"api.error.in_bench"` (nuevo, no visto antes).
+      - Titular (campo) -> slot de banquillo ocupado, con `"from"` =
+        suplente que sale (orden invertido, probado como diagnóstico):
+        `"api.error.in_field"`.
+      - Mandar los dos `changes` juntos en una sola llamada (atómico, en
+        vez de uno por uno): mismo `"api.error.in_bench"` que por
+        separado — no es un problema de tener que ser atómico.
+
+    Se creía (sin confirmar) que "sustituir siempre funciona si el que
+    entra viene del banquillo" bastaba para el primer `change` de la
+    pareja, extrapolando de la regla confirmada para `build_lineup_changes()`
+    (bench -> slot de campo VACÍO, sin `"from"`). La prueba real de
+    2026-08-18 muestra que esa extrapolación NO es válida en cuanto se
+    añade un `"from"` para desalojar al ocupante actual del slot de
+    destino: Futmondo trata "traer al suplente OFICIAL del banquillo
+    desalojando a un titular" como una operación distinta (y bloqueada)
+    de "traer a cualquier jugador a un slot libre", posiblemente porque
+    esa sustitución en caliente es justo lo que se supone que hace el
+    "entrenador automático" (función de pago, ver README "Banquillo/
+    suplentes") y esta API no la expone para hacerla a mano así.
+
+    **Consecuencia práctica**: `jobs/manage_substitutes.py` tiene
+    `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT=true` en `.env` de este repo —
+    la función SÍ se ejecuta contra la cuenta real, pero con este bug
+    cualquier sustitución real fallará de forma segura y auditada (ambos
+    `changes` reportan `ok=False`, `jobs/manage_substitutes.py` lo
+    notifica como cualquier otro fallo, no corrompe nada), simplemente
+    sin conseguir sustituir a nadie. Pendiente investigar una forma
+    alternativa de conseguir esto (quizás requiera activar el
+    entrenador automático de verdad, o un endpoint/shape distinto no
+    descubierto todavía) antes de que esta función sirva de algo en
+    producción.
 
     `players_by_id`: {id: {..., "position", "status"}} — normalmente toda
     la plantilla (db.models.get_player_features()), para poder leer

@@ -12,7 +12,7 @@ Cada entrada indica **qué pasa**, **por qué importa**, **a qué afecta** y
 
 ---
 
-## 1. ~~Bug confirmado en producción: rotar titulares ya colocados en el campo falla~~ (arreglado 2026-08-18)
+## 1. Rotar/sustituir titulares ya colocados en el campo — parcialmente arreglado, pero nuevo hallazgo crítico (2026-08-18)
 
 **Qué pasaba**: `change_lineup()` sustituye un slot ocupado usando `"from"`
 sin problema si el jugador que entra viene del banquillo. Pero si ya está en
@@ -35,19 +35,55 @@ NO se encadenan más cambios sin confirmar contra la API real: el titular se
 deja sin colocar esa jornada y se reporta en un nuevo parámetro `conflicts`,
 que `jobs/set_lineup.py` ya incluye en la notificación de Telegram.
 
-**Sigue sin confirmar con una prueba real** (documentado explícitamente en
-el código): que Futmondo acepte de verdad mandar a un jugador del campo a un
-slot de banquillo vacío. Si no lo acepta, ese `change` intermedio fallaría
-igual que cualquier otro — auditado, no en silencio — y el titular quedaría
-sin colocar esa jornada (mismo resultado que antes del fix, pero ahora
-explicado y visible en vez de un `api.error.in_field` opaco). Validar esto
-con una prueba real es lo único que queda pendiente de este punto.
+**Sigue sin confirmar con una prueba real, PERO ver el hallazgo de abajo**:
+el paso intermedio de este fix (campo -> slot de banquillo VACÍO, sin
+`"from"`) no se ha podido probar en vivo todavía porque hoy los 4 slots de
+banquillo de la liga de prueba están ocupados. Sí se probó en vivo la
+variante CON `"from"` (slot de banquillo ocupado) — y esa variante está
+confirmada rota (ver abajo), lo que justifica por qué este fix decide NO
+intentarla y en su lugar reportar un `conflicts` en vez de escribir a
+ciegas: resultó ser la decisión correcta.
 
-**Afecta a**: envío de cambios de alineación (`jobs/set_lineup.py`).
+**🔴 Hallazgo nuevo, importante, de una prueba real contra la liga de
+pruebas (2026-08-18)**: se aprovechó para probar en vivo el mecanismo
+general de "sustituir un titular por su suplente" (`build_substitution_
+changes()`, usado por `jobs/manage_substitutes.py`) intercambiando un
+defensa titular (Tárrega) por su suplente asignado (Cortés). **Confirmado
+roto, en los dos sentidos**:
 
-**Dónde**: `engine/lineup_optimizer.py` (`build_lineup_changes`),
-`clients/futmondo_client.py:442-518` (`change_lineup`),
-`tests/test_lineup_optimizer.py` (tests de regresión del fix).
+  - Suplente (banquillo) -> slot de campo ocupado, con `"from"` = titular
+    que sale: `"api.error.in_bench"` (código nunca visto/documentado antes).
+  - Orden invertido (diagnóstico): titular (campo) -> slot de banquillo
+    ocupado, con `"from"` = suplente que sale: `"api.error.in_field"`.
+  - Mandar ambos `changes` juntos en una sola llamada (atómico): mismo
+    `"api.error.in_bench"` — no es un problema de atomicidad.
+
+  Ningún cambio se aplicó de verdad (verificado releyendo `get_lineup()`
+  antes y después: exactamente igual). La hipótesis más plausible: Futmondo
+  trata "traer al suplente OFICIAL del banquillo desalojando a un titular"
+  como la operación que se supone hace el "entrenador automático" (función
+  de pago) y no la expone para hacerla a mano así vía esta API — a
+  diferencia de "traer a cualquier jugador a un slot de campo VACÍO", que sí
+  funciona (el caso normal de `set_lineup.py`).
+
+  **Consecuencia práctica**: `.env` tiene `ENABLE_SUBSTITUTE_AUTO_SUBMIT=
+  true` — `jobs/manage_substitutes.py` SÍ se ejecuta contra la cuenta real
+  hoy, pero con este bug cualquier sustitución real fallará de forma segura
+  y auditada (no corrompe nada, simplemente no sustituye a nadie). Pendiente
+  investigar una alternativa (¿activar el entrenador automático de verdad?
+  ¿otro endpoint/shape no descubierto?) antes de que esta función sirva de
+  algo. Detalle completo en el docstring de
+  `engine.lineup_optimizer.build_substitution_changes()`.
+
+**Afecta a**: envío de cambios de alineación (`jobs/set_lineup.py`) y,
+sobre todo, sustituciones manuales (`jobs/manage_substitutes.py`, hoy
+activado en producción pero no funcional para su operación principal).
+
+**Dónde**: `engine/lineup_optimizer.py` (`build_lineup_changes`,
+`build_substitution_changes`), `clients/futmondo_client.py:442-518`
+(`change_lineup`), `tests/test_lineup_optimizer.py` (tests de regresión del
+fix de `build_lineup_changes`; `build_substitution_changes` todavía sin
+test que reproduzca el fallo real, solo probado manualmente en vivo).
 
 ---
 

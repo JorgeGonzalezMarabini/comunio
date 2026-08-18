@@ -33,7 +33,7 @@ afecta cada uno y dónde está: ver [`TODO.md`](TODO.md).
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
-- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` **activado** desde el 2026-08-17 (decisión explícita del usuario), aunque la secuencia de sustitución en sí sigue sin confirmarse todavía con un caso real
+- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` **activado** desde el 2026-08-17 (decisión explícita del usuario); la secuencia de sustitución en sí está **confirmada ROTA** con una prueba real el 2026-08-18 (`"api.error.in_bench"`/`"api.error.in_field"` según el sentido, ver "Banquillo/suplentes" y `TODO.md` #1) — falla de forma segura y auditada, pero hoy no sustituye a nadie de verdad
 - [x] Cliente de alineaciones reales (`clients/football_lineups_client.py`, Fotmob) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); Fotmob elegida tras descartar en vivo API-Football (plan gratuito sin acceso a temporada en curso), SofaScore (403 en todo, bloqueo de bot a nivel de borde igual que FBref), ESPN (403 Akamai) y TheSportsDB (datos de alineación corruptos); detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**, sin key ni cuenta que configurar) — ver sección "Banquillo/suplentes" para el TODO pendiente (timing exacto de confirmación, estabilidad a medio plazo de una API no oficial)
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
@@ -329,16 +329,24 @@ activo) no aparece en el once real de su equipo hoy según Fotmob (ver
 sección anterior), y su posición tiene un suplente disponible (sano y
 también presente en el once real) asignado en el banquillo, genera la
 pareja de `changes` que los intercambia
-(`engine.lineup_optimizer.build_substitution_changes()`). Se apoya en la
-regla ya confirmada de `change_lineup()` (entrar desde el banquillo siempre
-funciona, nunca desde otro slot del campo), pero la secuencia completa —dos
-llamadas HTTP reales, una detrás de otra— **sigue sin haberse probado
-todavía con un caso real** (cero lesionados/rotados disponibles hasta la
-fecha). Cada sustitución decidida se audita en `substitution_decisions`
-pase lo que pase con el envío. A diferencia del resto de jobs, solo
-notifica por Telegram cuando hay algo que decidir (o algo anómalo) — con
-la frecuencia con la que está pensado correr, notificar "nada que hacer"
-en cada ejecución sería ruido.
+(`engine.lineup_optimizer.build_substitution_changes()`). **Confirmado ROTO
+con una prueba real (2026-08-18, ver `TODO.md` #1)**: la secuencia de dos
+llamadas HTTP (suplente entra desde el banquillo desalojando al titular,
+titular sale al slot de banquillo que queda libre) falla en los dos
+sentidos probados — `"api.error.in_bench"` al traer al suplente, y
+`"api.error.in_field"` en el orden invertido — sin que se aplicara ningún
+cambio real (verificado releyendo `get_lineup()` antes y después). La regla
+que se creía confirmada de `change_lineup()` (entrar desde el banquillo
+siempre funciona) solo vale para slots VACÍOS — en cuanto hay que desalojar
+a alguien con `"from"` de por medio, esta combinación concreta (banquillo
+OFICIAL <-> campo) queda bloqueada, probablemente porque es justo la
+operación reservada al entrenador automático de pago. Cada sustitución
+decidida se audita en `substitution_decisions` pase lo que pase con el
+envío — con este bug, ninguna sustitución llega a aplicarse todavía, pero
+tampoco corrompe nada. A diferencia del resto de jobs, solo notifica por
+Telegram cuando hay algo que decidir (o algo anómalo) — con la frecuencia
+con la que está pensado correr, notificar "nada que hacer" en cada
+ejecución sería ruido.
 
 **`config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` — activado el 2026-08-17, decisión
 explícita del usuario** (por defecto seguía siendo `false` en el código,
@@ -352,10 +360,13 @@ situación y a notificar de nuevo** — con el flag activado, en cambio, una
 vez la sustitución se aplica de verdad el titular ya no aparece en el
 campo en la siguiente lectura, así que deja de re-detectarse por sí solo
 sin necesitar ningún dedup adicional. Riesgo aceptado explícitamente por
-el usuario: la secuencia de dos llamadas seguía sin confirmarse con un
-caso real en el momento de activarlo — cualquier fallo parcial (ver
-docstring de `build_substitution_changes()`) queda igualmente auditado en
-`substitution_decisions`, no oculto.
+el usuario al activarlo: la secuencia de dos llamadas seguía sin
+confirmarse con un caso real. **Actualización 2026-08-18**: ya se probó
+con un caso real (forzado, sin lesión de verdad, solo para validar la
+mecánica) y la secuencia está confirmada ROTA (ver más arriba y `TODO.md`
+#1) — el flag sigue activado porque el fallo es seguro (auditado en
+`substitution_decisions`, no corrompe nada), pero hoy no consigue
+sustituir a nadie de verdad.
 
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en
