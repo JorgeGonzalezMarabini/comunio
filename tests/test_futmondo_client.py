@@ -212,6 +212,42 @@ def test_cancel_sale_body(fake_client):
     assert call["json"]["query"]["player_id"] == "2381"
 
 
+def test_cancel_bid_body(fake_client):
+    """Body real confirmado (2026-08-18, TODO.md #13): query trae solo "bid"
+    (el id de la PUJA, no el player_id -- a diferencia del resto de
+    escrituras de compra/venta)."""
+    fake_client.session.response_fn = lambda method, url, payload: FakeResponse(
+        200, {"answer": {"code": "api.general.ok"}}
+    )
+    answer = fake_client.cancel_bid("6a82c21df996a839bdb2abd0")
+
+    assert answer["code"] == "api.general.ok"
+    call = fake_client.session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/1/market/cancelbid")
+    assert call["json"]["query"] == {
+        "championshipId": "6a82c086b4e159a76ab3b3d8",
+        "userteamId": "6a82c08704b95c71b37179a4",
+        "bid": "6a82c21df996a839bdb2abd0",
+    }
+
+
+def test_cancel_bid_raises_on_business_rejection_despite_http_200():
+    """
+    Código de ejemplo genérico, no confirmado -- no se ha observado en
+    captura real qué código devuelve Futmondo al cancelar una puja que ya
+    no existe (ver TODO.md #13, "sin confirmar todavía"). Solo confirma que
+    `cancel_bid()` sigue el mismo patrón de detección que el resto de
+    escrituras (HTTP 200 no implica `answer.code == "api.general.ok"`).
+    """
+    client = FutmondoClient(token="fake", user_id="fake", championship_id="c", userteam_id="ut")
+    client.session = FakeSession(
+        response_fn=lambda method, url, payload: FakeResponse(200, {"answer": {"code": "api.market.some_error"}})
+    )
+    with pytest.raises(FutmondoOfferError):
+        client.cancel_bid("nonexistent-bid-id")
+
+
 def test_pay_clause_body(fake_client):
     fake_client.session.response_fn = lambda method, url, payload: FakeResponse(
         200, {"answer": {"code": "api.general.ok"}}

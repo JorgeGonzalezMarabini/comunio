@@ -46,6 +46,10 @@ sesión de Comunio, ver README):
     POST /1/market/players           -> mercado de fichajes (compra)
     POST /1/market/myplayers         -> jugadores propios puestos en venta
     POST /1/market/bid               -> ESCRITURA: puja por un jugador del mercado
+    POST /1/market/cancelbid         -> ESCRITURA: cancela una puja de compra propia todavía
+                                         abierta (confirmado 2026-08-18, TODO.md #13 -- NO
+                                         documentado ni en vicenteqa/futmondo-utils ni en ninguna
+                                         referencia previa, encontrado inspeccionando la UI real)
     POST /1/market/putonmarket       -> ESCRITURA: pone un jugador propio en venta
     POST /1/market/cancelsell        -> ESCRITURA: quita un jugador propio del mercado de ventas
                                          (confirmado 2026-08-18, TODO.md #6)
@@ -446,6 +450,44 @@ class FutmondoClient:
             "/1/market/bid",
             {"player_slug": player_slug, "player_id": player_id, "price": amount, "isClause": is_clause},
         )
+        return self._check_ok(result)
+
+    def cancel_bid(self, bid_id: str) -> dict:
+        """
+        Cancela una puja de compra propia todavía abierta (la contrapartida
+        de `place_bid()` — antes de esto, `place_bid()` no se podía "deshacer"
+        de ninguna forma conocida). **100% confirmado** (2026-08-18, TODO.md
+        #13): NO estaba documentado en ninguna referencia (ni captura previa
+        propia ni vicenteqa/futmondo-utils) — se encontró inspeccionando la
+        UI real con permiso explícito del usuario, no adivinando el endpoint.
+
+            POST /1/market/cancelbid
+            body.query: {..., "bid": <bid_id>}
+            respuesta real: {"answer": {"code": "api.general.ok"}, ...}
+
+        `bid_id`: el id de la PUJA, no el `player_id` (a diferencia de
+        `place_bid`/`cancel_sale`) — sale del campo `"bid": {"id": ..., "price":
+        ...}` que trae cada item de `get_market()` en el que tenemos una oferta
+        pendiente (ver `real_pending_bid_amount()`).
+
+        Confirmado en vivo cancelando una puja real (1.072.021€ sobre un
+        jugador propiedad del "Computer") desde la UI con captura de red:
+        tras cancelar, el importe correspondiente desapareció de `"Ofertas"`
+        (compromiso total) y de `real_pending_bid_amount()` en la siguiente
+        lectura de `get_market()`. Efecto secundario observado en la misma
+        prueba: al quedar el jugador libre de nuevo, el cron real de
+        `run_market` (ejecutándose en paralelo sobre la cuenta real) volvió a
+        pujar por él con un importe distinto en la siguiente pasada — prueba
+        en vivo de que `jobs/run_market.py` sí vuelve a considerar cualquier
+        jugador en cuanto deja de tener una puja local `'placed'` (ver
+        docstring de `place_bid`).
+
+        Lanza FutmondoOfferError si `answer.code` no es "api.general.ok" —
+        no se ha observado en la prueba real qué código devuelve si se
+        intenta cancelar una puja que ya no existe (ganada, perdida, o
+        cancelada antes).
+        """
+        result = self._post("/1/market/cancelbid", {"bid": bid_id})
         return self._check_ok(result)
 
     def list_for_sale(self, player_id: str, price: int) -> dict:

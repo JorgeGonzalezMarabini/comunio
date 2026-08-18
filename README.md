@@ -76,9 +76,10 @@ Comunio): `{"header": {"token": ..., "userid": ...}, "query": {"championshipId":
 | Mercado de fichajes | `POST /1/market/players` | ✅ captura propia |
 | Mis jugadores en venta | `POST /1/market/myplayers` | ✅ captura propia |
 | Pujar | `POST /1/market/bid` | ✅ captura propia |
+| Cancelar puja de compra | `POST /1/market/cancelbid` | ✅ captura propia (no documentado en ninguna referencia previa, ver TODO.md #13) |
 | Poner en venta | `POST /1/market/putonmarket` | ✅ captura propia |
 | Ficha de jugador (+ histórico de precio) | `POST /1/player/summary` | ✅ captura propia |
-| Quitar de la venta | `POST /1/market/cancelsell` | ⚠️ solo referencia comunitaria |
+| Quitar de la venta | `POST /1/market/cancelsell` | ✅ captura propia (TODO.md #6) |
 | Pagar cláusula | `POST /1/market/rosterclause` | ⚠️ solo referencia comunitaria |
 | Ocultar en mercado | `POST /5/market/toggleplayer` | ⚠️ solo referencia comunitaria, no usado por el bot |
 | Ofertas de cláusula sobre TU plantilla | `POST /1/market/rosterbids` | ✅ visto en captura, no usado por el bot |

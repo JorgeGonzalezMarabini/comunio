@@ -469,6 +469,64 @@ el próximo sync).
 
 ---
 
+## 13. ~~Sin forma conocida de cancelar una puja de compra propia~~ (endpoint encontrado y confirmado en vivo, 2026-08-18)
+
+**Qué pasaba**: `place_bid()` no tenía contrapartida — una vez colocada una
+puja, no había ningún método en el cliente ni endpoint documentado (ni en
+captura propia ni en vicenteqa/futmondo-utils, que tampoco lo tiene) para
+deshacerla. Surgió al evaluar si merecía la pena que `jobs/run_market.py`
+cancelara una puja de score bajo para pujar por un candidato mejor aparecido
+después — sin el endpoint, la idea era inviable de raíz.
+
+**Investigado inspeccionando la UI real** (con permiso explícito del
+usuario, vía automatización de Chrome sobre su sesión ya logueada): en el
+panel de detalle de un jugador del mercado, la pestaña "Comprar" muestra un
+botón que cambia de "Modificar oferta" a **"Cancelar oferta"** (rojo)
+exactamente cuando el importe del campo coincide con el de tu puja abierta —
+no es un botón separado, es el mismo control cambiando de intención según el
+valor. Interceptando `fetch`/`XMLHttpRequest` de la página (con los valores
+de `token`/`userid` redactados antes de leer cualquier resultado, nunca
+expuestos) se capturó la petición real al pulsarlo:
+
+    POST /1/market/cancelbid
+    body.query: {..., "bid": <bid_id>}
+    respuesta real: {"answer": {"code": "api.general.ok"}}
+
+Prueba de extremo a extremo sobre una puja real (1.072.021€ sobre Cairney,
+propiedad del "Computer", en "Liga de prueba bot"): tras cancelar, el
+importe desapareció de `"Ofertas"` (compromiso total mostrado en la UI) y
+de la lectura siguiente de `get_market()`. Efecto secundario observado en
+la misma prueba (no buscado, pero confirma el diseño): al quedar Cairney
+sin puja local, el cron real de `run_market` — corriendo en paralelo sobre
+la cuenta real — volvió a pujar por él con un importe distinto en su
+siguiente pasada, igual que predice el docstring de `place_bid()`.
+
+**Arreglado**: `clients/futmondo_client.py` — nuevo método `cancel_bid(bid_id)`,
+marcado **100% confirmado**; `POST /1/market/cancelbid` añadido a la sección
+de endpoints confirmados del docstring del módulo y a la tabla de `README.md`
+(que además tenía `cancel_sale` marcado como "solo referencia comunitaria"
+por desactualización — corregido de paso a "captura propia", ver TODO.md #6).
+
+**Sin confirmar todavía**:
+- Qué código de error devuelve si se intenta cancelar una puja que ya no
+  existe (ganada, perdida, o cancelada antes) — no se dio ese caso en la
+  prueba real.
+- `cancel_bid()` no está integrado en ningún job todavía — solo existe como
+  primitiva en el cliente. Usarlo desde `jobs/run_market.py` (p. ej. para la
+  idea de "cancelar la puja peor para pujar la mejor" que motivó esta
+  investigación) requeriría además pasar por `real_pending_bid_amount()` (o
+  equivalente) para obtener el `bid_id` de cada puja abierta, no solo el
+  `player_id` que ya maneja `db.models.get_open_bids()` — y decidir un
+  margen mínimo de mejora antes de cancelar, para no generar thrashing (ver
+  discusión en el hilo que motivó esto).
+
+**Afecta a**: `clients/futmondo_client.py` (`cancel_bid`).
+
+**Dónde**: `clients/futmondo_client.py` (`cancel_bid`), `README.md` (tabla
+de endpoints).
+
+---
+
 ## Ya resuelto (para referencia, no es un pendiente)
 
 **Sesgo de xG por posición en `normalize_pool()`** — arreglado el
