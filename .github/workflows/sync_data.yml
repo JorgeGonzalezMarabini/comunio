@@ -3,7 +3,13 @@ name: sync_data
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 8-23 * * *"  # cada hora, 08:00-23:00 UTC (sin madrugada: ningún consumidor corre 00:00-08:00)
+    # Minuto 6 (no en punto) a propósito: GitHub retrasa los cron
+    # programados EN PUNTO por congestión (es el minuto más solicitado de
+    # toda la plataforma) -- confirmado en real (2026-08-18): este mismo
+    # job, con cron ":00", entraba sistemáticamente ~30 min tarde. Sin
+    # deadline externo (a diferencia de set_lineup/run_market), no importa
+    # el minuto exacto -- solo evitar el pico de las horas en punto.
+    - cron: "6 8-23 * * *"  # cada hora, 08:06-23:06 UTC (sin madrugada: ningún consumidor corre 00:00-08:00)
 
 permissions:
   contents: write

@@ -287,9 +287,10 @@ cadencia de 2h del cron era insuficiente**: un hueco de 2h entre
 ejecuciones podía dejar pasar TODA la ventana entre "ya se sabe quién
 juega" y "el partido ya empezó" sin que el job la viera. Por eso
 `manage_substitutes.yml` pasó de `0 */2 * * 5,6,0,1` (cada 2h) a
-`*/20 10-23 * * 5,6,0,1` (cada 20 min, 10:00-23:00 UTC) — un valor
-conservador mientras se acumulan más casos reales, no uno calibrado con
-varios partidos.
+`6,26,46 10-23 * * 5,6,0,1` (cada 20 min, 10:00-23:00 UTC, en minutos
+:06/:26/:46 en vez de en punto — ver "Delay de GitHub Actions" más abajo)
+— un valor conservador mientras se acumulan más casos reales, no uno
+calibrado con varios partidos.
 
 **TODO sin confirmar todavía**: si 41 min antes es representativo de
 LaLiga en general (un solo dato no basta) — con más casos reales podría
@@ -694,11 +695,12 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
 4. Los 5 workflows (`sync_data` cada hora, `run_market` y `run_sales`
-   2x/día, `set_lineup` viernes 18:00 UTC, `manage_substitutes` cada 2h de
-   viernes a lunes) ya tienen el `schedule:` activado — correrán solos en
-   cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
+   2x/día, `set_lineup` viernes 18:00 UTC, `manage_substitutes` cada 20 min
+   de viernes a lunes) ya tienen el `schedule:` activado — correrán solos
+   en cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
    vuelta al repo al terminar (si no, cada ejecución perdería lo
-   sincronizado en la anterior).
+   sincronizado en la anterior). Ver también "Delay de GitHub Actions y
+   horas críticas" más abajo antes de fijar los horarios definitivos.
 
 **Ya apuntado a la liga real** (2026-08-17: `FUTMONDO_CHAMPIONSHIP_ID`/
 `FUTMONDO_USERTEAM_ID` actualizados en `.env` y GitHub a la liga real; la
@@ -716,6 +718,73 @@ endpoints) — si la liga real usa otra formación, conviene desactivar
 `ENABLE_LINEUP_AUTO_SUBMIT` hasta confirmarlo con una prueba real, o
 revisar `lineup_decisions` a mano un tiempo antes de fiarse del envío
 automático.
+
+## Delay de GitHub Actions y horas críticas
+
+**Hallazgo real (2026-08-18)**: `sync_data.yml`, programado en punto
+(`0 8-23 * * *`), entraba sistemáticamente ~30 min tarde. Es
+comportamiento documentado de GitHub: los eventos `schedule` se retrasan
+en picos de carga, y el minuto en punto de cada hora es el más solicitado
+de toda la plataforma (todo el mundo programa sus cron ahí) — GitHub
+recomienda explícitamente NO usar el minuto `:00`. Por eso `sync_data.yml`
+y `manage_substitutes.yml` ahora usan minutos "raros" (`:06`, `:06/:26/:46`)
+en vez de en punto/en múltiplos de 20 exactos.
+
+Ese cambio es seguro para esos dos jobs porque ninguno tiene un deadline
+externo real — solo necesitan correr "con frecuencia suficiente", no en un
+instante exacto. Los otros 3 jobs sí dependen de una hora límite externa
+real (cierre de mercado, cierre de jornada), así que ahí un delay de ~30
+min sí puede importar. Ranking de criticidad (de más a menos sensible al
+delay):
+
+1. **`set_lineup`** (CRÍTICO) — corre UNA VEZ por semana
+   (`0 18 * * 5`), antes del cierre de jornada. Si el delay lo empuja
+   después del cierre real, la alineación de toda la semana se queda mal
+   fijada y no hay ninguna otra ejecución que lo corrija hasta el viernes
+   siguiente. Sin red de seguridad (a diferencia de `manage_substitutes`,
+   que se repite cada 20 min).
+2. **`run_market`** (ALTO) — 2x/día (`0 8,20 * * *`), pensado para correr
+   antes del cierre real de mercado. Si el delay lo deja correr después del
+   cierre, se pierde ESE ciclo completo de pujas (hasta 12h sin poder
+   pujar) — recuperable, pero con coste real (candidatos buenos que se
+   habrían fichado, perdidos).
+3. **`manage_substitutes`** (MEDIO, mitigado por frecuencia) — el cron a
+   20 min ya está para esto: si UNA pasada llega tarde, la siguiente (20
+   min después) puede seguir cubriendo la ventana. El riesgo no es un
+   fallo puntual sino que el delay ACUMULADO reduzca el margen frente a la
+   ventana de 41 min observada (ver sección "Banquillo/suplentes") — con
+   +10/+15 min de delay por pasada, dos pasadas seguidas con mala suerte
+   podrían acercarse a ese límite. Mitigado (no eliminado) con el cambio de
+   minuto de este mismo apartado.
+4. **`run_sales`** (BAJO) — 2x/día, 1h después de `run_market` a
+   propósito. Un delay de ~30 min en cualquiera de los dos no invierte el
+   orden porque el hueco entre ambos (1h) es mayor que el delay típico
+   observado.
+5. **`sync_data`** (BAJO en sí mismo, pero ver nota) — no tiene deadline
+   propio; solo necesita alimentar a los demás con datos razonablemente
+   frescos.
+
+**Nota aparte, no resuelta por horario** — `run_market`/`run_sales`/
+`set_lineup` asumen en su docstring que `sync_data` "ya corrió antes en el
+cron" ESE mismo ciclo (p. ej. `run_market` a las 8:00 asume que el
+`sync_data` de las 8:00 ya escribió). Como los delays de GitHub son
+independientes por workflow, esto es una carrera, no una garantía —
+`run_market` podría arrancar antes de que `sync_data` termine y trabajar
+con datos de la hora anterior. No es grave en la práctica (`sync_data`
+corre cada hora, así que el dato "viejo" tiene como mucho ~1h) y no se ha
+tocado aquí porque arreglarlo de verdad es un cambio de arquitectura
+(p. ej., que cada job llame a `sync_data.run()` él mismo en vez de confiar
+en el cron), no de horario — se deja anotado para si se decide abordar.
+
+**Pendiente de un dato real para terminar de ajustar `set_lineup` y
+`run_market`**: sus cron (`0 18 * * 5` y `0 8,20 * * *`) llevan desde el
+principio comentados como "ajustar al cierre real de jornada/mercado" sin
+que se haya confirmado nunca esa hora real contra la liga de destino. Sin
+ese dato no se puede calcular un margen de seguridad frente al delay con
+sentido (adelantarlos a ciegas podría, según el caso, alejarlos más del
+momento útil en vez de acercarlos). Mientras no se confirme, cuanto más
+margen se deje antes del cierre real, mejor se absorbe un delay de ~30 min
+como el observado.
 
 ## Estructura
 
