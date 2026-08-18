@@ -14,6 +14,12 @@ debe importar al elegir alineación, o por qué vender jugadores no debe
 dejar una posición sin cobertura) se heredó tal cual de esa fase por
 seguir siendo válido, no por descuido.
 
+## TODOs pendientes
+
+Lista completa y priorizada de los TODOs abiertos en el código (bugs sin
+resolver, asunciones sin confirmar, limitaciones de APIs externas), con qué
+afecta cada uno y dónde está: ver [`TODO.md`](TODO.md).
+
 ## Estado actual
 
 - [x] Captura de endpoints reales de Futmondo — hecha el 2026-08-17 con Chrome DevTools sobre una liga de prueba real ("Liga de prueba bot", modo Social, creada para la propia sesión de captura). **Ojo**: la plantilla de esa liga de prueba resultó ser toda de equipos de Premier League (confirmado el mismo día revisando `players.team` en la BD), no de LaLiga — irrelevante para todo lo que ya usa `league="La_liga"` (Understat, Fotmob) mientras la liga REAL de destino sea LaLiga (confirmado con el usuario), pero explica por qué una prueba en vivo de `manage_substitutes.py` contra esta liga de prueba no encuentra nunca partidos de LaLiga para estos jugadores.
