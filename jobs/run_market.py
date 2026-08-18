@@ -48,7 +48,7 @@ import requests
 import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection, get_bids_risked_today, get_pending_bid_amount, get_player_features
-from engine.bidding_strategy import apply_position_priority, decide_bids_for_market
+from engine.bidding_strategy import apply_position_priority, decide_bids_for_market, dynamic_player_cap
 from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
 from notifier import notify, notify_on_crash
@@ -116,15 +116,24 @@ def run():
     already_risked = get_bids_risked_today()
     pending_committed = get_pending_bid_amount()
 
+    # Tope por jugador dinámico (ver engine.bidding_strategy.
+    # dynamic_player_cap) en vez del antiguo tope fijo de 15M -- combina
+    # valor medio de la plantilla propia (squad_raw), precio medio del
+    # mercado ponderado por score (ranked, sin los boosts de prioridad de
+    # apply_position_priority: ese boost es para ORDENAR candidatos entre
+    # sí, no una señal de "cuánto vale el mercado ahora") y % del
+    # presupuesto disponible.
+    player_cap = dynamic_player_cap(remaining_budget, squad_raw, ranked)
+
     decisions = decide_bids_for_market(
-        prioritized, remaining_budget, already_risked, pending_committed=pending_committed
+        prioritized, remaining_budget, already_risked, pending_committed=pending_committed, player_cap=player_cap
     )
 
     if not decisions:
         notify(
             f"run_market: sin pujas esta ejecución (saldo={remaining_budget}, "
             f"comprometido en pujas pendientes={pending_committed}, ya arriesgado hoy={already_risked}, "
-            f"candidatos evaluados={len(ranked)})."
+            f"candidatos evaluados={len(ranked)}, tope dinámico por jugador={player_cap})."
         )
         return
 
@@ -152,7 +161,7 @@ def run():
                 _persist_bid(conn, decision, "failed", now)
                 failed.append((decision, str(e)))
 
-    summary = [f"run_market: {len(placed)} puja(s) realizada(s)."]
+    summary = [f"run_market: {len(placed)} puja(s) realizada(s). (tope dinámico por jugador: {player_cap})"]
     for d in placed:
         tags = []
         if d.get("position_at_risk"):

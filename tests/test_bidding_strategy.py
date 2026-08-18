@@ -2,6 +2,7 @@ from engine.bidding_strategy import (
     apply_position_priority,
     decide_bid,
     decide_bids_for_market,
+    dynamic_player_cap,
     max_biddable_amount,
 )
 
@@ -13,14 +14,20 @@ def test_max_biddable_amount_respects_all_limits(monkeypatch):
         config,
         "BIDDING_SAFETY_LIMITS",
         {
-            "max_spend_per_player": 15_000_000,
+            "max_spend_per_player_floor": 15_000_000,
             "max_budget_risk_per_matchday_pct": 0.30,
             "min_budget_reserve": 2_000_000,
             "max_premium_over_price_pct": 0.20,
+            "max_pct_of_budget_per_player": 0.20,
         },
     )
     # 20M - 2M reserva = 18M usable; 30% de jornada = 5.4M
     assert max_biddable_amount(20_000_000, already_risked_this_matchday=0) == 5_400_000
+
+
+def test_max_biddable_amount_uses_player_cap_when_lower_than_floor(monkeypatch):
+    """Sin player_cap explícito, cae al suelo fijo (comportamiento del antiguo tope)."""
+    assert max_biddable_amount(1_000_000_000, already_risked_this_matchday=0, player_cap=3_000_000) == 3_000_000
 
 
 def test_max_biddable_amount_subtracts_pending_committed_before_anything_else():
@@ -180,3 +187,71 @@ def test_decide_bids_for_market_respects_max_bids():
     ]
     decisions = decide_bids_for_market(ranked, remaining_budget=20_000_000, max_bids=2)
     assert len(decisions) == 2
+
+
+def test_dynamic_player_cap_never_goes_below_floor():
+    """Plantilla y mercado vacíos (o muy baratos) -> cae al suelo de seguridad, nunca a 0."""
+    cap = dynamic_player_cap(remaining_budget=1_000_000, squad=[], market_candidates=[])
+    assert cap == 15_000_000
+
+
+def test_dynamic_player_cap_grows_with_squad_and_market_value():
+    """
+    Regresión del bug real (2026-08-18): con el tope fijo de 15M, un
+    jugador de 20M+ quedaba excluido de pujas para siempre sin importar
+    presupuesto ni score. Con plantilla/mercado caros y presupuesto alto,
+    el tope dinámico debe superar el antiguo fijo de 15M.
+    """
+    squad = [{"price": 20_000_000} for _ in range(5)]
+    market = [{"price": 25_000_000, "score": 0.8} for _ in range(5)]
+    cap = dynamic_player_cap(remaining_budget=100_000_000, squad=squad, market_candidates=market)
+    assert cap > 15_000_000
+
+
+def test_dynamic_player_cap_market_component_weights_by_score_not_plain_price():
+    """
+    Un outlier carísimo con score bajo (mal rendimiento, a la venta por
+    casualidad) no debe desviar el tope tanto como si pesara lo mismo que
+    los candidatos realmente atractivos (score alto).
+    """
+    market_with_outlier = [
+        {"price": 2_000_000, "score": 0.8},
+        {"price": 2_000_000, "score": 0.8},
+        {"price": 100_000_000, "score": 0.01},  # carísimo pero casi sin score
+    ]
+    market_without_outlier = [
+        {"price": 2_000_000, "score": 0.8},
+        {"price": 2_000_000, "score": 0.8},
+    ]
+    squad = [{"price": 2_000_000} for _ in range(3)]
+    cap_with_outlier = dynamic_player_cap(remaining_budget=10_000_000, squad=squad, market_candidates=market_with_outlier)
+    cap_without_outlier = dynamic_player_cap(
+        remaining_budget=10_000_000, squad=squad, market_candidates=market_without_outlier
+    )
+    # el outlier apenas debe mover el tope (pesa ~0.01 frente a 0.8+0.8)
+    assert cap_with_outlier - cap_without_outlier < 2_000_000
+
+
+def test_dynamic_player_cap_budget_component_scales_with_remaining_budget():
+    squad = [{"price": 1_000_000}]
+    market = [{"price": 1_000_000, "score": 0.1}]
+    cap_low_budget = dynamic_player_cap(remaining_budget=5_000_000, squad=squad, market_candidates=market)
+    cap_high_budget = dynamic_player_cap(remaining_budget=500_000_000, squad=squad, market_candidates=market)
+    assert cap_high_budget > cap_low_budget
+
+
+def test_decide_bid_uses_dynamic_player_cap_to_allow_bid_above_old_fixed_cap():
+    """
+    El caso que el tope fijo de 15M bloqueaba para siempre: un jugador de
+    20M con score alto, presupuesto de sobra -> con un player_cap dinámico
+    por encima de 20M, decide_bid() SÍ debe pujar.
+    """
+    player = {"id": "1", "score": 0.9, "price": 20_000_000}
+    decision = decide_bid(
+        player,
+        remaining_budget=200_000_000,
+        already_risked_this_matchday=0,
+        player_cap=30_000_000,
+    )
+    assert decision is not None
+    assert decision["amount"] >= player["price"]

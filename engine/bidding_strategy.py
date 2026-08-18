@@ -16,13 +16,102 @@ class BudgetExceededError(Exception):
     """Una decisión intentó saltarse un límite de seguridad configurado."""
 
 
-def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int, pending_committed: int = 0) -> int:
+def _weighted_average(values_weights: list[tuple[float, float]]) -> float:
+    """
+    Media ponderada de `[(valor, peso), ...]`. Si la suma de pesos es 0
+    (todos los pesos son 0, p. ej. ningún candidato con score positivo) cae
+    a la media simple en vez de dividir por cero. Lista vacía -> 0.0.
+    """
+    if not values_weights:
+        return 0.0
+    weight_sum = sum(w for _, w in values_weights)
+    if weight_sum <= 0:
+        return sum(v for v, _ in values_weights) / len(values_weights)
+    return sum(v * w for v, w in values_weights) / weight_sum
+
+
+def dynamic_player_cap(
+    remaining_budget: int,
+    squad: list[dict],
+    market_candidates: list[dict],
+    weights: dict = None,
+) -> int:
+    """
+    Tope dinámico por jugador — sustituye al antiguo tope FIJO de 15M
+    (`config.BIDDING_SAFETY_LIMITS["max_spend_per_player_floor"]`, que
+    ahora es solo el suelo, ver docstring en config.py). Un número fijo en
+    euros se queda obsoleto con el tiempo: el valor de los jugadores en
+    Futmondo sube con el rendimiento a lo largo de la temporada, así que un
+    tope fijo bloquea cada vez a más jugadores (los mejores, normalmente)
+    aunque el presupuesto disponible también haya crecido — `decide_bid()`
+    nunca puja por debajo del precio real, así que un jugador con precio
+    por encima del tope queda excluido de pujas para siempre, sin importar
+    su score.
+
+    Combina tres señales (`config.BIDDING_DYNAMIC_CAP_WEIGHTS`, deben sumar
+    1.0), cada una capturando una noción distinta de "qué es razonable
+    pujar por UN jugador ahora mismo":
+
+      - squad_value: precio medio de TU plantilla actual (`squad`, espera
+        "price" por jugador) — escala con el crecimiento real de tu
+        equipo; estable porque no depende de qué haya a la venta hoy.
+      - market_value: precio medio de `market_candidates` PONDERADO por
+        `score` (no precio simple, espera "price" y "score" por
+        candidato) — sigue la inflación general del mercado sin dejar que
+        un jugador carísimo con score bajo (mal rendimiento, lesión, a la
+        venta por casualidad un día concreto) descalibre el tope; los
+        candidatos realmente atractivos (score alto) pesan más en la
+        media. Scores negativos (penalización por lesión) se tratan como 0
+        de peso, no restan.
+      - budget_pct: `remaining_budget * max_pct_of_budget_per_player` — %
+        del saldo disponible ahora, ligado a lo que de verdad se puede
+        permitir hoy.
+
+    El resultado nunca baja del suelo de seguridad
+    (`max_spend_per_player_floor`) — protege casos degenerados (plantilla
+    o mercado vacíos/muy baratos, típico al empezar la temporada) sin
+    abrir una vía para gastar de más: `max_biddable_amount()` sigue
+    aplicando DESPUÉS los topes de jornada y saldo usable, que no cambian.
+    """
+    weights = weights or config.BIDDING_DYNAMIC_CAP_WEIGHTS
+    limits = config.BIDDING_SAFETY_LIMITS
+
+    squad_prices = [p["price"] for p in squad if p.get("price")]
+    avg_squad_value = sum(squad_prices) / len(squad_prices) if squad_prices else 0.0
+
+    market_priced = [
+        (p["price"], max(p.get("score", 0.0), 0.0)) for p in market_candidates if p.get("price")
+    ]
+    avg_market_value = _weighted_average(market_priced)
+
+    budget_component = max(0, remaining_budget) * limits["max_pct_of_budget_per_player"]
+
+    blended = (
+        weights["squad_value"] * avg_squad_value
+        + weights["market_value"] * avg_market_value
+        + weights["budget_pct"] * budget_component
+    )
+    return max(limits["max_spend_per_player_floor"], int(blended))
+
+
+def max_biddable_amount(
+    remaining_budget: int,
+    already_risked_this_matchday: int,
+    pending_committed: int = 0,
+    player_cap: int = None,
+) -> int:
     """
     Calcula el máximo que se puede pujar ahora mismo respetando:
-      - el tope absoluto por jugador
+      - el tope por jugador (dinámico, ver dynamic_player_cap() — o su
+        suelo fijo si no se pasa `player_cap`)
       - el % máximo de presupuesto arriesgable en la jornada
       - la reserva mínima que nunca se toca
       - el dinero YA comprometido en ofertas pendientes sin resolver
+
+    `player_cap`: tope por jugador ya calculado (ver dynamic_player_cap()).
+    Si no se pasa, cae a `config.BIDDING_SAFETY_LIMITS
+    ["max_spend_per_player_floor"]` — mismo comportamiento que el antiguo
+    tope fijo, para no romper llamadas/tests que no calculan el dinámico.
 
     `pending_committed`: aproximación a TODAS tus pujas de compra todavía
     pendientes (sin resolver), sea de hoy o de días anteriores — ver
@@ -40,13 +129,15 @@ def max_biddable_amount(remaining_budget: int, already_risked_this_matchday: int
     podría comprometer más de lo que el saldo real soporta.
     """
     limits = config.BIDDING_SAFETY_LIMITS
+    if player_cap is None:
+        player_cap = limits["max_spend_per_player_floor"]
 
     truly_available = max(0, remaining_budget - pending_committed)
     usable_budget = max(0, truly_available - limits["min_budget_reserve"])
     matchday_cap = int(usable_budget * limits["max_budget_risk_per_matchday_pct"])
     matchday_remaining = max(0, matchday_cap - already_risked_this_matchday)
 
-    return min(limits["max_spend_per_player"], matchday_remaining, usable_budget)
+    return min(player_cap, matchday_remaining, usable_budget)
 
 
 def apply_position_priority(
@@ -129,6 +220,7 @@ def decide_bid(
     already_risked_this_matchday: int,
     min_score_threshold: float = None,
     pending_committed: int = 0,
+    player_cap: int = None,
 ) -> dict | None:
     """
     Decide si pujar por `player` (debe incluir "id", "score" de
@@ -152,6 +244,9 @@ def decide_bid(
     en pujas pendientes sin resolver (protección defensiva de saldo, ver
     README).
 
+    `player_cap`: ver max_biddable_amount()/dynamic_player_cap() — tope
+    dinámico por jugador ya calculado para esta pasada del mercado.
+
     Devuelve None si no se debe pujar, o un dict:
         {"player_id": ..., "amount": ..., "score": ..., "reason": "..."}
     listo para persistir en la tabla `bids` (auditoría).
@@ -171,7 +266,7 @@ def decide_bid(
     premium_pct = max(0.0, score) * config.BIDDING_SAFETY_LIMITS["max_premium_over_price_pct"]
     desired_amount = int(price * (1 + premium_pct))
 
-    cap = max_biddable_amount(remaining_budget, already_risked_this_matchday, pending_committed)
+    cap = max_biddable_amount(remaining_budget, already_risked_this_matchday, pending_committed, player_cap=player_cap)
     if cap <= 0:
         return None
 
@@ -221,6 +316,7 @@ def decide_bids_for_market(
     min_score_threshold: float = None,
     max_bids: int = None,
     pending_committed: int = 0,
+    player_cap: int = None,
 ) -> list[dict]:
     """
     Recorre `ranked_candidates` (ya ordenados por score descendente, ver
@@ -241,13 +337,18 @@ def decide_bids_for_market(
     decide_bid() por si Futmondo tampoco descuenta el saldo hasta que una
     puja se resuelve (razonable asumirlo, sin confirmar la regla exacta de
     penalización por saldo negativo — ver README).
+
+    `player_cap`: tope dinámico por jugador ya calculado para esta pasada
+    (ver dynamic_player_cap()) — se pasa tal cual a cada decide_bid().
     """
     decisions = []
     risked = already_risked_this_matchday
     for player in ranked_candidates:
         if max_bids is not None and len(decisions) >= max_bids:
             break
-        decision = decide_bid(player, remaining_budget, risked, min_score_threshold, pending_committed=pending_committed)
+        decision = decide_bid(
+            player, remaining_budget, risked, min_score_threshold, pending_committed=pending_committed, player_cap=player_cap
+        )
         if decision is None:
             continue
         decisions.append(decision)

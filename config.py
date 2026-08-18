@@ -132,7 +132,19 @@ LINEUP_EVALUATOR_WEIGHTS = {
 # --- Límites de seguridad de pujas (engine/bidding_strategy.py) ---
 # Ninguno de estos límites se debe saltar nunca, pase lo que pase el modelo.
 BIDDING_SAFETY_LIMITS = {
-    "max_spend_per_player": 15_000_000,      # tope absoluto por jugador
+    # SUELO del tope dinámico por jugador (ver
+    # engine.bidding_strategy.dynamic_player_cap) -- ya NO es un tope fijo:
+    # un número absoluto en euros se queda obsoleto con el tiempo porque el
+    # valor de los jugadores en Futmondo sube con el rendimiento a lo largo
+    # de la temporada. Detectado en datos reales (2026-08-18): con el tope
+    # fijo de 15M, una puja quedó capada exactamente en 15.000.000 y CUALQUIER
+    # jugador con precio > 15M queda excluido de pujas para siempre (decide_bid
+    # nunca puja por debajo del precio real) sin importar score ni presupuesto
+    # -- precio medio de mercado visto ~9.8M, máximo visto 47.3M, ya fuera de
+    # alcance. Este valor se mantiene como SUELO (nunca techo) para casos
+    # degenerados: plantilla/mercado vacíos o muy baratos al empezar la
+    # temporada.
+    "max_spend_per_player_floor": 15_000_000,
     "max_budget_risk_per_matchday_pct": 0.30,  # % máx. del presupuesto restante jugable en una jornada
     "min_budget_reserve": 2_000_000,          # colchón que nunca se toca
     # Cuánto por encima del precio/VM real del jugador (Futmondo) se está
@@ -141,6 +153,20 @@ BIDDING_SAFETY_LIMITS = {
     # jugador con score 1.0 se puja hasta un +20% sobre su VM; uno con
     # score 0 no se puja por encima del VM.
     "max_premium_over_price_pct": 0.20,
+    # Componente "presupuesto" del tope dinámico: % del saldo usable que se
+    # considera razonable poner en UN solo jugador (ver dynamic_player_cap).
+    "max_pct_of_budget_per_player": 0.20,
+}
+
+# Pesos del tope dinámico por jugador (engine.bidding_strategy.
+# dynamic_player_cap) -- sustituye al antiguo tope fijo de 15M combinando
+# tres señales que sí escalan con el tiempo, cada una capturando una noción
+# distinta de "qué es razonable pujar por UN jugador ahora mismo". Deben
+# sumar 1.0.
+BIDDING_DYNAMIC_CAP_WEIGHTS = {
+    "squad_value": 0.40,   # precio medio de TU plantilla -- estable, no depende de qué haya a la venta hoy
+    "market_value": 0.35,  # precio medio del mercado ponderado por score -- inflación general sin dejarse desviar por un outlier puntual
+    "budget_pct": 0.25,    # % del saldo disponible ahora -- ligado a lo que de verdad puedes permitirte hoy
 }
 
 # Score mínimo (ver engine/evaluator.score_player) para considerar pujar por
