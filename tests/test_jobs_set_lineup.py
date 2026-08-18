@@ -241,6 +241,116 @@ def test_set_lineup_picks_and_reports_substitutes(tmp_db, monkeypatch):
     assert "Suplentes: MED: J3010, DEL: J3020, POR: J3001, DEF: J3002" in captured[0]
 
 
+def test_set_lineup_cascades_when_a_starter_leaves_the_squad(tmp_db, monkeypatch):
+    """
+    Pregunta real del usuario (2026-08-18): si un titular cae por
+    cláusula, ¿el suplente que sube a titular deja su propio hueco de
+    banquillo sin cubrir? No hace falta código especial para esto --
+    pick_lineup()/pick_substitutes() se recalculan desde cero contra la
+    plantilla ACTUAL en cada pasada (nunca recuerdan la decisión
+    anterior), así que la cascada completa (titular perdido -> el mejor
+    suplente sube a titular -> el siguiente mejor disponible se convierte
+    en el nuevo suplente) sale sola. Este test la ejercita de punta a
+    punta con dos pasadas seguidas, simulando el titular perdido entre
+    medias -- igual que haría el cron repetido de set_lineup.yml.
+    """
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", False)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+        # 2 DEF de más, mismo average_points que los titulares (2.0) pero
+        # peor "trend" (last_points más bajo) para que evaluate_players()
+        # los deje claramente por detrás de los 4 titulares sin dejar de
+        # diferenciarlos entre sí -- 2001 (trend menos negativo) será el
+        # suplente en la 1a pasada, y el titular promovido en la 2a; 2002
+        # se queda sin usar hasta que hace falta, ver 2a pasada.
+        for pid, last_points in [("2001", 1.9), ("2002", 1.0)]:
+            conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", (pid, f"J{pid}", "Equipo", "DEF", NOW))
+            conn.execute(
+                "INSERT INTO futmondo_snapshots (player_id, price, points, last_points, average_points, on_market, status, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
+                (pid, 500_000, 5, last_points, 2.0, 0, "", NOW),
+            )
+
+    current_roster = squad_ids + ["2001", "2002"]
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in current_roster]}
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()  # pasada 1: plantilla completa, sin clausulazo todavía
+
+    assert "DEF: J2001" in captured[0]  # el mejor de los dos DEF de más ya es el suplente
+    assert "J2002" not in captured[0]  # el otro se queda sin uso, de sobra
+
+    # Clausulazo: un titular de DEF (1002) desaparece de la plantilla.
+    current_roster = [pid for pid in current_roster if pid != "1002"]
+    captured.clear()
+
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()  # pasada 2: el cron repetido ya ve el clausulazo en get_roster()
+
+    with get_connection() as conn:
+        rows = conn.execute("SELECT player_ids FROM lineup_decisions ORDER BY id").fetchall()
+    second_starters = json.loads(rows[-1]["player_ids"])
+    assert "1002" not in second_starters  # el que se fue con la cláusula, obviamente, ya no juega
+    assert "2001" in second_starters  # el que era suplente ahora es titular -- sube solo
+    assert "DEF: J2002" in captured[0]  # y el que quedaba "de sobra" ahora es el nuevo suplente
+
+
+def test_set_lineup_replaces_substitute_when_the_substitute_itself_leaves(tmp_db, monkeypatch):
+    """
+    Segunda mitad de la misma pregunta (2026-08-18): si la cláusula se
+    paga sobre un SUPLENTE (no un titular), el once no cambia, pero el
+    hueco de banquillo sí debe cubrirse con el siguiente disponible --
+    igual que arriba, sale solo de recalcular pick_substitutes() desde
+    cero cada pasada, sin código especial para distinguir "se fue un
+    titular" de "se fue un suplente".
+    """
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", False)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+        for pid, last_points in [("2001", 1.9), ("2002", 1.0)]:
+            conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", (pid, f"J{pid}", "Equipo", "DEF", NOW))
+            conn.execute(
+                "INSERT INTO futmondo_snapshots (player_id, price, points, last_points, average_points, on_market, status, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
+                (pid, 500_000, 5, last_points, 2.0, 0, "", NOW),
+            )
+
+    current_roster = squad_ids + ["2001", "2002"]
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in current_roster]}
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()  # pasada 1: J2001 es el suplente de DEF
+
+    assert "DEF: J2001" in captured[0]
+
+    # Clausulazo sobre el SUPLENTE (2001), no sobre un titular.
+    current_roster = [pid for pid in current_roster if pid != "2001"]
+    captured.clear()
+
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}):
+        set_lineup.run()  # pasada 2
+
+    with get_connection() as conn:
+        rows = conn.execute("SELECT player_ids FROM lineup_decisions ORDER BY id").fetchall()
+    second_starters = json.loads(rows[-1]["player_ids"])
+    assert set(second_starters) == {"1001", "1002", "1003", "1004", "1005", "1010", "1011", "1012", "1013", "1020", "1021"}  # el once NO cambia
+    assert "DEF: J2002" in captured[0]  # el hueco de banquillo se cubre con el siguiente disponible
+
+
 def test_set_lineup_submits_bench_changes_with_isbench_true(tmp_db, monkeypatch):
     """Con ENABLE_LINEUP_AUTO_SUBMIT=True, los suplentes se mandan con isBench=true y el slot fijo confirmado."""
     monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", True)
