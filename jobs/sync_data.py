@@ -101,9 +101,11 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
     player_id = str(player["id"])
     position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
     average = player.get("average") or {}
-    # "fitness" parece ser la puntuación de los últimos partidos, pero el
-    # orden cronológico no se ha podido confirmar (liga de prueba en
-    # pretemporada, siempre vacío) — ver TODO en clients/futmondo_client.py.
+    # "fitness" parece ser la puntuación de los últimos partidos. Ya no
+    # viene siempre vacío (jornada 1 en curso, confirmado 2026-08-18), pero
+    # con longitud máxima 1 vista hasta ahora el orden cronológico sigue
+    # sin poder confirmarse — ver TODO.md #7 / docstring en
+    # clients/futmondo_client.py.
     fitness = average.get("fitness") or []
     last_points = fitness[-1] if fitness else None
 

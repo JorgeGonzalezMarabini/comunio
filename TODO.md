@@ -311,12 +311,29 @@ escrituras.
 
 **Qué pasa**: `fitness` (array usado para calcular `last_points`) parece ser
 la puntuación de los últimos partidos, pero no se ha podido confirmar si el
-más reciente va al final o al principio del array — en la liga de prueba
-(pretemporada) siempre viene vacío.
+más reciente va al final o al principio del array.
+
+**Investigado con una llamada de solo lectura contra la cuenta real**
+(2026-08-18, `get_roster()` + `get_market()`): la temporada real ya ha
+empezado (jornada 1 en curso) — `fitness` ya NO viene siempre vacío como
+cuando se escribió este TODO (liga de prueba en pretemporada). De 10
+jugadores de la plantilla propia y 24 del mercado, todos los que ya
+disputaron su partido de jornada 1 traen `fitness` de **longitud 1** (p.
+ej. `Tenaglia` con `matches: 1, fitness: [16]`), y los que aún no han
+jugado esa jornada (algunos partidos de la 1ª jornada todavía no se habían
+disputado en el momento de la consulta) traen `matches: 0, fitness: []`.
+
+**Sigue sin poder confirmarse**: con longitud máxima 1 en todos los casos
+vistos todavía no hay forma de saber si un futuro `fitness[1]` se
+añadiría al final (más reciente al final) o se insertaría al principio
+(desplazando el resto). Hace falta repetir esta misma consulta cuando ya
+se haya jugado la jornada 2 y comparar qué elemento del array nuevo
+coincide con el `points` de la jornada 1 ya conocido.
 
 **Por qué importa**: alimenta la feature de "tendencia reciente" del
 evaluador. Si el orden asumido es el contrario del real, la señal de
-tendencia estaría invertida sin que nadie lo note hasta la temporada regular.
+tendencia estaría invertida sin que nadie lo note hasta que haya
+suficientes jornadas para que la tendencia importe.
 
 **Afecta a**: `jobs/sync_data.py` (`_upsert_player_and_snapshot`,
 `last_points`) → `engine/evaluator.py` (feature "trend").
