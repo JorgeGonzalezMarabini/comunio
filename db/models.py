@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS external_stats (
     yellow_cards    INTEGER,
     red_cards       INTEGER,
     understat_position TEXT,                 -- código Understat, ej. "F M S"
+    team_games      INTEGER,                 -- partidos YA JUGADOS por el equipo esta temporada
+                                              -- (len(teams[id]["history"]) de get_league_data(), NO
+                                              -- "games" del jugador -- ver TODO.md #12), NULL si el
+                                              -- equipo aún no tiene ese dato en Understat o si esta
+                                              -- fila viene del fallback de temporada anterior (games/
+                                              -- minutes_played de esa fila ya son de temporada
+                                              -- completa, mezclarlos con el team_games de la
+                                              -- temporada actual daría un ratio sin sentido)
     source          TEXT NOT NULL DEFAULT 'understat',
     recorded_at     TEXT NOT NULL
 );
@@ -173,9 +181,23 @@ def get_connection():
         conn.close()
 
 
+def _ensure_column(conn, table: str, column: str, coltype: str) -> None:
+    """
+    Migración mínima para una columna nueva en una tabla que `CREATE TABLE
+    IF NOT EXISTS` no toca si la tabla ya existía (caso real: `db/
+    futmondo.db` está versionado en el repo con datos ya acumulados, ver
+    docstring del módulo). Sin esto, añadir una columna al esquema de
+    arriba no la crearía en la BD real, solo en una BD nueva desde cero.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db():
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "external_stats", "team_games", "INTEGER")
 
 
 # Última fila de futmondo_snapshots/external_stats por jugador (usa
@@ -193,7 +215,7 @@ SELECT
     p.id, p.name, p.team, p.position,
     s.price, s.buy_price, s.points, s.last_points, s.average_points,
     s.on_market, s.status,
-    e.xg, e.xa, e.minutes_played, e.games, e.non_penalty_goals, e.assists, e.understat_position
+    e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.non_penalty_goals, e.assists, e.understat_position
 FROM players p
 LEFT JOIN latest_snapshot s ON s.player_id = p.id AND s.rn = 1
 LEFT JOIN latest_external e ON e.player_id = p.id AND e.rn = 1

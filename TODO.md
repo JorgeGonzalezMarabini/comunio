@@ -418,20 +418,54 @@ temporada real.
 
 ---
 
-## 12. `minutes_played_ratio` no distingue "poco jugado en total" de "poco jugado por partido"
+## 12. ~~`minutes_played_ratio` no distingue "poco jugado en total" de "poco jugado por partido"~~ (arreglado, 2026-08-18)
 
-**Qué pasa**: la feature actual mide minutos jugados ÷ (partidos que sí jugó
-× 90), no minutos ÷ (partidos totales del equipo × 90). Un jugador con
-varias lesiones pero 100% de minutos en los partidos que sí disputó sale con
-ratio alto aunque en total haya jugado poco.
+**Qué pasaba**: la feature medía minutos jugados ÷ (partidos que sí jugó ×
+90), no minutos ÷ (partidos totales del equipo × 90). Un jugador con varias
+lesiones pero 100% de minutos en los partidos que sí disputó salía con ratio
+alto aunque en total hubiera jugado poco.
 
-**Por qué importa**: refinamiento de una definición de feature, bajo impacto
-inmediato. Arreglarlo requeriría guardar el total de partidos del equipo
-(disponible en `laliga_stats_client.get_league_data()`).
+**Investigado con una llamada de solo lectura a Understat** (2026-08-18,
+`get_league_data()` real, jornada 1 de LaLiga en curso): confirmado que
+`teams[id]["history"]` trae solo partidos YA DISPUTADOS por ese equipo, con
+resultado real (`result`/`scored`/`missed`, ej. Sevilla con 1 entrada tras
+ganar su primer partido) — `len(history)` es exactamente "partidos jugados
+por el equipo esta temporada", el dato que le faltaba a la feature.
 
-**Afecta a**: `engine/evaluator.py` (`normalize_pool`).
+**Arreglado**:
+- `db/models.py`: nueva columna `external_stats.team_games` (con migración
+  `_ensure_column()` en `init_db()`, necesaria porque `db/futmondo.db` está
+  versionado en el repo con datos ya acumulados — `CREATE TABLE IF NOT
+  EXISTS` no la habría añadido sola). `get_player_features()` la incluye.
+- `jobs/sync_data.py`: nueva `_team_games_by_title()` (a partir de
+  `league_data["teams"]`, ANTES del merge de fallback). Se guarda solo si
+  la fila es de la temporada ACTUAL — si viene del fallback a temporada
+  anterior (`get_league_data_with_fallback()`), se guarda `NULL`: mezclar
+  `minutes_played`/`games` de una temporada completa distinta con el
+  `team_games` (todavía bajo) de la actual daría un ratio sin sentido.
+- `engine/evaluator.py`: `normalize_pool()` usa
+  `minutes_played / (team_games * 90)` cuando `team_games` está disponible;
+  si no (equipo sin `history` aún en Understat, o fila de fallback), cae de
+  vuelta a la aproximación anterior (`minutes_played / (games * 90)`).
 
-**Dónde**: `engine/evaluator.py:129,115`.
+**Verificado con tests**: `tests/test_evaluator.py` (caso explícito de un
+jugador con lesiones recurrentes que ya no sale con ratio máximo frente a un
+titular fijo, y el fallback sin `team_games`), `tests/test_jobs_sync_data.py`
+(`team_games` sale de `history` del equipo, no de los partidos del jugador;
+`NULL` en filas de fallback a temporada anterior) y `tests/test_db_models.py`
+(columna nueva en las features, y migración sobre un esquema "viejo" sin
+romper filas existentes). Migración aplicada también contra `db/futmondo.db`
+real (348 filas de `external_stats` intactas, columna nueva en `NULL` hasta
+el próximo sync).
+
+**Afecta a**: `engine/evaluator.py` (`normalize_pool`), `jobs/sync_data.py`,
+`db/models.py`.
+
+**Dónde**: `engine/evaluator.py` (`normalize_pool`), `jobs/sync_data.py`
+(`_team_games_by_title`, `_upsert_external_stats`), `db/models.py`
+(`_ensure_column`, `external_stats.team_games`),
+`clients/laliga_stats_client.py:75-76` (`get_league_data`, docstring de
+`history`).
 
 ---
 

@@ -1,5 +1,7 @@
+import sqlite3
 from datetime import datetime, timezone
 
+import config
 from db.models import (
     get_bids_risked_today,
     get_connection,
@@ -9,6 +11,7 @@ from db.models import (
     get_player_features,
     get_real_lineup_check,
     get_won_bid_prices,
+    init_db,
     save_real_lineup_check,
     update_bid_status,
     update_sale_status,
@@ -39,6 +42,59 @@ def test_get_player_features_joins_latest_snapshot_and_external_stats(tmp_db):
     assert features[0]["price"] == 1_200_000  # el snapshot más reciente, no el primero
     assert features[0]["on_market"] == 1
     assert features[0]["xg"] == 5.0
+
+
+def test_get_player_features_includes_team_games(tmp_db):
+    """team_games (TODO.md #12) debe salir en las features igual que el resto de columnas de external_stats."""
+    with get_connection() as conn:
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", ("1", "Jugador", "Equipo", "DEF", NOW))
+        conn.execute(
+            "INSERT INTO external_stats (player_id, season, minutes_played, games, team_games, recorded_at) VALUES (?,?,?,?,?,?)",
+            ("1", "2025", 270, 3, 5, NOW),
+        )
+
+    features = get_player_features()
+    assert features[0]["team_games"] == 5
+
+
+def test_init_db_migrates_existing_db_missing_team_games_column(tmp_path, monkeypatch):
+    """
+    Regresión: `db/futmondo.db` está versionado en el repo con datos ya
+    acumulados de antes de que existiera `team_games` -- `CREATE TABLE IF
+    NOT EXISTS` por sí solo NO añade la columna a una tabla que ya existía,
+    así que init_db() necesita una migración explícita (`_ensure_column`).
+    """
+    db_path = tmp_path / "old.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_path))
+
+    # Esquema "viejo", sin team_games, con una fila ya guardada.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE external_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id TEXT NOT NULL,
+            season TEXT NOT NULL,
+            games INTEGER,
+            minutes_played INTEGER,
+            source TEXT NOT NULL DEFAULT 'understat',
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO external_stats (player_id, season, games, minutes_played, recorded_at) VALUES (?,?,?,?,?)",
+        ("1", "2025", 5, 450, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+    init_db()  # no debe reventar, y debe dejar la columna nueva usable
+
+    with get_connection() as db_conn:
+        db_conn.execute("INSERT INTO external_stats (player_id, season, team_games, recorded_at) VALUES (?,?,?,?)", ("2", "2026", 5, NOW))
+        rows = {r["player_id"]: r["team_games"] for r in db_conn.execute("SELECT player_id, team_games FROM external_stats")}
+    assert rows == {"1": None, "2": 5}  # la fila anterior a la migración sigue ahí, con team_games NULL
 
 
 def test_get_player_features_only_on_market_filter(tmp_db):

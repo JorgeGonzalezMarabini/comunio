@@ -91,7 +91,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     """
     Convierte una lista de jugadores con columnas crudas (la forma que
     devuelve `db.models.get_player_features()`: price, points, last_points,
-    average_points, status, xg, minutes_played, games, position...) en la
+    average_points, status, xg, minutes_played, games, team_games, position...) en la
     forma que espera `score_player`, normalizando cada feature 0..1
     **dentro de su propio grupo de posición** (POR/DEF/MED/DEL) — el score
     resultante es comparable entre los jugadores pasados en la misma
@@ -121,15 +121,22 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         ahora mismo), sin necesitar consultar el histórico completo.
       - xg: xG por 90 minutos (xg / minutes_played * 90). Comparar xG total
         penalizaría a quien ha jugado menos minutos sin ser peor jugador.
-      - minutes_played_ratio: minutes_played / (games * 90). Mide qué
-        fracción de cada partido en que apareció jugó completo (titular vs
-        suplente de pocos minutos), NO qué fracción de los partidos totales
-        de su equipo — un jugador con 3 lesiones y 100% de minutos en los
-        partidos que sí jugó saldría con ratio alto pese a haber jugado
-        poco en total. TODO: si hace falta distinguir esto, habría que
-        guardar el nº total de partidos de cada equipo (disponible en
-        `laliga_stats_client.get_league_data()["teams"][id]["history"]`) y
-        usar minutes_played / (partidos_del_equipo * 90).
+      - minutes_played_ratio: minutes_played / (team_games * 90) cuando se
+        conoce `team_games` (partidos YA JUGADOS por el equipo esta
+        temporada, ver `jobs/sync_data._team_games_by_title()` — resuelve
+        TODO.md #12, confirmado 2026-08-18 que
+        `laliga_stats_client.get_league_data()["teams"][id]["history"]` es
+        exactamente eso). Así sí distingue "poco jugado en total" (varias
+        lesiones) de "poco jugado por partido" (suplente de pocos
+        minutos): un jugador con 3 lesiones y 100% de minutos en los
+        partidos que sí jugó ya NO sale con ratio alto, porque se divide
+        entre los partidos del EQUIPO, no solo los que él disputó.
+        `team_games` viene `None` (fallback a minutes_played / (games *
+        90), la aproximación anterior — misma escala solo cuando `games`
+        es de la misma temporada que `minutes_played`) si Understat
+        todavía no publica el `history` del equipo para la temporada
+        actual, o si la fila es del fallback a temporada anterior (ver
+        `jobs/sync_data.py`).
     """
     n = len(raw_players)
     points_per_price = [0.0] * n
@@ -149,8 +156,12 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         xg = p.get("xg") or 0
         xg90[i] = xg / minutes * 90 if minutes > 0 else 0
 
-        games = p.get("games") or 0
-        minutes_ratio[i] = minutes / (games * 90) if games > 0 else 0
+        team_games = p.get("team_games") or 0
+        if team_games > 0:
+            minutes_ratio[i] = minutes / (team_games * 90)
+        else:
+            games = p.get("games") or 0
+            minutes_ratio[i] = minutes / (games * 90) if games > 0 else 0
 
     groups_idx: dict = {}
     for i, p in enumerate(raw_players):

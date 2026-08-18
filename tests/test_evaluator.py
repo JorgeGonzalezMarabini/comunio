@@ -81,6 +81,43 @@ def test_normalize_pool_normalizes_xg_within_position_group_not_whole_pool():
     assert by_id["def_flojo"]["xg"] == 0.0
 
 
+def test_normalize_pool_minutes_ratio_uses_team_games_over_player_games_when_available():
+    """
+    Regresión de TODO.md #12: sin `team_games`, minutes_played_ratio se
+    basaba en `minutes_played / (games * 90)` -- "games" es cuántos
+    partidos jugó ÉL, no los del equipo, así que un jugador con varias
+    lesiones pero 100% de minutos en los partidos que sí disputó salía con
+    ratio máximo. Con `team_games` (partidos YA JUGADOS por su equipo esta
+    temporada, ver jobs/sync_data._team_games_by_title()) el mismo jugador
+    debe salir con ratio más bajo que un compañero de posición que sí jugó
+    todos los partidos del equipo.
+    """
+    raw = [
+        # Se perdió 2 de los 5 partidos del equipo (lesión), pero jugó
+        # completos los 3 que sí disputó.
+        {"id": "lesionado_recurrente", "position": "DEL", "price": 1_000_000, "average_points": 5.0,
+         "minutes_played": 270, "games": 3, "team_games": 5},
+        # Titular indiscutible: jugó completos los 5 partidos del equipo.
+        {"id": "titular_fijo", "position": "DEL", "price": 1_000_000, "average_points": 5.0,
+         "minutes_played": 450, "games": 5, "team_games": 5},
+    ]
+    normalized = normalize_pool(raw)
+    by_id = {p["id"]: p for p in normalized}
+
+    # Sin el arreglo, ambos habrían normalizado igual (100% de minutos en
+    # sus partidos jugados); con team_games, el que se perdió partidos por
+    # lesión queda claramente por debajo del titular fijo.
+    assert by_id["titular_fijo"]["minutes_played_ratio"] == 1.0
+    assert by_id["lesionado_recurrente"]["minutes_played_ratio"] == 0.0
+
+
+def test_normalize_pool_minutes_ratio_falls_back_to_player_games_without_team_games():
+    """Sin `team_games` (Understat aún no lo publica, o fila de fallback a temporada anterior), se mantiene la aproximación anterior."""
+    raw = [{"id": "a", "price": 1_000_000, "average_points": 5.0, "minutes_played": 450, "games": 5}]
+    normalized = normalize_pool(raw)
+    assert normalized[0]["minutes_played_ratio"] == 0.5  # único jugador del grupo -> empate consigo mismo
+
+
 def test_normalize_pool_handles_tied_values_without_crash():
     # Rango 0 en todas las features -> no debe dividir por cero
     raw = [{"id": "a", "price": 1_000_000, "average_points": 5.0}, {"id": "b", "price": 1_000_000, "average_points": 5.0}]

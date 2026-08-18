@@ -139,14 +139,22 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
     )
 
 
-def _upsert_external_stats(conn, player_id: str, understat_player: dict, season: str, now: str) -> None:
+def _upsert_external_stats(conn, player_id: str, understat_player: dict, season: str, now: str, team_games: int = None) -> None:
+    """
+    `team_games`: partidos ya jugados por el equipo del jugador EN LA
+    TEMPORADA ACTUAL (ver `_team_games_by_title()`). Se pasa `None` cuando
+    esta fila viene del fallback de temporada anterior (ver
+    get_league_data_with_fallback()) -- `games`/`minutes_played` de esa fila
+    son de una temporada completa distinta, mezclarlos con el team_games de
+    la temporada actual daría un ratio sin sentido (ver TODO.md #12).
+    """
     conn.execute(
         """
         INSERT INTO external_stats
             (player_id, season, games, minutes_played, goals, non_penalty_goals, assists,
              xg, non_penalty_xg, xa, xg_chain, xg_buildup, yellow_cards, red_cards,
-             understat_position, source, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'understat', ?)
+             understat_position, team_games, source, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'understat', ?)
         """,
         (
             player_id,
@@ -164,9 +172,23 @@ def _upsert_external_stats(conn, player_id: str, understat_player: dict, season:
             _parse_int(understat_player.get("yellow_cards")),
             _parse_int(understat_player.get("red_cards")),
             understat_player.get("position"),
+            team_games,
             now,
         ),
     )
+
+
+def _team_games_by_title(league_data: dict) -> dict:
+    """
+    {team_title: nº de partidos ya jugados esta temporada}, a partir de
+    `league_data["teams"][id]["history"]` -- confirmado con datos reales
+    (2026-08-18, jornada 1 en curso): cada entrada de `history` es un
+    partido YA DISPUTADO con resultado real (`result`/`scored`/`missed`),
+    así que `len(history)` es exactamente "partidos totales del equipo",
+    lo que pedía TODO.md #12 en vez de `games` del jugador (partidos en los
+    que ÉL jugó, que puede ser menor si se perdió alguno por lesión/sanción).
+    """
+    return {t["title"]: len(t.get("history") or []) for t in league_data.get("teams", {}).values() if t.get("title")}
 
 
 def run():
@@ -198,6 +220,14 @@ def run():
             )
         player_index = build_player_index(league_data)
 
+    # Se calcula sobre `league_data` (temporada actual), no sobre lo que
+    # haya quedado tras el fallback -- el fallback solo AÑADE jugadores de
+    # la temporada anterior a `league_data["players"]", no toca
+    # `league_data["teams"]`, así que esto sigue siendo fiel a "partidos
+    # jugados esta temporada" incluso para equipos con fallback (ver
+    # `_upsert_external_stats`/TODO.md #12).
+    team_games_by_title = _team_games_by_title(league_data)
+
     now = datetime.now(timezone.utc).isoformat()
 
     roster_players = roster.get("answer", [])
@@ -219,7 +249,11 @@ def run():
             # Con fallback parcial no todos los jugadores del índice
             # comparten temporada -- ver get_league_data_with_fallback().
             player_season = understat_player.get("_source_season", season)
-            _upsert_external_stats(conn, str(player["id"]), understat_player, player_season, now)
+            # team_games solo tiene sentido si esta fila es de la temporada
+            # ACTUAL -- si viene del fallback (temporada anterior completa),
+            # None (ver docstring de _upsert_external_stats).
+            team_games = team_games_by_title.get(understat_player.get("team_title")) if player_season == season else None
+            _upsert_external_stats(conn, str(player["id"]), understat_player, player_season, now, team_games)
 
     with get_connection() as conn:
         for player in roster_players:

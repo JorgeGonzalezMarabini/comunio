@@ -72,8 +72,13 @@ def get_league_data(league: str = "La_liga", season: str = None) -> dict:
     xGBuildup, shots, key_passes, yellow_cards, red_cards, position
     (código Understat: "F"/"M"/"D"/"GK" combinable, ej. "F M S").
 
-    `teams[team_id]["history"]` es la lista de partidos de ese equipo con
-    xG/xGA por partido — útil para estimar dificultad del rival.
+    `teams[team_id]["history"]` es la lista de partidos YA DISPUTADOS por ese
+    equipo esta temporada, con xG/xGA y resultado real por partido
+    (`result`/`scored`/`missed`) — útil para estimar dificultad del rival, y
+    CONFIRMADO (2026-08-18, jornada 1 de LaLiga en curso) que `len(history)`
+    es exactamente "partidos jugados por el equipo hasta ahora", el dato que
+    usa `jobs.sync_data._team_games_by_title()` para `minutes_played_ratio`
+    (ver TODO.md #12, resuelto).
 
     `dates` es el calendario de la liga con `forecast` (prob. w/d/l) por
     partido — la señal más directa de dificultad del próximo rival.

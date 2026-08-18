@@ -154,6 +154,78 @@ def test_run_crosses_with_understat_by_surname_and_reports_breakdown(tmp_db, ros
     assert row["n"] == 1
 
 
+def test_team_games_by_title_counts_history_entries():
+    """
+    Regresión de TODO.md #12: confirmado en vivo (2026-08-18, get_league_data
+    real) que `teams[id]["history"]` trae solo partidos YA DISPUTADOS
+    (con "result"/"scored"/"missed"), así que su longitud es exactamente
+    "partidos jugados por el equipo esta temporada".
+    """
+    league_data = {
+        "teams": {
+            "1": {"title": "Sevilla", "history": [{"result": "w"}]},
+            "2": {"title": "Malaga", "history": []},
+        }
+    }
+    assert sync_data._team_games_by_title(league_data) == {"Sevilla": 1, "Malaga": 0}
+
+
+def test_run_stores_team_games_from_current_season_league_data(tmp_db, roster_player_factory):
+    """El team_games guardado en external_stats debe salir de team["history"], no de "games" del jugador."""
+    roster_player = roster_player_factory(id=1001, name="Cairney", role="delantero", team="Fulham")
+    league_data = {
+        "players": [{"player_name": "Tom Cairney", "team_title": "Fulham", "games": "1", "time": "90"}],
+        "teams": {"1": {"title": "Fulham", "history": [{"result": "w"}, {"result": "d"}]}},
+    }
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify"), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", {})):
+        sync_data.run()
+
+    features = get_player_features()
+    assert features[0]["games"] == 1        # partidos que jugó ÉL
+    assert features[0]["team_games"] == 2   # partidos jugados por el EQUIPO (mayor: se perdió uno)
+
+
+def test_run_does_not_set_team_games_for_previous_season_fallback_rows(tmp_db, roster_player_factory):
+    """
+    Regresión: si la fila viene del fallback a temporada anterior (ver
+    get_league_data_with_fallback), `games`/`minutes_played` son de una
+    temporada COMPLETA distinta -- team_games de la temporada actual (aún
+    con pocos partidos) daría un ratio sin sentido, así que debe quedar
+    NULL en vez de mezclarlo (ver TODO.md #12).
+    """
+    roster_player = roster_player_factory(id=1001, name="Cairney", role="delantero", team="Fulham")
+    league_data = {
+        "players": [{"player_name": "Tom Cairney", "team_title": "Fulham", "games": "38", "time": "3000", "_source_season": "2024"}],
+        "teams": {"1": {"title": "Fulham", "history": [{"result": "w"}]}},  # temporada ACTUAL, solo 1 partido jugado
+    }
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify"), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", {"Fulham": "2024"})):
+        sync_data.run()
+
+    features = get_player_features()
+    assert features[0]["games"] == 38     # de la temporada anterior (fallback), sin tocar
+    assert features[0]["team_games"] is None
+
+
 def test_sync_data_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
     """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
     monkeypatch.setattr(config, "ENABLE_BOT", False)
