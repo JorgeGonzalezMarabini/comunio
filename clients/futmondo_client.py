@@ -73,13 +73,20 @@ Nombres de campo reales confirmados por fetch autenticado real:
             (palabra completa en ESPAÑOL — a diferencia de Comunio, que usaba
             inglés; ver FUTMONDO_POSITION_MAP), role2 (posición secundaria,
             vacía en la muestra), photo, points, value (precio/VM actual),
-            team, logo, status (visto: "" = sano; "ok" en la respuesta de
-            /1/userteam/lineup para el mismo jugador — inconsistencia sin
-            explicar todavía; NO se ha visto un valor de lesión/sanción real
-            en esta liga de prueba recién creada en pretemporada, así que
-            FUTMONDO_INJURY_STATUSES/is_injury_status() son una
-            aproximación basada en vicenteqa/futmondo-utils
-            (`status.includes('injured')`), sin confirmar con un caso real),
+            team, logo, status (CONFIRMADO con datos reales de producción
+            2026-08-18, roster/market de la liga real vía jobs/sync_data.py
+            en cron — ver también TODO.md #5: valores vistos "" y "ok"
+            (ambos sanos; por qué hay dos valores distintos para lo mismo
+            sigue sin explicarse, pero ninguno se trata como lesión),
+            "doubt" (duda — jugador en riesgo, Vivian/Athletic, Pablo
+            Durán/Celta, Boayar/Elche vistos con este valor) e "injuredN"
+            (lesionado, tier numerado — "injured2" visto en Sergi Canós/
+            Valencia; no se ha visto todavía si existen otros tiers como
+            "injured1" o "injured3"). Esto CONTRADICE la referencia
+            comunitaria en la que se basaba la heurística original
+            (esperaba subcadenas en español, "lesion"/"lesión"): el campo
+            real es en inglés. Ver FUTMONDO_INJURY_STATUSES/
+            is_injury_status()),
         average: {average, homeAverage, awayAverage, averageLastFive,
             matches, fitness: [...]} — `fitness` parece ser la puntuación de
             los últimos partidos (usado por la referencia comunitaria para
@@ -144,22 +151,29 @@ FUTMONDO_POSITION_MAP = {
     "delantero": "DEL",
 }
 
-# Sin confirmar con un caso real todavía (liga de prueba en pretemporada,
-# cero lesionados observados) — aproximación a partir de
-# vicenteqa/futmondo-utils, que comprueba `status.includes('injured')`.
-# is_injury_status() usa ese mismo criterio de subcadena en vez de una lista
-# cerrada de valores exactos, precisamente porque no sabemos los valores
-# reales todavía.
-FUTMONDO_INJURY_STATUS_SUBSTRINGS = ("injured", "lesion", "lesión")
+# CONFIRMADO con datos reales (2026-08-18, ver TODO.md #5 y docstring del
+# módulo): la propia liga real, sincronizada por jobs/sync_data.py en cron,
+# ha mostrado "doubt" (duda, ej. Vivian/Athletic) e "injured2" (lesionado,
+# Sergi Canós/Valencia) junto a los ya conocidos "" y "ok" (ambos sanos).
+# El campo es en INGLÉS, no en español como asumía la referencia
+# comunitaria original (vicenteqa/futmondo-utils, `status.includes(
+# 'injured')`) — "lesion"/"lesión" se mantienen igualmente por si acaso
+# (no hacen daño: no son subcadena de ningún valor sano confirmado), pero
+# ya no son la base de la heurística, solo un colchón de seguridad.
+# Se sigue usando coincidencia de subcadena en vez de una lista cerrada de
+# valores exactos porque "injured2" sugiere que hay más tiers sin
+# confirmar todavía (¿"injured1"? ¿"injured3"?) y "injured" los cubre a
+# todos sin tener que enumerarlos.
+FUTMONDO_INJURY_STATUS_SUBSTRINGS = ("injured", "doubt", "lesion", "lesión")
 
 
 def is_injury_status(status: str | None) -> bool:
     """
-    Aproximación sin confirmar (ver docstring del módulo): considera
-    lesionado/en duda cualquier `status` que contenga alguna de las
-    subcadenas de FUTMONDO_INJURY_STATUS_SUBSTRINGS. TODO: reemplazar por
-    valores exactos confirmados en cuanto se observe un jugador lesionado
-    real en una liga con partidos jugados.
+    Considera lesionado/en duda cualquier `status` que contenga alguna de
+    las subcadenas de FUTMONDO_INJURY_STATUS_SUBSTRINGS. Confirmado con
+    datos reales de producción para "doubt" e "injuredN" (ver TODO.md #5);
+    "lesion"/"lesión" quedan solo como colchón defensivo sin confirmar,
+    ya que la evidencia real apunta a que el campo es en inglés.
     """
     if not status:
         return False

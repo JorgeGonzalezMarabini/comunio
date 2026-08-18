@@ -7,11 +7,11 @@ ver clients/futmondo_client.py para el detalle completo):
     palabra completa en ESPAÑOL ("portero"/"defensa"/"centrocampista"/
     "delantero") — se normaliza a POR/DEF/MED/DEL (FUTMONDO_POSITION_MAP)
     al escribir aquí, así que `players.position` YA está en la convención
-    corta, no en la de Futmondo. `status` real visto en esta liga de
-    prueba (pretemporada, sin lesionados): siempre "" — no hay todavía un
-    valor de lesión/sanción confirmado (ver
-    clients.futmondo_client.is_injury_status(), una aproximación sin
-    confirmar). No hay equivalente confirmado al "-" de puntos en
+    corta, no en la de Futmondo. `status` real visto en producción
+    (2026-08-18, ver TODO.md #5): "" y "ok" (sano), "doubt" (duda) e
+    "injuredN" (lesionado, tier numérico — ver
+    clients.futmondo_client.is_injury_status(), ya confirmado con estos
+    casos reales). No hay equivalente confirmado al "-" de puntos en
     pretemporada de Comunio, pero `_parse_int`/`_parse_float` en
     jobs/sync_data.py se dejan igual de defensivos por si acaso.
   - Understat (clients/laliga_stats_client.py): xG/xA/minutos/goles/tarjetas

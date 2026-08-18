@@ -261,6 +261,11 @@ def test_futmondo_position_map_translates_spanish_roles_to_short_codes():
         ("INJURED", True),
         ("lesion", True),
         ("lesión", True),
+        # Valores confirmados con datos reales de producción 2026-08-18
+        # (ver TODO.md #5): "doubt" (duda) e "injuredN" con tier numérico.
+        ("doubt", True),
+        ("DOUBT", True),
+        ("injured2", True),
     ],
 )
 def test_is_injury_status(status, expected):

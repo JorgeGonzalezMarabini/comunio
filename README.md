@@ -389,10 +389,12 @@ valores de los datos de negocio (plantilla, mercado — nada sensible).
 
 Ver `clients/laliga_stats_client.py` — este módulo es independiente de la
 plataforma de fantasy y no cambió con la migración. Único ajuste: el
-estado de lesión/duda ya no viene confirmado de la API del juego (en
-Comunio sí, con valores `ACTIVE`/`WEAKENED`/`INJURED` reales) — Futmondo
-expone un campo `status` pero no se ha observado un valor de lesión real
-todavía (liga de prueba en pretemporada). Ver
+estado de lesión/duda no viene con una lista cerrada de valores como en
+Comunio (`ACTIVE`/`WEAKENED`/`INJURED`) — Futmondo expone un campo
+`status` en INGLÉS (contra lo que asumía la referencia comunitaria
+original, en español) cuyos valores reales ya se confirmaron en
+producción el 2026-08-18: "" y "ok" (sano), "doubt" (duda) e "injuredN"
+(lesionado, tier numérico — visto "injured2"). Ver TODO.md #5 y
 `clients/futmondo_client.py:is_injury_status()`.
 
 ### Cruce de nombres Futmondo <-> Understat: cascada de fiabilidad decreciente

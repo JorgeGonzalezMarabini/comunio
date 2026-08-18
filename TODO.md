@@ -142,25 +142,56 @@ está documentada como reversible si se confirma el campo más adelante.
 
 ---
 
-## 5. Heurística de detección de lesión sin confirmar con caso real
+## 5. ~~Heurística de detección de lesión sin confirmar con caso real~~ (confirmado con datos reales de producción, 2026-08-18)
 
-**Qué pasa**: `is_injury_status()` decide si un jugador está lesionado
+**Qué pasaba**: `is_injury_status()` decidía si un jugador está lesionado
 buscando subcadenas (`FUTMONDO_INJURY_STATUS_SUBSTRINGS = ("injured",
-"lesion", "lesión")`), basado en una referencia comunitaria, no en un caso
-real observado (la liga de prueba está en pretemporada, 0 lesionados
-vistos). Además hay una inconsistencia sin explicar: el mismo jugador mostró
-`status: ""` en el roster y `"ok"` en `/1/userteam/lineup`.
+"lesion", "lesión")`), basado solo en una referencia comunitaria (que
+asumía valores en español), sin un caso real observado — la liga de
+prueba usada en la captura inicial (2026-08-17) estaba en pretemporada,
+0 lesionados vistos.
 
-**Por qué importa**: alimenta varias decisiones core del bot. Un falso
-negativo/positivo de lesión puede llevar a puntuar mal a un jugador, dejarlo
-de titular quien no debería, o no sustituir a quien sí está lesionado.
+**Investigado consultando la BD real** (`db/futmondo.db`, sincronizada en
+producción por `jobs/sync_data.py` vía cron desde el primer sync,
+2026-08-17T18:41, hasta hoy): el campo `status` real de Futmondo SÍ trae
+valores de lesión/duda, y son en **inglés**, no en español como asumía la
+referencia comunitaria:
 
-**Afecta a**: `engine/evaluator.py` (injury_penalty),
+  - `""` y `"ok"` — sano (los dos valores ya conocidos; por qué hay dos
+    para lo mismo sigue sin explicarse, pero ninguno es un falso positivo
+    de lesión con la heurística actual ni con la corregida).
+  - `"doubt"` — duda. Visto en Vivian (Athletic de Bilbao, DEF), Pablo
+    Durán (Celta de Vigo, DEL) y Boayar (Elche, MED), estable en todos los
+    syncs desde el primero. **Este valor NO lo detectaba la heurística
+    original** (no contiene "injured" ni "lesion"/"lesión") — un bug real:
+    estos 3 jugadores se venían tratando como sanos.
+  - `"injured2"` — lesionado (tier numerado). Visto en Sergi Canós
+    (Valencia, MED), estable en todos los syncs. Sí lo detectaba la
+    heurística original (subcadena "injured"). Sin confirmar todavía si
+    existen otros tiers ("injured1", "injured3"...).
+
+**Arreglado**: `FUTMONDO_INJURY_STATUS_SUBSTRINGS` en
+`clients/futmondo_client.py` ahora incluye `"doubt"` (confirmado real).
+Se mantiene coincidencia de subcadena en vez de una lista cerrada porque
+"injured2" sugiere tiers sin confirmar todavía. "lesion"/"lesión" se
+dejan como colchón defensivo sin coste (no son subcadena de ningún valor
+sano confirmado) aunque la evidencia real ya no los respalda como
+necesarios.
+
+**Verificado con tests** (`tests/test_futmondo_client.py::test_is_injury_status`,
+casos añadidos para `"doubt"` e `"injured2"`) y con los valores reales
+observados en `db/futmondo.db` en producción, no con una prueba manual
+puntual — el hallazgo viene de datos ya acumulados por el cron en
+funcionamiento normal.
+
+**Afectaba a**: `engine/evaluator.py` (injury_penalty),
 `engine/lineup_optimizer.py` (`_rank_healthy_first`),
 `jobs/manage_substitutes.py` (detección de "confirmado fuera"),
-`engine/squad_risk.py`.
+`engine/squad_risk.py` — los 3 jugadores en "doubt" se puntuaban y
+priorizaban como sanos hasta este arreglo.
 
-**Dónde**: `clients/futmondo_client.py:147-167`, `jobs/manage_substitutes.py:31`.
+**Dónde**: `clients/futmondo_client.py:147-181`,
+`jobs/manage_substitutes.py:31`, `tests/test_futmondo_client.py`.
 
 ---
 
