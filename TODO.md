@@ -259,20 +259,51 @@ priorizaban como sanos hasta este arreglo.
 
 ---
 
-## 6. `cancel_sale()` nunca confirmado con tráfico real
+## 6. ~~`cancel_sale()` nunca confirmado con tráfico real~~ (confirmado en vivo, 2026-08-18)
 
-**Qué pasa**: la llamada `POST /1/market/cancelsell` se implementó siguiendo
-el patrón de la referencia comunitaria, pero en la sesión de captura el
-botón "Cancelar venta" del frontend no llegó a disparar la petición de red
-esperada, así que el endpoint nunca se verificó con tráfico propio.
+**Qué pasaba**: la llamada `POST /1/market/cancelsell` se implementó
+siguiendo el patrón de la referencia comunitaria, pero en la sesión de
+captura original el botón "Cancelar venta" del frontend no llegó a
+disparar la petición de red esperada, así que el endpoint nunca se
+verificó con tráfico propio.
 
-**Por qué importa**: es un endpoint de escritura sin verificar — si algún
-flujo futuro llega a depender de él en producción, el contrato real podría
-diferir del asumido.
+**Investigado con una prueba real de extremo a extremo** (con permiso
+explícito del usuario, dado que exponía brevemente un jugador real a
+compra por otro manager/el "Computer"): se eligió a Sergi Canós
+(lesionado, `status=injured2`, mínimo valor de la plantilla, 1.000.000€)
+para minimizar impacto si alguien pujaba en el intervalo. Secuencia
+completa contra la API real:
+
+  1. `get_roster()` — estado inicial del jugador (`market: false`).
+  2. `list_for_sale(player_id, 100_000_000)` — precio muy por encima de
+     mercado a propósito, disuasorio -> `{"code": "api.general.ok"}`.
+  3. `get_my_players_in_market()` — confirma el listado real Y, de paso,
+     la forma exacta del item (antes sin confirmar): `{"id", "name",
+     "slug", "role", "role2", "photo", "points", "value", "team", "logo",
+     "status", "expirationDate", "price", "buyPrice", "isClause",
+     "bids": [], "change", "average"}`.
+  4. `cancel_sale(player_id)` -> `{"code": "api.general.ok"}`.
+  5. `get_my_players_in_market()` — vacío de nuevo.
+  6. `get_roster()` — jugador de vuelta, idéntico al paso 1 (`market:
+     false`, mismo `value`/`buyPrice`/`status`).
+
+Nadie pujó por el jugador en el intervalo (lesionado + precio disuasorio).
+
+**Arreglado**: `clients/futmondo_client.py` — `cancel_sale()` y
+`get_my_players_in_market()` marcados **100% confirmado** con la
+respuesta/shape real documentada; `POST /1/market/cancelsell` movido a la
+sección de endpoints confirmados en el docstring del módulo.
+
+**Sin confirmar todavía**: qué código de error devuelve `cancel_sale()` si
+se intenta cancelar un listado que ya no existe (vendido o cancelado
+antes) — no se dio ese caso en esta prueba. Bajo impacto: `list_for_sale`/
+`cancel_sale` ya manejan `FutmondoOfferError` igual que el resto de
+escrituras.
 
 **Afecta a**: cancelación de ventas propias en Futmondo.
 
-**Dónde**: `clients/futmondo_client.py:406-423`.
+**Dónde**: `clients/futmondo_client.py` (`cancel_sale`,
+`get_my_players_in_market`).
 
 ---
 

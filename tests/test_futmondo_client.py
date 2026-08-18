@@ -100,6 +100,36 @@ def test_get_my_players_in_market(fake_client):
     assert call["url"].endswith("/1/market/myplayers")
 
 
+def test_get_my_players_in_market_returns_real_listed_item_shape(fake_client):
+    """
+    Forma real de un item listado, confirmada en vivo (TODO.md #6,
+    2026-08-18: Sergi Canós puesto en venta y releído antes de cancelar).
+    """
+    listed_item = {
+        "id": "5738fcf88179bfa8526e19ce",
+        "name": "Sergi Canós",
+        "slug": "28094954",
+        "role": "centrocampista",
+        "role2": "",
+        "photo": "28094954.png",
+        "points": 0,
+        "value": 1_000_000,
+        "team": "Valencia",
+        "logo": "valencia.png",
+        "status": "injured2",
+        "expirationDate": "2026-08-20T10:32:15.001Z",
+        "price": 100_000_000,
+        "buyPrice": 0,
+        "isClause": False,
+        "bids": [],
+        "change": 0,
+        "average": {"average": 0, "homeAverage": 0, "awayAverage": 0, "averageLastFive": 0, "matches": 0, "fitness": []},
+    }
+    fake_client.session.response_fn = lambda method, url, payload: FakeResponse(200, {"answer": [listed_item]})
+    result = fake_client.get_my_players_in_market()
+    assert result["answer"] == [listed_item]
+
+
 def test_get_player_summary_includes_player_id_in_query(fake_client):
     fake_client.session.response_fn = lambda method, url, payload: FakeResponse(
         200, {"answer": {"data": {"id": "5"}, "prices": []}}

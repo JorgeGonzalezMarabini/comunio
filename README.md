@@ -372,12 +372,22 @@ body.query: {..., "price": <asking_price>, "player_id": <id>, "isClause": null, 
 respuesta real: {"answer": {"code": "api.general.ok"}, ...}
 ```
 
-**Quitar de la venta — NO confirmado**: se intentó en la misma sesión
-(botón "Cancelar venta" del frontend) pero no llegó a dispararse la
-llamada de red esperada en el tiempo disponible. `cancel_sale()` está
-implementado igual que el resto de escrituras (mismo patrón, mismo
-dominio) siguiendo la referencia comunitaria, pero sin una prueba real
-propia que lo confirme — ver TODO en `clients/futmondo_client.py`.
+**Quitar de la venta — CONFIRMADO AL 100%** (2026-08-18, TODO.md #6): un
+primer intento en la sesión anterior (botón "Cancelar venta" del
+frontend) no llegó a disparar la llamada de red esperada, así que se
+confirmó directamente contra la API: se puso en venta un jugador real de
+mínimo valor y lesionado (Sergi Canós, para minimizar impacto), se releyó
+con `get_my_players_in_market()` (confirma también la forma real de un
+item listado — precio pedido, `expirationDate`, `bids: []`, `isClause`),
+se canceló con `cancel_sale()` y se verificó que volvía a la plantilla sin
+cambios (`get_roster()`) y que `get_my_players_in_market()` quedaba vacío
+de nuevo — sin que nadie pujara por él en el intervalo.
+
+```
+POST /1/market/cancelsell
+body.query: {..., "player_id": <id>}
+respuesta real: {"answer": {"code": "api.general.ok"}, ...}
+```
 
 **Nota de privacidad de la captura:** igual que en la fase de Comunio, el
 valor real de `token`/`userid` nunca se expuso ni se registró en ningún

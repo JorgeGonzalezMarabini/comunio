@@ -35,10 +35,10 @@ login en Firebase Auth (se ven botones de Google/Facebook/Twitter/Outlook
 además de email+contraseña) y de ahí cambiar por un token propio de
 Futmondo, pero el intercambio exacto no se ha capturado.
 
-Endpoints confirmados por captura real (2026-08-17, con permiso explícito,
-sobre la liga de prueba; token/userid nunca expuestos ni registrados —
-comprobado con la misma protección anti-cookie que en la sesión de
-Comunio, ver README):
+Endpoints confirmados por captura real (2026-08-17/18, con permiso
+explícito, sobre la liga de prueba; token/userid nunca expuestos ni
+registrados — comprobado con la misma protección anti-cookie que en la
+sesión de Comunio, ver README):
     POST /1/userteam/roster          -> plantilla propia
     POST /1/userteam/information     -> resumen del equipo (budget, teamValue, config de la liga...)
     POST /1/userteam/lineup          -> alineación actualmente guardada
@@ -47,6 +47,8 @@ Comunio, ver README):
     POST /1/market/myplayers         -> jugadores propios puestos en venta
     POST /1/market/bid               -> ESCRITURA: puja por un jugador del mercado
     POST /1/market/putonmarket       -> ESCRITURA: pone un jugador propio en venta
+    POST /1/market/cancelsell        -> ESCRITURA: quita un jugador propio del mercado de ventas
+                                         (confirmado 2026-08-18, TODO.md #6)
     POST /1/player/summary           -> ficha de un jugador (incluye histórico de precio)
 
 Confirmado solo por la referencia comunitaria (vicenteqa/futmondo-utils),
@@ -54,7 +56,6 @@ NO verificado con una captura real propia todavía — se implementan igual
 porque el patrón (mismo dominio, mismo shape de body, mismos nombres de
 query) es consistente con todo lo demás, pero un cambio de contrato aquí
 no se detectaría hasta usarlos de verdad:
-    POST /1/market/cancelsell        -> quita un jugador propio del mercado de ventas
     POST /1/market/rosterclause      -> paga la cláusula de rescisión de un jugador
     POST /5/market/toggleplayer      -> oculta/muestra un jugador propio en el mercado (no usado por el bot)
     POST /1/locker/pressroom         -> sala de prensa / fichajes recientes de la liga (no usado por el bot)
@@ -374,11 +375,19 @@ class FutmondoClient:
 
     def get_my_players_in_market(self) -> dict:
         """
-        Jugadores propios puestos en venta. **100% confirmado** (vacío en
-        la prueba real hasta que se puso a alguien en venta con
-        list_for_sale(); no se ha vuelto a leer después para confirmar la
-        forma exacta del item en este caso — se espera igual que un item de
-        roster).
+        Jugadores propios puestos en venta. **100% confirmado**, incluida
+        la forma del item con un jugador realmente listado (2026-08-18,
+        TODO.md #6: Sergi Canós puesto en venta con list_for_sale() y
+        releído con esta llamada antes de cancelar). Respuesta real:
+            {"answer": [{"id", "name", "slug", "role", "role2", "photo",
+             "points", "value", "team", "logo", "status",
+             "expirationDate", "price" (el pedido, no `value`), "buyPrice",
+             "isClause", "bids": [] (pujas recibidas por CLÁUSULA sobre
+             este listado, no confirmado su shape con una no vacía),
+             "change", "average": {...}}], ...}
+        Prácticamente el mismo shape que un item de roster + los campos de
+        venta (`expirationDate`, `price`, `isClause`, `bids`) que también
+        trae un item de `get_market()`.
 
         Idempotente (solo lectura) -> reintenta ante fallo de conexión
         transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
@@ -457,19 +466,25 @@ class FutmondoClient:
 
     def cancel_sale(self, player_id: str) -> dict:
         """
-        Quita un jugador propio del mercado de ventas. **NO confirmado con
-        captura propia** — se intentó en la sesión de captura pero el botón
-        "Cancelar venta" del frontend no llegó a disparar la llamada de red
-        esperada en el tiempo disponible (posible confirmación intermedia
-        en la propia UI no completada). Implementado siguiendo el patrón de
-        vicenteqa/futmondo-utils (mismo shape que el resto de escrituras de
-        este cliente, todas confirmadas):
+        Quita un jugador propio del mercado de ventas. **100% confirmado**
+        (resuelve TODO.md #6, 2026-08-18): puesto en venta de verdad un
+        jugador de la plantilla real (Sergi Canós, lesionado, mínimo valor
+        de la plantilla — elegido para minimizar impacto si alguien
+        hubiera pujado en el intervalo), releído con
+        get_my_players_in_market() confirmando el listado real, cancelado
+        con esta llamada y verificado con get_my_players_in_market()
+        (vacío de nuevo) + get_roster() (jugador de vuelta en plantilla,
+        `market: false`, idéntico al estado previo) — sin que nadie llegara
+        a pujar por él en el intervalo.
 
             POST /1/market/cancelsell
             body.query: {..., "player_id": <id>}
+            respuesta real: {"answer": {"code": "api.general.ok"}, ...}
 
-        TODO: confirmar con una prueba real antes de confiar en esto en
-        producción.
+        Lanza FutmondoOfferError si `answer.code` no es "api.general.ok"
+        (mismo patrón que el resto de escrituras de este cliente) — no se
+        ha observado en la prueba real qué código devuelve si se intenta
+        cancelar un listado que ya no existe (vendido o ya cancelado antes).
         """
         result = self._post("/1/market/cancelsell", {"player_id": player_id})
         return self._check_ok(result)
