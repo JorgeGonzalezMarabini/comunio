@@ -1,9 +1,13 @@
+import runpy
+from pathlib import Path
 from unittest.mock import patch
 
 import config
 import jobs.run_sales as run_sales
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
+
+JOB_PATH = str(Path(__file__).resolve().parent.parent / "jobs" / "run_sales.py")
 
 ROSTER_442_BASE = (
     [{"id": 1, "role": "portero", "status": "", "value": 500_000}]
@@ -125,4 +129,23 @@ def test_run_sales_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys)
         run_sales.run()
 
     assert captured == []
+    assert "ENABLE_BOT=false" in capsys.readouterr().out
+
+
+def test_run_sales_main_does_not_record_job_run_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """
+    Regresión (2026-08-18): con ENABLE_BOT=false, el bloque `__main__` no
+    debe entrar en `track_job_run()` -- si lo hiciera, aunque run() no haga
+    nada, se registraría igualmente una fila en `job_runs`, ensuciando
+    db/futmondo.db y provocando que el workflow comitee/pushee pese a que
+    el bot está pausado (ver README, "Pausar el bot sin tocar los 5
+    workflows").
+    """
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    runpy.run_path(JOB_PATH, run_name="__main__")
+
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
+    assert count == 0
     assert "ENABLE_BOT=false" in capsys.readouterr().out

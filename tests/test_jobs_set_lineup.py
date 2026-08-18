@@ -1,4 +1,6 @@
 import json
+import runpy
+from pathlib import Path
 from unittest.mock import patch
 
 import config
@@ -7,6 +9,7 @@ from clients.futmondo_client import FutmondoClient
 from db.models import get_connection
 
 NOW = "2026-08-16T18:00:00+00:00"
+JOB_PATH = str(Path(__file__).resolve().parent.parent / "jobs" / "set_lineup.py")
 
 
 def _seed_squad_11(conn):
@@ -279,4 +282,23 @@ def test_set_lineup_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys
         set_lineup.run()
 
     assert captured == []
+    assert "ENABLE_BOT=false" in capsys.readouterr().out
+
+
+def test_set_lineup_main_does_not_record_job_run_when_bot_disabled(tmp_db, monkeypatch, capsys):
+    """
+    Regresión (2026-08-18): con ENABLE_BOT=false, el bloque `__main__` no
+    debe entrar en `track_job_run()` -- si lo hiciera, aunque run() no haga
+    nada, se registraría igualmente una fila en `job_runs`, ensuciando
+    db/futmondo.db y provocando que el workflow comitee/pushee pese a que
+    el bot está pausado (ver README, "Pausar el bot sin tocar los 5
+    workflows").
+    """
+    monkeypatch.setattr(config, "ENABLE_BOT", False)
+
+    runpy.run_path(JOB_PATH, run_name="__main__")
+
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
+    assert count == 0
     assert "ENABLE_BOT=false" in capsys.readouterr().out

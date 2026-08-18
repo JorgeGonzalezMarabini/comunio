@@ -172,5 +172,14 @@ def run():
 
 
 if __name__ == "__main__":
-    with track_job_run("manage_substitutes"):
-        run()
+    # Chequeo duplicado a propósito: el de dentro de run() protege a quien
+    # llame a run() directamente (tests incluidos); este de aquí evita
+    # además que se entre en track_job_run() -- si no, con ENABLE_BOT=false
+    # igualmente se registraría una fila en `job_runs`, ese INSERT por sí
+    # solo ensuciaría db/futmondo.db, y el step "Commit BD actualizada" del
+    # workflow comitearía/pushearía igual aunque el bot no haga nada real.
+    if not config.ENABLE_BOT:
+        print("manage_substitutes: ENABLE_BOT=false, no se ejecuta.")
+    else:
+        with track_job_run("manage_substitutes"):
+            run()
