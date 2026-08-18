@@ -33,7 +33,7 @@ afecta cada uno y dónde está: ver [`TODO.md`](TODO.md).
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
 - [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
-- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` **activado** desde el 2026-08-17 (decisión explícita del usuario); la secuencia de sustitución en sí está **confirmada ROTA** con una prueba real el 2026-08-18 (`"api.error.in_bench"`/`"api.error.in_field"` según el sentido, ver "Banquillo/suplentes" y `TODO.md` #1) — falla de forma segura y auditada, pero hoy no sustituye a nadie de verdad
+- [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` **activado** desde el 2026-08-17 (decisión explícita del usuario); la secuencia de sustitución real (4 llamadas: vaciar+rellenar, nunca "to"+"from" combinados) se arregló y se confirmó en vivo el 2026-08-18 abriendo el navegador contra la propia app de Futmondo (ver "Banquillo/suplentes" y `TODO.md` #1)
 - [x] Cliente de alineaciones reales (`clients/football_lineups_client.py`, Fotmob) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); Fotmob elegida tras descartar en vivo API-Football (plan gratuito sin acceso a temporada en curso), SofaScore (403 en todo, bloqueo de bot a nivel de borde igual que FBref), ESPN (403 Akamai) y TheSportsDB (datos de alineación corruptos); detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**, sin key ni cuenta que configurar) — ver sección "Banquillo/suplentes" para el TODO pendiente (timing exacto de confirmación, estabilidad a medio plazo de una API no oficial)
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
 - [x] Notificaciones por Telegram (`notifier.py`) — sin cambios, es independiente de la plataforma
@@ -121,33 +121,31 @@ Numeración de `position` confirmada: enteros consecutivos **empezando en
 índice (10 en un 4-4-2 con 11 titulares). Confirmado en la prueba real:
 portero -> 10, tres defensas colocados -> 6, 7, 8.
 
-**Tres bugs/límites reales encontrados el mismo día en producción (2026-08-17),
-al notar que la alineación de Telegram no coincidía con la que se veía en
-la web** — los tres documentados con detalle en el docstring de
-`change_lineup()` / `build_lineup_changes()`:
+**Bugs/límites reales encontrados en producción, todos arreglados** — ver
+docstring de `change_lineup()` / `build_lineup_changes()` /
+`build_substitution_changes()` para el detalle completo:
 
-1. Mandar los 11 cambios de golpe en una sola llamada hacía que Futmondo
-   solo aplicara el primero, devolviendo igualmente `"api.general.ok"` —
-   corregido mandando una llamada HTTP por jugador.
-2. Sustituir un slot que ya tiene un jugador DISTINTO exige incluir
-   `"from"` con el id de quien sale, si no la API lo rechaza con
-   `"api.error.not_allowed"` — corregido leyendo `get_lineup()` antes de
-   construir los cambios y solo generando `change` para los slots que de
-   verdad hacen falta.
-3. Si el jugador que entra en un slot ya está en el campo en OTRA
-   posición, la API rechaza el cambio con `"api.error.in_field"` pese a
-   llevar el `"from"` correcto. La rotación "clásica" entre titulares ya
-   bien colocados no llega a darse: `build_lineup_changes()` nunca
-   reasigna slots de un grupo desde cero, solo los que de verdad quedan
-   libres. El caso real que quedaba (un titular nuevo ya en el campo en
-   el slot de OTRO grupo, jugador "multiposition") — **arreglado
-   2026-08-18**: se manda primero al banquillo (slot fijo de su posición,
-   numeración ya confirmada) como paso intermedio, y solo después al slot
-   de campo, que así entra desde el banquillo (caso confirmado). Sigue
-   sin confirmar con una prueba real que Futmondo acepte ese paso
-   intermedio (campo -> banquillo vacío); si no lo aceptara, el titular
-   quedaría sin colocar esa jornada, auditado y notificado en vez de
-   fallar en silencio (ver `TODO.md` #1 para el detalle completo).
+1. (2026-08-17) Mandar los 11 cambios de golpe en una sola llamada hacía
+   que Futmondo solo aplicara el primero, devolviendo igualmente
+   `"api.general.ok"` — corregido mandando una llamada HTTP por jugador.
+2. (2026-08-17) Sustituir un slot que ya tiene un jugador DISTINTO exige
+   vaciarlo primero — corregido leyendo `get_lineup()` antes de construir
+   los cambios y solo tocando los slots que de verdad hacen falta.
+3. (2026-08-18) **Hallazgo clave, confirmado abriendo el navegador contra
+   la propia app web de Futmondo** (interceptando `fetch` mientras se
+   hacía a mano, en la UI, un intercambio titular↔suplente real): Futmondo
+   NUNCA acepta un `change` que combine `"to"` (quien entra) y `"from"`
+   (quien sale) a la vez — rechaza con `"api.error.in_bench"` si el que
+   entra viene del banquillo, o `"api.error.in_field"` si viene del
+   campo. La forma correcta, confirmada en vivo, es SIEMPRE dos `changes`
+   separados: vaciar (`"from"` solo) y después rellenar (`"to"` solo).
+   `build_lineup_changes()`, `build_bench_changes()` y
+   `build_substitution_changes()` reescritos para generar siempre esa
+   pareja — lo que además simplifica el caso "multiposition" (un titular
+   nuevo ya en el campo en el slot de OTRO grupo): ya no hace falta
+   ningún paso intermedio por banquillo, basta vaciar su slot de origen
+   (sea campo o banquillo) antes de rellenar el de destino. Ver `TODO.md`
+   #1 para el detalle completo de la investigación.
 
 **Solo se soporta 4-4-2** (`engine/lineup_optimizer.FORMATIONS`): es la
 única formación gratis y siempre disponible en Futmondo, confirmado en su
@@ -327,26 +325,23 @@ alineación YA guardada en Futmondo — si algún titular aparece con `status`
 de lesión/duda (`is_injury_status()`), o (con `config.ENABLE_REAL_LINEUP_CHECK`
 activo) no aparece en el once real de su equipo hoy según Fotmob (ver
 sección anterior), y su posición tiene un suplente disponible (sano y
-también presente en el once real) asignado en el banquillo, genera la
-pareja de `changes` que los intercambia
-(`engine.lineup_optimizer.build_substitution_changes()`). **Confirmado ROTO
-con una prueba real (2026-08-18, ver `TODO.md` #1)**: la secuencia de dos
-llamadas HTTP (suplente entra desde el banquillo desalojando al titular,
-titular sale al slot de banquillo que queda libre) falla en los dos
-sentidos probados — `"api.error.in_bench"` al traer al suplente, y
-`"api.error.in_field"` en el orden invertido — sin que se aplicara ningún
-cambio real (verificado releyendo `get_lineup()` antes y después). La regla
-que se creía confirmada de `change_lineup()` (entrar desde el banquillo
-siempre funciona) solo vale para slots VACÍOS — en cuanto hay que desalojar
-a alguien con `"from"` de por medio, esta combinación concreta (banquillo
-OFICIAL <-> campo) queda bloqueada, probablemente porque es justo la
-operación reservada al entrenador automático de pago. Cada sustitución
-decidida se audita en `substitution_decisions` pase lo que pase con el
-envío — con este bug, ninguna sustitución llega a aplicarse todavía, pero
-tampoco corrompe nada. A diferencia del resto de jobs, solo notifica por
-Telegram cuando hay algo que decidir (o algo anómalo) — con la frecuencia
-con la que está pensado correr, notificar "nada que hacer" en cada
-ejecución sería ruido.
+también presente en el once real) asignado en el banquillo, genera los
+`changes` que los intercambian
+(`engine.lineup_optimizer.build_substitution_changes()`). **Arreglado y
+confirmado en vivo (2026-08-18, ver `TODO.md` #1)**: se creía que bastaba
+una pareja de 2 `changes` con `"to"`+`"from"` combinados — probado a mano
+contra la liga de pruebas (abriendo el navegador e interceptando `fetch`
+mientras se hacía el intercambio real en la UI de Futmondo), Futmondo
+rechaza esa combinación siempre (`"api.error.in_bench"` o `"api.error.
+in_field"` según el sentido). La forma real, confirmada en vivo haciendo
+el intercambio completo y revirtiéndolo, son 4 `changes` separados: vaciar
+al titular (campo), vaciar al suplente (banquillo), rellenar el campo con
+el suplente, rellenar el banquillo con el titular — nunca `"to"` y
+`"from"` juntos en el mismo `change`. Cada sustitución decidida se audita
+en `substitution_decisions` pase lo que pase con el envío. A diferencia
+del resto de jobs, solo notifica por Telegram cuando hay algo que decidir
+(o algo anómalo) — con la frecuencia con la que está pensado correr,
+notificar "nada que hacer" en cada ejecución sería ruido.
 
 **`config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` — activado el 2026-08-17, decisión
 explícita del usuario** (por defecto seguía siendo `false` en el código,
@@ -361,12 +356,11 @@ vez la sustitución se aplica de verdad el titular ya no aparece en el
 campo en la siguiente lectura, así que deja de re-detectarse por sí solo
 sin necesitar ningún dedup adicional. Riesgo aceptado explícitamente por
 el usuario al activarlo: la secuencia de dos llamadas seguía sin
-confirmarse con un caso real. **Actualización 2026-08-18**: ya se probó
-con un caso real (forzado, sin lesión de verdad, solo para validar la
-mecánica) y la secuencia está confirmada ROTA (ver más arriba y `TODO.md`
-#1) — el flag sigue activado porque el fallo es seguro (auditado en
-`substitution_decisions`, no corrompe nada), pero hoy no consigue
-sustituir a nadie de verdad.
+confirmarse con un caso real. **Actualización 2026-08-18**: probado con un
+caso real (forzado, sin lesión de verdad, solo para validar la mecánica) y
+arreglado tras descubrir que Futmondo no acepta la forma original de 2
+`changes` combinados (ver más arriba y `TODO.md` #1) — la secuencia
+correcta de 4 `changes` está confirmada funcionando en vivo.
 
 **Poner en venta — CONFIRMADO AL 100%** (2026-08-17, jugador real puesto
 en venta desde la pestaña "Vender" + comprobado en la UI que aparece en

@@ -12,78 +12,67 @@ Cada entrada indica **qué pasa**, **por qué importa**, **a qué afecta** y
 
 ---
 
-## 1. Rotar/sustituir titulares ya colocados en el campo — parcialmente arreglado, pero nuevo hallazgo crítico (2026-08-18)
+## 1. ~~Rotar/sustituir titulares ya colocados en el campo~~ (arreglado y confirmado en vivo, 2026-08-18)
 
-**Qué pasaba**: `change_lineup()` sustituye un slot ocupado usando `"from"`
-sin problema si el jugador que entra viene del banquillo. Pero si ya está en
-el campo en otra posición, Futmondo devuelve `api.error.in_field`.
+**Qué pasaba**: se creía que sustituir a alguien en el campo o el
+banquillo era un solo `change` con `"to"` (quien entra) + `"from"`
+(quien sale) a la vez. Con esa forma, Futmondo rechazaba la operación con
+`"api.error.in_field"` o `"api.error.in_bench"` según de dónde viniera el
+que entra.
 
-**Análisis**: revisando el código, la rotación "clásica" entre titulares que
-ya estaban bien colocados (ej. tres defensas cambiando de slot entre sí) ya
-estaba cubierta por diseño — `build_lineup_changes()` no reasigna slots de un
-grupo desde cero, solo toca los que de verdad quedan libres, así que nunca
-generaba ese `change` peligroso. El caso real que quedaba abierto era más
-concreto: un titular NUEVO de esta semana que ya está en el campo ahora
-mismo, pero en el slot de OTRO grupo de posición (jugador "multiposition").
+**Investigado abriendo el navegador contra la propia app web de Futmondo**
+(a petición del usuario, misma liga de pruebas): se interceptó `fetch` en
+la página para capturar los payloads reales mientras se hacía a mano, en
+la UI, el intercambio de un titular DEF (Tárrega) por su suplente
+(Cortés). **Hallazgo clave**: Futmondo NUNCA acepta un `change` con
+`"to"` y `"from"` juntos. Cada `change` es una de estas dos operaciones,
+mutuamente excluyentes:
 
-**Arreglado**: `build_lineup_changes()` ahora detecta ese caso y manda
-primero un `change` intermedio al slot de banquillo de su posición
-(`BENCH_SLOT_BY_POSITION`, numeración ya confirmada) y solo después el
-`change` final — que así entra desde el banquillo, el único caso 100%
-confirmado. Si el slot de banquillo de esa posición también está ocupado,
-NO se encadenan más cambios sin confirmar contra la API real: el titular se
-deja sin colocar esa jornada y se reporta en un nuevo parámetro `conflicts`,
-que `jobs/set_lineup.py` ya incluye en la notificación de Telegram.
+  1. **Vaciar**: `{"from": <id>, "position": <slot>, "isBench": <bool>}`
+     (sin `"to"`) — el jugador queda como reserva libre.
+  2. **Rellenar**: `{"to": <id>, "position": <slot>, "isBench": <bool>}`
+     (sin `"from"`) — solo funciona si el slot está vacío.
 
-**Sigue sin confirmar con una prueba real, PERO ver el hallazgo de abajo**:
-el paso intermedio de este fix (campo -> slot de banquillo VACÍO, sin
-`"from"`) no se ha podido probar en vivo todavía porque hoy los 4 slots de
-banquillo de la liga de prueba están ocupados. Sí se probó en vivo la
-variante CON `"from"` (slot de banquillo ocupado) — y esa variante está
-confirmada rota (ver abajo), lo que justifica por qué este fix decide NO
-intentarla y en su lugar reportar un `conflicts` en vez de escribir a
-ciegas: resultó ser la decisión correcta.
+  Confirmado en vivo en ambas direcciones (bench→campo con `"api.error.
+  in_bench"`, campo→banquillo con `"api.error.in_field"`) y que mandar el
+  par junto en una sola llamada HTTP falla igual (no es un problema de
+  atomicidad). Después, siguiendo el patrón real de la UI (vaciar origen
+  y destino por separado, luego rellenar), se completó el intercambio
+  Tárrega↔Cortés de verdad contra la cuenta real y se revirtió al estado
+  inicial — confirmado con `get_lineup()` antes/después de cada paso.
 
-**🔴 Hallazgo nuevo, importante, de una prueba real contra la liga de
-pruebas (2026-08-18)**: se aprovechó para probar en vivo el mecanismo
-general de "sustituir un titular por su suplente" (`build_substitution_
-changes()`, usado por `jobs/manage_substitutes.py`) intercambiando un
-defensa titular (Tárrega) por su suplente asignado (Cortés). **Confirmado
-roto, en los dos sentidos**:
+**Arreglado**: `engine/lineup_optimizer.py` — `build_lineup_changes()`,
+`build_bench_changes()` y `build_substitution_changes()` ahora generan
+siempre parejas separadas de vaciar+rellenar (nunca un `change`
+combinado), deduplicando por jugador cuando el mismo aparece como
+"ocupante a desalojar" desde un grupo y como "entrante a vaciar" desde
+otro (ej. un jugador "multiposition"). Esto además **simplifica** el
+diseño anterior: ya no hace falta ningún caso especial ni banquillo libre
+para el caso "multiposition" — vaciar el origen (campo o banquillo, en
+cualquier posición) siempre es posible. `jobs/set_lineup.py` y
+`jobs/manage_substitutes.py` actualizados para leer resultados de
+`change_lineup()` que ya no siempre tienen `"to"` (los de vaciar solo
+tienen `"from"`) — `manage_substitutes.py` en particular ahora agrupa los
+4 `changes`/resultados de cada sustitución en bloques, en vez de asumir 2.
 
-  - Suplente (banquillo) -> slot de campo ocupado, con `"from"` = titular
-    que sale: `"api.error.in_bench"` (código nunca visto/documentado antes).
-  - Orden invertido (diagnóstico): titular (campo) -> slot de banquillo
-    ocupado, con `"from"` = suplente que sale: `"api.error.in_field"`.
-  - Mandar ambos `changes` juntos en una sola llamada (atómico): mismo
-    `"api.error.in_bench"` — no es un problema de atomicidad.
+**Verificado con tests** (`tests/test_lineup_optimizer.py`,
+`tests/test_jobs_manage_substitutes.py`) y **confirmado en vivo contra la
+liga de pruebas real** (2026-08-18) para el caso de sustitución titular↔
+suplente. Sin confirmar todavía con una prueba real específica el caso
+"multiposition" de `build_lineup_changes()` (mismo mecanismo, pero esa
+combinación exacta de grupos cruzados no se ha dado aún en la liga de
+pruebas) — bajo riesgo, ya que usa el mismo primitivo (vaciar+rellenar)
+confirmado para la sustitución.
 
-  Ningún cambio se aplicó de verdad (verificado releyendo `get_lineup()`
-  antes y después: exactamente igual). La hipótesis más plausible: Futmondo
-  trata "traer al suplente OFICIAL del banquillo desalojando a un titular"
-  como la operación que se supone hace el "entrenador automático" (función
-  de pago) y no la expone para hacerla a mano así vía esta API — a
-  diferencia de "traer a cualquier jugador a un slot de campo VACÍO", que sí
-  funciona (el caso normal de `set_lineup.py`).
-
-  **Consecuencia práctica**: `.env` tiene `ENABLE_SUBSTITUTE_AUTO_SUBMIT=
-  true` — `jobs/manage_substitutes.py` SÍ se ejecuta contra la cuenta real
-  hoy, pero con este bug cualquier sustitución real fallará de forma segura
-  y auditada (no corrompe nada, simplemente no sustituye a nadie). Pendiente
-  investigar una alternativa (¿activar el entrenador automático de verdad?
-  ¿otro endpoint/shape no descubierto?) antes de que esta función sirva de
-  algo. Detalle completo en el docstring de
-  `engine.lineup_optimizer.build_substitution_changes()`.
-
-**Afecta a**: envío de cambios de alineación (`jobs/set_lineup.py`) y,
-sobre todo, sustituciones manuales (`jobs/manage_substitutes.py`, hoy
-activado en producción pero no funcional para su operación principal).
+**Afecta a**: envío de cambios de alineación (`jobs/set_lineup.py`) y
+sustituciones manuales (`jobs/manage_substitutes.py`, activado en
+producción — ahora debería funcionar de verdad).
 
 **Dónde**: `engine/lineup_optimizer.py` (`build_lineup_changes`,
-`build_substitution_changes`), `clients/futmondo_client.py:442-518`
-(`change_lineup`), `tests/test_lineup_optimizer.py` (tests de regresión del
-fix de `build_lineup_changes`; `build_substitution_changes` todavía sin
-test que reproduzca el fallo real, solo probado manualmente en vivo).
+`build_bench_changes`, `build_substitution_changes`),
+`clients/futmondo_client.py:442-518` (`change_lineup`),
+`jobs/set_lineup.py`, `jobs/manage_substitutes.py`,
+`tests/test_lineup_optimizer.py`, `tests/test_jobs_manage_substitutes.py`.
 
 ---
 

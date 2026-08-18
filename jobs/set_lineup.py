@@ -32,13 +32,16 @@ rechaza el cambio con `"api.error.not_allowed"`. Por eso este job SIEMPRE
 lee `client.get_lineup()` antes de construir los cambios: sin saber qué
 hay ya en cada slot, no se puede rellenar `"from"` cuando hace falta.
 
-Tercer bug/límite real del mismo día: un titular nuevo que ya está en el
-campo ahora mismo en el slot de OTRO grupo de posición (p.ej. un jugador
-"multiposition") se rechaza con `"api.error.in_field"`.
-`build_lineup_changes()` lo resuelve mandándolo primero al banquillo como
-paso intermedio cuando ese slot está libre; si también está ocupado, no
-se coloca esta pasada y queda en `conflicts` — se notifica igual que
-cualquier otro fallo, ver más abajo.
+Tercer bug/límite real del mismo día, arreglado el 2026-08-18 tras
+interceptar la propia app web de Futmondo (ver TODO.md #1 y el docstring
+de `engine.lineup_optimizer.build_lineup_changes` para el hallazgo
+completo): Futmondo nunca acepta un `change` que combine `"to"` y
+`"from"` a la vez — cada `change` es o "vaciar" (`"from"` sin `"to"`) o
+"rellenar" (`"to"` sin `"from"`), nunca ambos. Por eso
+`build_lineup_changes()`/`build_bench_changes()` ya no generan un solo
+`change` por sustitución, sino dos (vaciar + rellenar) — y por eso los
+resultados de `client.change_lineup()` pueden incluir changes SIN `"to"`
+(los de vaciar), que se reportan por su `"from"` en vez de por su `"to"`.
 
 También manda el banquillo/suplentes: un slot FIJO por posición (ver
 `engine.lineup_optimizer.BENCH_SLOT_BY_POSITION`), CONFIRMADO AL 100%
@@ -130,7 +133,6 @@ def run():
     submit_error = None
     failed_players = []  # [(nombre, motivo)] -- cambios individuales que fallaron, ver docstring del módulo
     changes_needed = 0  # 0 si la alineación actual ya coincidía del todo (ver build_lineup_changes)
-    lineup_conflicts = []  # titulares que no se pudieron colocar sin escribir a ciegas, ver build_lineup_changes
 
     if config.ENABLE_LINEUP_AUTO_SUBMIT:
         try:
@@ -139,15 +141,16 @@ def run():
             current_bench_by_position = {
                 p["position"]: p["id"] for p in current_lineup_answer.get("bench", {}).get("players", [])
             }
-            changes = build_lineup_changes(
-                adjusted, lineup["starters"], current_lineup_by_position, current_bench_by_position, lineup_conflicts
-            )
-            changes += build_bench_changes(substitutes_by_position, current_bench_by_position)
+            changes = build_lineup_changes(adjusted, lineup["starters"], current_lineup_by_position, current_bench_by_position)
+            changes += build_bench_changes(substitutes_by_position, current_bench_by_position, current_lineup_by_position)
             changes_needed = len(changes)
             results = client.change_lineup(changes)
             for r in results:
                 if not r["ok"]:
-                    failed_players.append((by_id[r["change"]["to"]]["name"], r["answer_or_error"]))
+                    # Un `change` de vaciar no lleva "to" (ver docstring del módulo) -- se reporta por "from".
+                    player_id = r["change"].get("to") or r["change"].get("from")
+                    player_name = by_id.get(player_id, {}).get("name", player_id)
+                    failed_players.append((player_name, r["answer_or_error"]))
             submitted = not failed_players  # solo "enviada" de verdad si todos los cambios necesarios se aplicaron
         except Exception as e:  # noqa: BLE001 — un fallo al enviar no debe tumbar la auditoría de la decisión
             submit_error = str(e)
@@ -177,10 +180,6 @@ def run():
             message.extend(f"  - {name}: {error}" for name, error in failed_players)
     else:
         message.append("NO enviada a Futmondo (ENABLE_LINEUP_AUTO_SUBMIT=false).")
-
-    if lineup_conflicts:
-        message.append("⚠️ Titular(es) sin colocar esta jornada (ver TODO en engine/lineup_optimizer.py):")
-        message.extend(f"  - {c}" for c in lineup_conflicts)
 
     if risk_warnings:
         message.append("⚠️ Riesgo de plantilla (posición sin suplente disponible):")

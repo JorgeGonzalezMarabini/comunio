@@ -82,12 +82,12 @@ def build_lineup_changes(
     starter_ids: list,
     current_lineup_by_position: dict = None,
     current_bench_by_position: dict = None,
-    conflicts: list = None,
 ) -> list[dict]:
     """
     Construye la lista `changes` que espera
     clients.futmondo_client.FutmondoClient.change_lineup(), con la
-    numeración confirmada para 4-4-2 (ver LINEUP_SLOT_POSITION_ORDER).
+    numeración confirmada para 4-4-2 (ver LINEUP_SLOT_POSITION_ORDER) y el
+    mecanismo real de "vaciar slot" + "rellenar slot" (ver más abajo).
 
     `players`: lista completa (con "id"/"position") de donde sacar la
     posición de cada titular — normalmente el mismo `squad` pasado a
@@ -97,70 +97,69 @@ def build_lineup_changes(
     la alineación YA guardada en Futmondo justo antes de este cambio (ver
     `FutmondoClient.get_lineup()`). `current_bench_by_position` (opcional,
     mismo shape que en build_bench_changes()): el banquillo YA guardado —
-    solo hace falta para el caso raro de más abajo (paso intermedio por
-    banquillo); si no se pasa, se asume que todos los slots de banquillo
-    están libres.
+    hace falta para saber si un titular nuevo viene del banquillo (y de
+    qué slot, para vaciarlo antes de colocarlo en el campo).
 
-    `conflicts` (opcional): si se pasa una lista, se le añade un mensaje
-    legible por cada titular que esta pasada NO pudo colocarse (ver caso
-    3 más abajo) — para que el llamador lo audite/notifique en vez de que
-    quede en silencio. Si no se pasa, esos casos simplemente no generan
-    `change` (mismo efecto que antes de este fix, pero sin visibilidad).
+    **Mecanismo real confirmado interceptando la propia app web de
+    Futmondo (2026-08-18, ver TODO.md #1 para el detalle completo del
+    hallazgo)** — sustituye por completo la comprensión anterior (basada
+    en capturas parciales del 2026-08-17) de que un solo `change` con
+    `"to"` + `"from"` a la vez bastaba para sustituir a alguien:
 
-    Tres bugs/límites reales confirmados en producción el mismo día
-    (2026-08-17, ver README y clients/futmondo_client.py:change_lineup
-    para el detalle completo):
+      Futmondo NUNCA acepta un `change` que combine `"to"` y `"from"` al
+      mismo tiempo. Cada `change` es una de estas dos operaciones,
+      mutuamente excluyentes:
 
-      1. Sustituir un slot que YA tiene un jugador DISTINTO exige incluir
-         `"from"` con el id del que sale, si no la API lo rechaza con
-         `"api.error.not_allowed"`.
-      2. Colocar en un slot a un jugador que en ESE MOMENTO está en el
-         campo en OTRA posición (una rotación entre titulares) se rechaza
-         con `"api.error.in_field"`, aunque el `"from"` sea correcto —
-         confirmado que sustituir SIEMPRE funciona si el que entra viene
-         del banquillo, nunca si viene de otro slot del campo.
-      3. Corolario de (2), antes sin resolver: un titular nuevo de esta
-         semana que YA está en el campo ahora mismo pero en el slot de
-         OTRO grupo de posición (p.ej. un jugador "multiposition" que la
-         semana pasada jugó de MED y esta se evalúa como DEF) chocaría
-         con (2) igual que una rotación normal.
+      1. **Vaciar** un slot ocupado: `{"from": <id del que sale>,
+         "position": <slot>, "isBench": <bool>}` (sin `"to"`). El jugador
+         queda como reserva libre (ni en el campo ni en el banquillo).
+      2. **Rellenar** un slot vacío: `{"to": <id del que entra>,
+         "position": <slot>, "isBench": <bool>}` (sin `"from"`).
 
-    Por eso esta función NO reasigna los slots de un grupo de posición
-    desde cero cada vez (lo que forzaba rotaciones falsas entre jugadores
-    que ya estaban bien colocados, solo en un slot numérico distinto):
-    para cada grupo (DEL/MED/DEF/POR), a los titulares de esta semana que
-    YA ocupan uno de los slots del grupo se les deja en su sitio (sin
-    `change`); solo se generan cambios para los slots que de verdad
-    quedan libres (su ocupante actual ya no es titular esta semana),
-    emparejados con los titulares nuevos que entran — que en el caso
-    normal (evaluación semanal, la posición de un jugador no cambia de
-    una semana a otra) siempre vienen del banquillo, nunca de otro slot
-    del campo que se esté tocando en la misma pasada. Esto ya evita por
-    construcción el caso (2): si un jugador "entra" a un grupo es porque
-    no ocupaba NINGÚN slot de ESE grupo, así que si además está en el
-    campo, tiene que ser en el slot de OTRO grupo — el caso (3).
+      Mandar ambos junto a la vez (lo que hacía este módulo hasta ahora)
+      lo rechaza con `"api.error.in_bench"` si el que entra viene del
+      banquillo, o `"api.error.in_field"` si viene del campo — el código
+      de error nombra el sitio de ORIGEN del jugador, no el destino.
+      Confirmado también que mandar el par vaciar+rellenar como una sola
+      llamada HTTP (un array de 2 `changes`) falla igual — no es un
+      problema de atomicidad, la API simplemente no permite esa forma en
+      el mismo `change`.
 
-    Para el caso (3), se manda primero un `change` intermedio al slot de
-    banquillo de su posición (BENCH_SLOT_BY_POSITION) — el mismo patrón,
-    en sentido inverso, ya usado en build_substitution_changes() — y
-    DESPUÉS el `change` final a su slot de campo, que ahora sí cae en el
-    caso confirmado (entra desde el banquillo). Esto solo se intenta si
-    ese slot de banquillo está libre en este momento (`current_bench_by_
-    position`); si ya lo ocupa otro jugador, resolverlo encadenaría más
-    cambios sin confirmar contra la API real, así que esta función NO
-    escribe a ciegas: deja al titular nuevo sin colocar esta pasada (el
-    slot de campo se queda con quien lo ocupaba) y lo apunta en
-    `conflicts` si se pasó la lista — jobs/set_lineup.py lo audita igual
-    que cualquier otro fallo, no lo oculta.
+      Por tanto, sustituir a alguien SIEMPRE son (al menos) dos llamadas
+      HTTP separadas, en este orden: vaciar el slot de destino (si tenía
+      ocupante) y vaciar el slot de ORIGEN del que entra (si ya estaba en
+      el campo o el banquillo) — en cualquier orden entre sí — y solo
+      DESPUÉS rellenar el slot de destino con el que entra.
+      `FutmondoClient.change_lineup()` ya manda una llamada HTTP por
+      `change`, en el orden de la lista — por eso esta función devuelve
+      primero TODOS los `change` de vaciar y luego TODOS los de rellenar.
 
-    Si no se pasa `current_lineup_by_position` (p.ej. no se pudo leer la
-    alineación actual), se asume que todos los slots están vacíos —
-    jobs/set_lineup.py siempre debería pasarlo cuando pueda.
+    Esto simplifica y generaliza el diseño anterior: ya no hace falta
+    ningún caso especial para un titular "multiposition" que estuviera en
+    el campo en el slot de otro grupo — vaciar su slot de origen (sea
+    campo o banquillo, en cualquier posición) siempre es la primera
+    operación, sin depender de que haya sitio libre en ningún otro lado.
+    Ese mismo jugador puede detectarse dos veces desde ángulos distintos
+    (como "ocupante a desalojar" del grupo que abandona y como "entrante
+    a vaciar" del grupo al que se une) — es la misma operación física, se
+    deduplica por jugador para no mandar el mismo `change` de vaciar dos
+    veces (el segundo fallaría, ya no estaría ahí).
 
-    No incluye banquillo/suplentes como tal — ver build_bench_changes()
-    más abajo, con su propia numeración (fija, no depende de la
-    formación); el paso intermedio del caso (3) reutiliza esa misma
-    numeración pero vive aquí porque depende de quién entra al campo.
+    Igual que antes, esta función NO reasigna los slots de un grupo de
+    posición desde cero cada vez (lo que forzaba `change` innecesarios
+    entre titulares que ya estaban bien colocados, solo en un slot
+    numérico distinto dentro del mismo grupo): a los titulares de esta
+    semana que YA ocupan uno de los slots de su grupo se les deja en su
+    sitio; solo se generan `changes` para los slots que de verdad quedan
+    libres, emparejados con los titulares nuevos que entran.
+
+    Si no se pasa `current_lineup_by_position`/`current_bench_by_position`
+    (p.ej. no se pudieron leer), se asume que todos esos slots están
+    vacíos — jobs/set_lineup.py siempre debería pasarlos cuando pueda.
+
+    No incluye el banquillo/suplentes propiamente dicho — ver
+    build_bench_changes() más abajo, con su propia numeración (fija, no
+    depende de la formación).
     """
     current_lineup_by_position = current_lineup_by_position or {}
     current_bench_by_position = current_bench_by_position or {}
@@ -179,13 +178,32 @@ def build_lineup_changes(
         slot_ranges[position] = list(range(next_slot, next_slot + count))
         next_slot += count
 
-    # Reverse lookup de TODO el campo (no solo el grupo que se esté
-    # procesando en cada vuelta) -- hace falta para detectar el caso (3)
-    # del docstring: un entrante que ya está en el campo en el slot de
-    # OTRO grupo de posición.
-    current_slot_by_player = {pid: slot for slot, pid in current_lineup_by_position.items() if pid is not None}
+    # Reverse lookup de TODO el campo y TODO el banquillo (no solo el
+    # grupo que se esté procesando en cada vuelta) -- para saber, de cada
+    # entrante, si ya está en algún slot ahora mismo y hay que vaciarlo
+    # primero.
+    current_field_slot_by_player = {pid: slot for slot, pid in current_lineup_by_position.items() if pid is not None}
+    current_bench_slot_by_player = {pid: slot for slot, pid in current_bench_by_position.items() if pid is not None}
 
-    changes = []
+    vacate_changes = []
+    fill_changes = []
+    # Un mismo jugador puede aparecer como "ocupante a desalojar" de un
+    # grupo (visto desde fuera) Y como "entrante que hay que vaciar de su
+    # slot actual" de otro grupo (visto desde dentro) -- ej. un jugador
+    # "multiposition" que deja de jugar en su grupo de origen y entra en
+    # otro. Es la MISMA operación física (solo puede estar en un slot a
+    # la vez) -- deduplicar por jugador para no mandar dos veces el mismo
+    # `change` de vaciar (el segundo fallaría, ya no estaría ahí).
+    vacated_players = set()
+
+    def _vacate(player_id, slot, is_bench):
+        if player_id in vacated_players:
+            return
+        vacated_players.add(player_id)
+        vacate_changes.append(
+            {"cpt": False, "from": player_id, "position": slot, "isBench": is_bench, "multiposition": False}
+        )
+
     for position in LINEUP_SLOT_POSITION_ORDER:
         target_players = starters_by_position[position]
         slots = slot_ranges[position]
@@ -200,32 +218,17 @@ def build_lineup_changes(
 
         for slot, player_id in zip(free_slots, entering_players):
             occupant = occupant_by_slot[slot]
-
-            # Caso (3): el entrante ya está en el campo ahora mismo, en
-            # el slot de otro grupo (ver docstring) -- colocarlo
-            # directamente fallaría con "api.error.in_field".
-            current_field_slot = current_slot_by_player.get(player_id)
-            if current_field_slot is not None:
-                bench_slot = BENCH_SLOT_BY_POSITION[position]
-                bench_occupant = current_bench_by_position.get(bench_slot)
-                if bench_occupant is not None:
-                    if conflicts is not None:
-                        conflicts.append(
-                            f"{by_id[player_id].get('name', player_id)} ({position}) ya está en el campo en otra "
-                            f"posición y su slot de banquillo está ocupado -- no se pudo colocar esta jornada "
-                            f"(ver TODO en engine/lineup_optimizer.py)."
-                        )
-                    continue
-                changes.append(
-                    {"cpt": False, "to": player_id, "position": bench_slot, "isBench": True, "multiposition": False}
-                )
-
-            change = {"cpt": False, "to": player_id, "position": slot, "isBench": False, "multiposition": False}
             if occupant is not None:
-                change["from"] = occupant
-            changes.append(change)
+                _vacate(occupant, slot, False)
 
-    return changes
+            if player_id in current_field_slot_by_player:
+                _vacate(player_id, current_field_slot_by_player[player_id], False)
+            elif player_id in current_bench_slot_by_player:
+                _vacate(player_id, current_bench_slot_by_player[player_id], True)
+
+            fill_changes.append({"cpt": False, "to": player_id, "position": slot, "isBench": False, "multiposition": False})
+
+    return vacate_changes + fill_changes
 
 
 def _rank_healthy_first(candidates: list[dict]) -> list[dict]:
@@ -352,10 +355,13 @@ def pick_substitutes(bench_players: list[dict]) -> dict:
     return substitutes
 
 
-def build_bench_changes(substitutes_by_position: dict, current_bench_by_position: dict = None) -> list[dict]:
+def build_bench_changes(
+    substitutes_by_position: dict, current_bench_by_position: dict = None, current_lineup_by_position: dict = None
+) -> list[dict]:
     """
-    Construye la lista `changes` (mismo shape que build_lineup_changes())
-    para el banquillo, con la numeración FIJA confirmada
+    Construye la lista `changes` (mismo mecanismo de vaciar+rellenar que
+    build_lineup_changes(), ver su docstring para el hallazgo real de
+    2026-08-18) para el banquillo, con la numeración FIJA confirmada
     (BENCH_SLOT_BY_POSITION) e `isBench: true`.
 
     `substitutes_by_position`: la salida de pick_substitutes() — las
@@ -364,16 +370,22 @@ def build_bench_changes(substitutes_by_position: dict, current_bench_by_position
 
     `current_bench_by_position` (opcional): {position: player_id_actual},
     el banquillo YA guardado (ver `FutmondoClient.get_lineup()["answer"]
-    ["bench"]["players"]`). Igual que en build_lineup_changes(): si el
-    slot ya tiene exactamente ese jugador, no se genera `change`; si tiene
-    uno DISTINTO, se incluye `"from"`. Esto no se ha probado en vivo
-    específicamente para banquillo (solo se probó rellenar slots vacíos),
-    pero es el mismo endpoint con el mismo shape que para titulares, donde
-    sí está confirmado — razonable esperar el mismo comportamiento, sin
-    darlo por 100% confirmado todavía.
+    ["bench"]["players"]`). Si el slot ya tiene exactamente ese jugador,
+    no se genera `change`; si tiene uno DISTINTO, se vacía primero (`change`
+    con `"from"`, SIN `"to"` — Futmondo rechaza combinar ambos en el mismo
+    `change`, ver build_lineup_changes()) y se rellena después.
+
+    `current_lineup_by_position` (opcional): {slot_de_campo: player_id},
+    por si el suplente que entra ya está ahora mismo en el CAMPO (no solo
+    en otro slot de banquillo) — hace falta vaciarlo de ahí primero por el
+    mismo motivo.
     """
     current_bench_by_position = current_bench_by_position or {}
-    changes = []
+    current_lineup_by_position = current_lineup_by_position or {}
+    current_field_slot_by_player = {pid: slot for slot, pid in current_lineup_by_position.items() if pid is not None}
+
+    vacate_changes = []
+    fill_changes = []
     for position, player_id in substitutes_by_position.items():
         if player_id is None:
             continue
@@ -381,11 +393,22 @@ def build_bench_changes(substitutes_by_position: dict, current_bench_by_position
         current_occupant = current_bench_by_position.get(slot)
         if current_occupant == player_id:
             continue
-        change = {"cpt": False, "to": player_id, "position": slot, "isBench": True, "multiposition": False}
         if current_occupant is not None:
-            change["from"] = current_occupant
-        changes.append(change)
-    return changes
+            vacate_changes.append(
+                {"cpt": False, "from": current_occupant, "position": slot, "isBench": True, "multiposition": False}
+            )
+        if player_id in current_field_slot_by_player:
+            vacate_changes.append(
+                {
+                    "cpt": False,
+                    "from": player_id,
+                    "position": current_field_slot_by_player[player_id],
+                    "isBench": False,
+                    "multiposition": False,
+                }
+            )
+        fill_changes.append({"cpt": False, "to": player_id, "position": slot, "isBench": True, "multiposition": False})
+    return vacate_changes + fill_changes
 
 
 def build_substitution_changes(
@@ -431,44 +454,31 @@ def build_substitution_changes(
     solo puede decidirse cerca de cada partido (lesión/sanción confirmada),
     no una semana antes.
 
-    **ROTO, confirmado con una prueba real contra la liga de pruebas
-    (2026-08-18)** — ver TODO.md #1: el shape que genera esta función
-    (par de `changes` con `"from"` cruzado entre campo y banquillo) NO
-    funciona hoy contra la API real, en NINGÚN orden:
+    **Arreglado 2026-08-18 tras confirmar el mecanismo real interceptando
+    la propia app web de Futmondo** (ver TODO.md #1 y el docstring de
+    build_lineup_changes() para el hallazgo completo): Futmondo nunca
+    acepta un `change` que combine `"to"` y `"from"` a la vez — cada
+    `change` es o bien "vaciar" (`"from"` sin `"to"`) o "rellenar" (`"to"`
+    sin `"from"`). El diseño anterior (una pareja de `changes` con `"to"`
+    + `"from"` cruzado) fallaba siempre, confirmado con una prueba real
+    (2026-08-18, intercambio DEF real en la liga de pruebas): el primer
+    `change` (suplente entra con `"from"` del titular) devolvía
+    `"api.error.in_bench"`; en orden invertido, el segundo (titular sale
+    con `"from"` del suplente) devolvía `"api.error.in_field"` — en
+    ambos casos, el código nombra el sitio de ORIGEN del jugador que se
+    intenta mover, no el destino. Mandar el par junto en una sola llamada
+    HTTP (un array de 2 `changes`) falla igual — no era un problema de
+    atomicidad.
 
-      - Suplente (banquillo) -> slot de campo ocupado, con `"from"` =
-        titular que sale: `"api.error.in_bench"` (nuevo, no visto antes).
-      - Titular (campo) -> slot de banquillo ocupado, con `"from"` =
-        suplente que sale (orden invertido, probado como diagnóstico):
-        `"api.error.in_field"`.
-      - Mandar los dos `changes` juntos en una sola llamada (atómico, en
-        vez de uno por uno): mismo `"api.error.in_bench"` que por
-        separado — no es un problema de tener que ser atómico.
-
-    Se creía (sin confirmar) que "sustituir siempre funciona si el que
-    entra viene del banquillo" bastaba para el primer `change` de la
-    pareja, extrapolando de la regla confirmada para `build_lineup_changes()`
-    (bench -> slot de campo VACÍO, sin `"from"`). La prueba real de
-    2026-08-18 muestra que esa extrapolación NO es válida en cuanto se
-    añade un `"from"` para desalojar al ocupante actual del slot de
-    destino: Futmondo trata "traer al suplente OFICIAL del banquillo
-    desalojando a un titular" como una operación distinta (y bloqueada)
-    de "traer a cualquier jugador a un slot libre", posiblemente porque
-    esa sustitución en caliente es justo lo que se supone que hace el
-    "entrenador automático" (función de pago, ver README "Banquillo/
-    suplentes") y esta API no la expone para hacerla a mano así.
-
-    **Consecuencia práctica**: `jobs/manage_substitutes.py` tiene
-    `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT=true` en `.env` de este repo —
-    la función SÍ se ejecuta contra la cuenta real, pero con este bug
-    cualquier sustitución real fallará de forma segura y auditada (ambos
-    `changes` reportan `ok=False`, `jobs/manage_substitutes.py` lo
-    notifica como cualquier otro fallo, no corrompe nada), simplemente
-    sin conseguir sustituir a nadie. Pendiente investigar una forma
-    alternativa de conseguir esto (quizás requiera activar el
-    entrenador automático de verdad, o un endpoint/shape distinto no
-    descubierto todavía) antes de que esta función sirva de algo en
-    producción.
+    Ahora genera CUATRO `changes` por sustitución, dos de vaciar y dos de
+    rellenar (en ese orden, ya que `FutmondoClient.change_lineup()` manda
+    una llamada HTTP por `change` en el orden de la lista): vaciar al
+    titular de su slot de campo, vaciar al suplente de su slot de
+    banquillo, rellenar el slot de campo con el suplente, rellenar el
+    slot de banquillo con el titular. Confirmado con una prueba real
+    (2026-08-18, mismo intercambio DEF, en este orden) que las cuatro
+    llamadas se aplican correctamente — releído con `get_lineup()`
+    después de cada paso.
 
     `players_by_id`: {id: {..., "position", "status"}} — normalmente toda
     la plantilla (db.models.get_player_features()), para poder leer
@@ -510,7 +520,13 @@ def build_substitution_changes(
             continue  # el suplente asignado tampoco puede jugar
 
         changes.append(
-            {"cpt": False, "to": substitute_id, "position": slot, "isBench": False, "multiposition": False, "from": starter_id}
+            {"cpt": False, "from": starter_id, "position": slot, "isBench": False, "multiposition": False}
+        )
+        changes.append(
+            {"cpt": False, "from": substitute_id, "position": bench_slot, "isBench": True, "multiposition": False}
+        )
+        changes.append(
+            {"cpt": False, "to": substitute_id, "position": slot, "isBench": False, "multiposition": False}
         )
         changes.append(
             {"cpt": False, "to": starter_id, "position": bench_slot, "isBench": True, "multiposition": False}

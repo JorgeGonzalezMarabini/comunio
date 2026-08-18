@@ -119,13 +119,14 @@ def test_build_lineup_changes_shape_matches_change_lineup_contract():
         assert change["multiposition"] is False
 
 
-def test_build_lineup_changes_includes_from_when_slot_already_has_different_player():
+def test_build_lineup_changes_vacates_slot_before_filling_when_occupied_by_different_player():
     """
-    Regresión del bug real de producción (2026-08-17, ver docstring del
-    módulo y clients.futmondo_client.FutmondoClient.change_lineup):
-    sustituir un slot que YA tiene un jugador distinto exige incluir
-    "from" con el id del que sale -- confirmado interceptando la llamada
-    real del frontend haciendo el mismo cambio a mano.
+    Regresión del mecanismo real confirmado interceptando la app web de
+    Futmondo (2026-08-18, ver TODO.md #1 y docstring del módulo):
+    sustituir un slot que YA tiene un jugador distinto NUNCA se manda como
+    un solo `change` con "to" + "from" a la vez (la API lo rechaza) -- son
+    dos `changes` separados, primero vaciar (`"from"` sin `"to"`) y
+    DESPUÉS rellenar (`"to"` sin `"from"`), en ese orden.
     """
     squad = _squad_442()
     lineup = pick_lineup(squad, formation="4-4-2")
@@ -133,10 +134,16 @@ def test_build_lineup_changes_includes_from_when_slot_already_has_different_play
     current_lineup_by_position = {10: "otro_portero_de_antes"}
 
     changes = build_lineup_changes(squad, lineup["starters"], current_lineup_by_position)
-    by_id = {c["to"]: c for c in changes}
 
-    assert by_id["por1"]["from"] == "otro_portero_de_antes"
-    # Los slots que antes estaban vacíos (no aparecen en current_lineup_by_position) no llevan "from".
+    vacate = [c for c in changes if "from" in c]
+    fill = [c for c in changes if "to" in c]
+    assert vacate == [{"cpt": False, "from": "otro_portero_de_antes", "position": 10, "isBench": False, "multiposition": False}]
+    assert changes.index(vacate[0]) < min(changes.index(c) for c in fill if c["to"] == "por1")
+
+    by_id = {c["to"]: c for c in fill}
+    assert by_id["por1"]["position"] == 10
+    assert "from" not in by_id["por1"]
+    # Los slots que antes estaban vacíos (no aparecen en current_lineup_by_position) no generan `vacate`.
     assert "from" not in by_id["del0"]
 
 
@@ -156,12 +163,13 @@ def test_build_lineup_changes_skips_slots_already_correct():
     changes_again = build_lineup_changes(squad, lineup["starters"], current_lineup_by_position)
     assert changes_again == []
 
-    # Si solo UN slot difiere (ej. el portero cambia), solo ese genera change.
+    # Si solo UN slot difiere (ej. el portero cambia), solo ese genera
+    # cambios -- un `vacate` (del que sale) y un `fill` (del que entra).
     current_lineup_by_position[by_id["por1"]["position"]] = "otro_portero"
     changes_partial = build_lineup_changes(squad, lineup["starters"], current_lineup_by_position)
-    assert len(changes_partial) == 1
-    assert changes_partial[0]["to"] == "por1"
-    assert changes_partial[0]["from"] == "otro_portero"
+    assert len(changes_partial) == 2
+    assert changes_partial[0] == {"cpt": False, "from": "otro_portero", "position": 10, "isBench": False, "multiposition": False}
+    assert changes_partial[1] == {"cpt": False, "to": "por1", "position": 10, "isBench": False, "multiposition": False}
 
 
 def test_build_lineup_changes_keeps_unchanged_starters_in_their_current_slot():
@@ -200,23 +208,25 @@ def test_build_lineup_changes_keeps_unchanged_starters_in_their_current_slot():
 
     changes = build_lineup_changes(squad_this_week, starters, current_lineup_by_position)
 
-    # Solo debe generarse UN cambio: el que libera el slot de def3 para def_nuevo.
-    assert len(changes) == 1
-    assert changes[0]["to"] == "def_nuevo"
-    assert changes[0]["from"] == "def3"
-    assert changes[0]["position"] == 9  # el slot que ocupaba def3
+    # Solo debe generarse UNA pareja vaciar+rellenar: la que libera el
+    # slot de def3 para def_nuevo. Los otros tres defensas, ya bien
+    # colocados, no generan ningún `change`.
+    assert len(changes) == 2
+    assert changes[0] == {"cpt": False, "from": "def3", "position": 9, "isBench": False, "multiposition": False}
+    assert changes[1] == {"cpt": False, "to": "def_nuevo", "position": 9, "isBench": False, "multiposition": False}
 
 
-def test_build_lineup_changes_benches_entrant_already_on_field_in_another_group():
+def test_build_lineup_changes_vacates_entrant_already_on_field_in_another_group():
     """
-    Regresión del fix de TODO.md #1 / "tercer hallazgo" en
-    clients.futmondo_client.FutmondoClient.change_lineup(): un titular
-    nuevo de esta semana que YA está en el campo ahora mismo, pero en el
-    slot de OTRO grupo de posición (ej. "multiposition"), no puede
-    colocarse directamente -- "api.error.in_field". build_lineup_changes()
-    debe mandarlo primero al banquillo (slot fijo de su posición,
-    BENCH_SLOT_BY_POSITION) y solo DESPUÉS al slot de campo final, en ese
-    orden (change_lineup() manda una llamada HTTP por `change`, en orden).
+    Regresión del hallazgo real de TODO.md #1 (2026-08-18, interceptando
+    la propia app web de Futmondo): un titular nuevo de esta semana que YA
+    está en el campo ahora mismo, pero en el slot de OTRO grupo de
+    posición (ej. "multiposition"), se vacía primero de su slot de origen
+    (`"from"`, sin `"to"`) y solo DESPUÉS se rellena su slot de destino
+    (`"to"`, sin `"from"`) -- nunca un solo `change` con ambos a la vez.
+    No depende de que haya sitio libre en el banquillo (a diferencia del
+    diseño anterior, ya obsoleto): vaciar el origen es siempre posible,
+    sea campo o banquillo.
     """
     squad = _squad_442()
     # "med_multi" es de posición MED esta semana, pero ahora mismo está en
@@ -233,62 +243,46 @@ def test_build_lineup_changes_benches_entrant_already_on_field_in_another_group(
         6: "def0", 7: "def1", 8: "def2", 9: "def3",
         10: "por1",
     }
-    # del1 sigue siendo titular esta semana pero perdió su slot -- no importa aquí.
-    current_bench_by_position = {}  # banquillo de MED (slot 0) libre
 
-    changes = build_lineup_changes(
-        squad_this_week, lineup["starters"], current_lineup_by_position, current_bench_by_position
-    )
+    changes = build_lineup_changes(squad_this_week, lineup["starters"], current_lineup_by_position)
 
-    med_multi_changes = [c for c in changes if c["to"] == "med_multi"]
-    assert len(med_multi_changes) == 2
-    bench_change, field_change = med_multi_changes  # el orden importa: banquillo primero
+    vacate_med_multi = [c for c in changes if c.get("from") == "med_multi"]
+    fill_med_multi = [c for c in changes if c.get("to") == "med_multi"]
+    assert vacate_med_multi == [{"cpt": False, "from": "med_multi", "position": 1, "isBench": False, "multiposition": False}]
+    assert len(fill_med_multi) == 1
+    assert fill_med_multi[0]["isBench"] is False
+    assert fill_med_multi[0]["position"] == 5  # el único slot MED que queda libre (el que ocupaba med3)
+    assert changes.index(vacate_med_multi[0]) < changes.index(fill_med_multi[0])
 
-    assert bench_change == {
-        "cpt": False, "to": "med_multi", "position": BENCH_SLOT_BY_POSITION["MED"],
-        "isBench": True, "multiposition": False,
-    }
-    assert field_change["isBench"] is False
-    assert field_change["position"] in {2, 3, 4, 5}  # slot del grupo MED
-    # Viene del banquillo tras el paso intermedio -- no necesita "from" del
-    # slot de campo que ocupaba antes (grupo DEL, ya gestionado aparte).
+    # El slot 1 (DEL) que med_multi deja libre también se rellena -- con
+    # del1, que esta semana sigue siendo titular pero había perdido su slot.
+    fill_del1 = [c for c in changes if c.get("to") == "del1"]
+    assert len(fill_del1) == 1 and fill_del1[0]["position"] == 1
 
 
-def test_build_lineup_changes_reports_conflict_when_bench_slot_also_occupied():
+def test_build_lineup_changes_deduplicates_vacate_when_same_player_seen_from_both_sides():
     """
-    Si el slot de banquillo de la posición del entrante también está
-    ocupado, build_lineup_changes() NO debe escribir a ciegas encadenando
-    más cambios sin confirmar -- debe dejarlo sin colocar y avisarlo en
-    `conflicts`.
+    med_multi se detecta como "ocupante a desalojar" desde el grupo DEL
+    (que abandona) Y como "entrante a vaciar" desde el grupo MED (al que
+    se une) -- es la MISMA operación física (un jugador solo puede estar
+    en un slot a la vez). Debe generarse un ÚNICO `change` de vaciar para
+    él, no dos -- el segundo fallaría, ya no estaría ahí.
     """
     squad = _squad_442()
     squad_this_week = [p for p in squad if p["id"] != "med3"] + [
         {"id": "med_multi", "position": "MED", "expected_score": 0.9}
     ]
     lineup = pick_lineup(squad_this_week, formation="4-4-2")
-
     current_lineup_by_position = {
         0: "del0", 1: "med_multi",
         2: "med0", 3: "med1", 4: "med2", 5: "med3",
         6: "def0", 7: "def1", 8: "def2", 9: "def3",
         10: "por1",
     }
-    current_bench_by_position = {BENCH_SLOT_BY_POSITION["MED"]: "otro_suplente"}  # banquillo de MED ocupado
 
-    conflicts = []
-    changes = build_lineup_changes(
-        squad_this_week, lineup["starters"], current_lineup_by_position, current_bench_by_position, conflicts
-    )
+    changes = build_lineup_changes(squad_this_week, lineup["starters"], current_lineup_by_position)
 
-    assert not any(c["to"] == "med_multi" for c in changes)
-    assert len(conflicts) == 1
-    assert "med_multi" in conflicts[0]
-
-    # Sin pasar `conflicts`, el mismo caso no debe romper ni generar el `change`.
-    changes_without_reporting = build_lineup_changes(
-        squad_this_week, lineup["starters"], current_lineup_by_position, current_bench_by_position
-    )
-    assert not any(c["to"] == "med_multi" for c in changes_without_reporting)
+    assert len([c for c in changes if c.get("from") == "med_multi"]) == 1
 
 
 # --- Banquillo: pick_substitutes() / build_bench_changes() ---
@@ -344,18 +338,36 @@ def test_build_bench_changes_uses_fixed_slots_and_skips_missing_positions():
         assert "from" not in change  # banquillo vacío antes -- ver siguiente test para el caso ocupado
 
 
-def test_build_bench_changes_includes_from_and_skips_already_correct():
+def test_build_bench_changes_vacates_before_filling_and_skips_already_correct():
     substitutes = {"POR": None, "DEF": "def_bueno", "MED": "med_unico", "DEL": None}
-    # DEF (slot 3) ya tiene a otro jugador -- debe llevar "from".
-    # MED (slot 0) ya tiene exactamente a "med_unico" -- no debe generar change.
+    # DEF (slot 3) ya tiene a otro jugador -- hay que vaciarlo primero
+    # (Futmondo no acepta "to"+"from" en el mismo `change`, ver TODO.md #1).
+    # MED (slot 0) ya tiene exactamente a "med_unico" -- no debe generar nada.
     current_bench_by_position = {3: "def_viejo", 0: "med_unico"}
 
     changes = build_bench_changes(substitutes, current_bench_by_position)
 
-    assert len(changes) == 1
-    assert changes[0]["to"] == "def_bueno"
-    assert changes[0]["from"] == "def_viejo"
-    assert changes[0]["position"] == 3
+    assert len(changes) == 2
+    assert changes[0] == {"cpt": False, "from": "def_viejo", "position": 3, "isBench": True, "multiposition": False}
+    assert changes[1] == {"cpt": False, "to": "def_bueno", "position": 3, "isBench": True, "multiposition": False}
+
+
+def test_build_bench_changes_vacates_substitute_from_field_if_still_there():
+    """
+    Si el suplente elegido para el banquillo está ahora mismo en el
+    CAMPO (dato desfasado de una semana anterior), hay que vaciarlo de
+    ahí antes de mandarlo al banquillo -- mismo mecanismo que
+    build_lineup_changes() para el caso "multiposition".
+    """
+    substitutes = {"POR": None, "DEF": "def_bueno", "MED": None, "DEL": None}
+    current_lineup_by_position = {7: "def_bueno"}
+
+    changes = build_bench_changes(substitutes, current_bench_by_position=None, current_lineup_by_position=current_lineup_by_position)
+
+    assert changes == [
+        {"cpt": False, "from": "def_bueno", "position": 7, "isBench": False, "multiposition": False},
+        {"cpt": False, "to": "def_bueno", "position": 3, "isBench": True, "multiposition": False},
+    ]
 
 
 # --- Sustitución manual: build_substitution_changes() ---
@@ -371,6 +383,14 @@ def _players_by_id(entries):
 
 
 def test_build_substitution_changes_swaps_injured_starter_for_bench_substitute():
+    """
+    Regresión del hallazgo real de TODO.md #1 (2026-08-18, prueba real
+    contra la liga de pruebas intercambiando un DEF titular por su
+    suplente): Futmondo rechaza un `change` que combine "to" y "from" a
+    la vez ("api.error.in_bench"/"api.error.in_field" según el sentido).
+    La sustitución son 4 `changes` en este orden fijo: vaciar titular,
+    vaciar suplente, rellenar campo, rellenar banquillo.
+    """
     players_by_id = _players_by_id(
         [("def_titular", "DEF", "lesionado"), ("def_suplente", "DEF", "")]
     )
@@ -379,20 +399,12 @@ def test_build_substitution_changes_swaps_injured_starter_for_bench_substitute()
 
     changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
 
-    assert len(changes) == 2
-    entering, leaving = changes
-
-    # El suplente entra al slot de campo que dejaba el titular, viniendo
-    # del banquillo -- el caso CONFIRMADO en producción, nunca roto.
-    assert entering == {
-        "cpt": False, "to": "def_suplente", "position": 6, "isBench": False,
-        "multiposition": False, "from": "def_titular",
-    }
-    # El titular sale al slot de banquillo que el suplente deja libre,
-    # SIN "from" (se asume vacío tras el primer change -- ver docstring).
-    assert leaving == {
-        "cpt": False, "to": "def_titular", "position": 3, "isBench": True, "multiposition": False,
-    }
+    assert changes == [
+        {"cpt": False, "from": "def_titular", "position": 6, "isBench": False, "multiposition": False},
+        {"cpt": False, "from": "def_suplente", "position": 3, "isBench": True, "multiposition": False},
+        {"cpt": False, "to": "def_suplente", "position": 6, "isBench": False, "multiposition": False},
+        {"cpt": False, "to": "def_titular", "position": 3, "isBench": True, "multiposition": False},
+    ]
 
 
 def test_build_substitution_changes_ignores_healthy_starters():
@@ -436,8 +448,8 @@ def test_build_substitution_changes_only_one_substitution_per_position():
 
     changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
 
-    assert len(changes) == 2  # solo una pareja, no dos
-    assert changes[0]["to"] == "def_suplente"
+    assert len(changes) == 4  # solo una sustitución (4 changes), no dos
+    assert changes[2]["to"] == "def_suplente"
 
 
 # --- confirmed_out_ids: señal de alineación real (independiente de status) ---
@@ -458,9 +470,9 @@ def test_build_substitution_changes_swaps_healthy_starter_missing_from_real_line
         players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids={"def_titular"}
     )
 
-    assert len(changes) == 2
-    assert changes[0]["to"] == "def_suplente"
-    assert changes[1]["to"] == "def_titular"
+    assert len(changes) == 4
+    assert changes[2]["to"] == "def_suplente"
+    assert changes[3]["to"] == "def_titular"
 
 
 def test_build_substitution_changes_skips_when_substitute_confirmed_out_of_real_lineup():
@@ -497,8 +509,8 @@ def test_build_substitution_changes_handles_multiple_positions_independently():
 
     changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position)
 
-    assert len(changes) == 4  # dos parejas, una por posición sustituida
-    entering_ids = {c["to"] for c in changes if not c["isBench"]}
+    assert len(changes) == 8  # dos sustituciones (4 changes cada una), una por posición
+    entering_ids = {c["to"] for c in changes if not c["isBench"] and "to" in c}
     assert entering_ids == {"def_suplente", "med_suplente"}
 
 

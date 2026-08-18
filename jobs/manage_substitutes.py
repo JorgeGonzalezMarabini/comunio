@@ -41,13 +41,15 @@ de las dos basta (ver engine.lineup_optimizer.build_substitution_changes()):
      desactivado, este job se comporta exactamente igual que antes de que
      existiera esta fuente.
 
-Sigue detrás de config.ENABLE_SUBSTITUTE_AUTO_SUBMIT (por defecto False,
-más conservador que ENABLE_LINEUP_AUTO_SUBMIT): build_substitution_changes()
-reutiliza una regla SÍ confirmada en producción (entrar desde el banquillo
-siempre funciona), pero la secuencia completa —dos llamadas HTTP reales,
-una detrás de otra— no se ha probado todavía con una lesión real. Cada
-sustitución decidida se audita en `substitution_decisions` pase lo que pase
-con el envío, igual que jobs/set_lineup.py hace con `lineup_decisions`.
+Sigue detrás de config.ENABLE_SUBSTITUTE_AUTO_SUBMIT (activado desde el
+2026-08-17, decisión explícita del usuario): build_substitution_changes()
+genera 4 llamadas HTTP reales por sustitución (vaciar titular, vaciar
+suplente, rellenar campo, rellenar banquillo — ver su docstring para el
+porqué: Futmondo nunca acepta un `change` con `"to"` y `"from"` a la vez,
+confirmado con una prueba real el 2026-08-18 interceptando la propia app
+web, ver TODO.md #1). Cada sustitución decidida se audita en
+`substitution_decisions` pase lo que pase con el envío, igual que
+jobs/set_lineup.py hace con `lineup_decisions`.
 
 A diferencia del resto de jobs (que siempre notifican un resumen, incluso
 "nada que hacer"), este SOLO notifica cuando hay alguna sustitución
@@ -99,31 +101,38 @@ def run():
     if not changes:
         return  # nadie confirmado fuera con suplente disponible esta pasada -- ver docstring del módulo
 
-    # build_substitution_changes() genera exactamente una pareja
-    # (entra suplente, sale titular) por posición sustituida, en ese orden
-    # -- ver su docstring para por qué el orden importa.
-    decisions = [
-        {"starter_id": entering["from"], "substitute_id": entering["to"], "position": players_by_id[entering["from"]]["position"]}
-        for entering in changes[0::2]
-    ]
+    # build_substitution_changes() genera exactamente 4 `changes` por
+    # sustitución, siempre en este orden fijo (ver su docstring): vaciar
+    # titular (campo), vaciar suplente (banquillo), rellenar campo con el
+    # suplente, rellenar banquillo con el titular. change_lineup() manda
+    # una llamada HTTP por `change` y devuelve los resultados en el MISMO
+    # orden -- por eso los resultados también se pueden agrupar en bloques
+    # de 4, sin depender de mirar "to"/"from" (los de vaciar no tienen "to").
+    CHANGES_PER_SUBSTITUTION = 4
+    decisions = []
+    for i in range(0, len(changes), CHANGES_PER_SUBSTITUTION):
+        _, _, fill_field, fill_bench = changes[i : i + CHANGES_PER_SUBSTITUTION]
+        starter_id, substitute_id = fill_bench["to"], fill_field["to"]
+        decisions.append(
+            {"starter_id": starter_id, "substitute_id": substitute_id, "position": players_by_id[starter_id]["position"]}
+        )
 
     now = datetime.now(timezone.utc).isoformat()
     submitted_ok = set()
     submit_error = None
+    error_by_starter_id = {}
 
     if config.ENABLE_SUBSTITUTE_AUTO_SUBMIT:
         try:
             results = client.change_lineup(changes)
-            ok_by_to = {r["change"]["to"]: r["ok"] for r in results}
-            error_by_to = {r["change"]["to"]: r["answer_or_error"] for r in results if not r["ok"]}
-            for d in decisions:
-                if ok_by_to.get(d["substitute_id"]) and ok_by_to.get(d["starter_id"]):
+            for i, d in enumerate(decisions):
+                block = results[i * CHANGES_PER_SUBSTITUTION : (i + 1) * CHANGES_PER_SUBSTITUTION]
+                if all(r["ok"] for r in block):
                     submitted_ok.add(d["starter_id"])
+                else:
+                    error_by_starter_id[d["starter_id"]] = next(r["answer_or_error"] for r in block if not r["ok"])
         except Exception as e:  # noqa: BLE001 -- un fallo al enviar no debe tumbar la auditoría de la decisión
             submit_error = str(e)
-            error_by_to = {}
-    else:
-        error_by_to = {}
 
     message = [f"manage_substitutes: {len(decisions)} sustitución(es) decidida(s):"]
     with get_connection() as conn:
@@ -145,7 +154,7 @@ def run():
             )
             line = f"  - {reason}"
             if config.ENABLE_SUBSTITUTE_AUTO_SUBMIT and not ok and not submit_error:
-                error = error_by_to.get(d["substitute_id"]) or error_by_to.get(d["starter_id"], "fallo desconocido")
+                error = error_by_starter_id.get(d["starter_id"], "fallo desconocido")
                 line += f" — NO aplicada: {error}"
             message.append(line)
 

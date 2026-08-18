@@ -113,12 +113,15 @@ def test_manage_substitutes_submits_both_changes_in_order_when_enabled(tmp_db, m
 
     assert len(calls) == 1
     changes = calls[0]
-    assert len(changes) == 2
-    # El suplente entra primero (desde el banquillo, caso confirmado);
-    # el titular sale después, al slot de banquillo ya libre -- ver
-    # docstring de build_substitution_changes sobre por qué el orden importa.
-    assert changes[0]["to"] == "def_suplente" and changes[0]["isBench"] is False
-    assert changes[1]["to"] == "def_titular" and changes[1]["isBench"] is True
+    assert len(changes) == 4
+    # Orden fijo confirmado con una prueba real (2026-08-18, ver docstring
+    # de build_substitution_changes): vaciar titular (campo), vaciar
+    # suplente (banquillo), rellenar campo con el suplente, rellenar
+    # banquillo con el titular -- Futmondo nunca acepta "to"+"from" juntos.
+    assert changes[0]["from"] == "def_titular" and changes[0]["isBench"] is False and "to" not in changes[0]
+    assert changes[1]["from"] == "def_suplente" and changes[1]["isBench"] is True and "to" not in changes[1]
+    assert changes[2]["to"] == "def_suplente" and changes[2]["isBench"] is False and "from" not in changes[2]
+    assert changes[3]["to"] == "def_titular" and changes[3]["isBench"] is True and "from" not in changes[3]
 
     assert "Enviada(s) a Futmondo (1/1 sustitución(es) aplicada(s))" in captured[0]
     with get_connection() as conn:
@@ -137,10 +140,11 @@ def test_manage_substitutes_partial_failure_is_not_reported_as_fully_sent(tmp_db
             return _lineup_answer([(6, "def_titular")], [(3, "def_suplente")])
 
         def change_lineup(self, changes):
-            # El segundo change (mandar al titular al banquillo) falla --
-            # el escenario sin confirmar que documenta build_substitution_changes().
+            # El tercer change (rellenar el campo con el suplente) falla --
+            # basta con que UNO de los 4 falle para que la sustitución
+            # entera no cuente como aplicada (ver manage_substitutes.run()).
             results = [{"change": c, "ok": True, "answer_or_error": {"code": "api.general.ok"}} for c in changes]
-            results[1] = {"change": changes[1], "ok": False, "answer_or_error": "Futmondo rechazó la operación: api.error.not_allowed"}
+            results[2] = {"change": changes[2], "ok": False, "answer_or_error": "Futmondo rechazó la operación: api.error.not_allowed"}
             return results
 
     captured = []
