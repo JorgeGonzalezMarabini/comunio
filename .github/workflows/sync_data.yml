@@ -3,7 +3,7 @@ name: sync_data
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 * * * *"  # cada hora
+    - cron: "0 8-23 * * *"  # cada hora, 08:00-23:00 UTC (sin madrugada: ningún consumidor corre 00:00-08:00)
 
 permissions:
   contents: write
