@@ -6,13 +6,19 @@ from db.models import get_connection
 from notifier import track_job_run
 
 
-def test_track_job_run_notifies_and_reraises_on_exception():
+def test_track_job_run_notifies_and_reraises_on_exception(tmp_db):
     """
     Regresión del fallo real (2026-08-17, ver notifier.py:track_job_run,
     antes notify_on_crash): jobs/run_market.py cayó entero en GitHub
     Actions sin ningún aviso -- el wrapper debe notificar por Telegram Y
     dejar que la excepción se propague igual (GitHub Actions debe seguir
     marcando el job en rojo).
+
+    `tmp_db` no se usa directamente aquí, pero `track_job_run` persiste
+    SIEMPRE en `job_runs` (ver notifier.py) -- sin aislar `config.
+    DATABASE_PATH` este test escribía de verdad en `db/futmondo.db`, el
+    archivo versionado en el repo (encontrado auditando el TODO #5:
+    filas "run_market"/"boom" coladas por este mismo test).
     """
     captured = []
     with patch("notifier.notify", side_effect=lambda m: captured.append(m)):
@@ -26,7 +32,7 @@ def test_track_job_run_notifies_and_reraises_on_exception():
     assert "boom" in captured[0]
 
 
-def test_track_job_run_does_not_notify_when_no_exception():
+def test_track_job_run_does_not_notify_when_no_exception(tmp_db):
     captured = []
     with patch("notifier.notify", side_effect=lambda m: captured.append(m)):
         with track_job_run("run_market"):
