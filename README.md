@@ -695,7 +695,7 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
 4. Los 5 workflows (`sync_data` cada hora, `run_market` y `run_sales`
-   2x/día, `set_lineup` viernes 18:00 UTC, `manage_substitutes` cada 20 min
+   2x/día, `set_lineup` viernes 15:23 UTC, `manage_substitutes` cada 20 min
    de viernes a lunes) ya tienen el `schedule:` activado — correrán solos
    en cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
    vuelta al repo al terminar (si no, cada ejecución perdería lo
@@ -754,18 +754,21 @@ cada uno:
   cada semana — puede arrancar viernes desde ~19:00 CEST (17:00 UTC). El
   cron que había antes (`0 18 * * 5` = 18:00 UTC = **20:00 CEST**) podía
   quedar DESPUÉS de un primer partido a esa hora — un problema estructural
-  independiente de cualquier delay de GitHub. Se adelantó a `0 10 * * 5`
-  (10:00 UTC) para dejar horas de margen frente a cualquier horario
-  plausible; los cambios de última hora (lesión/no convocado confirmado ya
-  cerca del partido) los sigue cubriendo `manage_substitutes.yml` por
-  separado, así que adelantar `set_lineup` no pierde calidad de decisión.
-  **Sigue sin ser un dato dinámico real** — no hay en el código ninguna
-  fuente que consulte el calendario real de cada jornada (a diferencia de
-  Fotmob para "quién juega hoy", no se usa nada equivalente para "cuándo
-  empieza la jornada"); si alguna jornada excepcional empezara antes de
-  las 10:00 UTC del viernes (inusual, pero no imposible), seguiría sin
-  cubrirse. La solución completa sería leer ese calendario real en vez de
-  asumir un día/hora fijos — no implementado.
+  independiente de cualquier delay de GitHub. Se adelantó a `23 15 * * 5`
+  (15:23 UTC — minuto ":23", no en punto, mismo motivo que `sync_data.yml`)
+  para dejar ~1h40 de margen frente al horario más temprano documentado
+  (decisión explícita del usuario, 2026-08-18: prefirió este margen más
+  ajustado a la alternativa más conservadora de 10:00 UTC); los cambios de
+  última hora (lesión/no convocado confirmado ya cerca del partido) los
+  sigue cubriendo `manage_substitutes.yml` por separado, así que adelantar
+  `set_lineup` no pierde calidad de decisión. **Sigue sin ser un dato
+  dinámico real** — no hay en el código ninguna fuente que consulte el
+  calendario real de cada jornada (a diferencia de Fotmob para "quién
+  juega hoy", no se usa nada equivalente para "cuándo empieza la
+  jornada"); si alguna jornada excepcional empezara antes de las 15:23 UTC
+  del viernes (p. ej. un partido de viernes más temprano de lo documentado
+  hasta ahora), seguiría sin cubrirse. La solución completa sería leer ese
+  calendario real en vez de asumir un día/hora fijos — no implementado.
 
 Ranking de criticidad actualizado (de más a menos sensible al delay):
 
@@ -774,7 +777,7 @@ Ranking de criticidad actualizado (de más a menos sensible al delay):
    cada 20 min) — si esta única ejecución llega tarde, la alineación de
    toda la semana queda mal fijada hasta el viernes siguiente. Ver arriba:
    el riesgo principal ya no es tanto el delay de GitHub (mitigado con el
-   margen de horas al adelantarlo a las 10:00 UTC) sino jornadas
+   margen de hora y pico al adelantarlo a las 15:23 UTC) sino jornadas
    excepcionales que empiecen antes de esa hora.
 2. **`manage_substitutes`** (MEDIO, mitigado por frecuencia) — el cron a
    20 min ya está para esto: si UNA pasada llega tarde, la siguiente (20
@@ -814,7 +817,7 @@ Futmondo. Ya confirmado (ver arriba) y ajustado en `set_lineup.yml` /
 `run_market.yml`. Pendiente real que queda, y que no se resuelve con
 horario: una fuente que consulte el calendario real de cada jornada, para
 que `set_lineup` no dependa de asumir "siempre viernes, siempre antes de
-las 10:00 UTC".
+las 15:23 UTC".
 
 ## Estructura
 
