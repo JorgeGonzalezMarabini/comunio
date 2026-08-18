@@ -123,6 +123,41 @@ def test_set_lineup_submits_to_futmondo_when_enabled(tmp_db, monkeypatch):
     assert row["submitted_to_futmondo"] == 1
 
 
+def test_set_lineup_stays_silent_when_rerun_finds_nothing_new(tmp_db, monkeypatch):
+    """
+    Regresión (2026-08-18): con el cron ahora repetido varias veces antes
+    del cierre (ver set_lineup.yml, mitiga un clausulazo de última hora),
+    una pasada sin cambios NO debe notificar -- si no, serían horas de la
+    misma notificación repetida cada 20 min, puro ruido en Telegram (ver
+    docstring del módulo). Sí debe seguir auditando la decisión.
+    """
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", True)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+        bench_ids = _add_bench_candidates(conn)  # sin banquillo habría warnings de riesgo -- también deben notificar
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in squad_ids + bench_ids]}
+
+        def get_lineup(self):
+            return {"answer": {"strategy": "4-4-2", "players": []}}
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", return_value={"players": [], "teams": {}, "dates": []}), \
+         patch("jobs.set_lineup.build_lineup_changes", return_value=[]), \
+         patch("jobs.set_lineup.build_bench_changes", return_value=[]):
+        set_lineup.run()
+
+    assert captured == []
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT submitted_to_futmondo FROM lineup_decisions").fetchone()
+    assert row["submitted_to_futmondo"] == 1  # sigue auditando aunque no notifique
+
+
 def test_set_lineup_partial_failure_is_not_reported_as_fully_sent(tmp_db, monkeypatch):
     """
     Regresión del bug real de producción (2026-08-17, ver docstring de

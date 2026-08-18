@@ -695,7 +695,7 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
 4. Los 5 workflows (`sync_data` cada hora, `run_market` y `run_sales`
-   2x/día, `set_lineup` viernes 15:23 UTC, `manage_substitutes` cada 20 min
+   2x/día, `set_lineup` viernes cada 20 min 15:23-19:43 UTC, `manage_substitutes` cada 20 min
    de viernes a lunes) ya tienen el `schedule:` activado — correrán solos
    en cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
    vuelta al repo al terminar (si no, cada ejecución perdería lo
@@ -754,31 +754,50 @@ cada uno:
   cada semana — puede arrancar viernes desde ~19:00 CEST (17:00 UTC). El
   cron que había antes (`0 18 * * 5` = 18:00 UTC = **20:00 CEST**) podía
   quedar DESPUÉS de un primer partido a esa hora — un problema estructural
-  independiente de cualquier delay de GitHub. Se adelantó a `23 15 * * 5`
-  (15:23 UTC — minuto ":23", no en punto, mismo motivo que `sync_data.yml`)
-  para dejar ~1h40 de margen frente al horario más temprano documentado
-  (decisión explícita del usuario, 2026-08-18: prefirió este margen más
-  ajustado a la alternativa más conservadora de 10:00 UTC); los cambios de
-  última hora (lesión/no convocado confirmado ya cerca del partido) los
-  sigue cubriendo `manage_substitutes.yml` por separado, así que adelantar
-  `set_lineup` no pierde calidad de decisión. **Sigue sin ser un dato
-  dinámico real** — no hay en el código ninguna fuente que consulte el
-  calendario real de cada jornada (a diferencia de Fotmob para "quién
-  juega hoy", no se usa nada equivalente para "cuándo empieza la
-  jornada"); si alguna jornada excepcional empezara antes de las 15:23 UTC
-  del viernes (p. ej. un partido de viernes más temprano de lo documentado
-  hasta ahora), seguiría sin cubrirse. La solución completa sería leer ese
-  calendario real en vez de asumir un día/hora fijos — no implementado.
+  independiente de cualquier delay de GitHub. Se adelantó a las 15:23 UTC
+  (minuto ":23", no en punto, mismo motivo que `sync_data.yml`; hora
+  elegida explícitamente por el usuario, 2026-08-18, en vez de la
+  alternativa más conservadora de 10:00 UTC), dejando ~1h40 de margen
+  frente al horario más temprano documentado.
+
+  **Además, repetido cada 20 min hasta las 19:43 UTC** (`3,23,43 15-19 * *
+  5`, en vez de una sola ejecución) — decisión explícita del usuario
+  (2026-08-18) para mitigar el riesgo de un "clausulazo" (u otra baja) de
+  última hora sobre un titular YA decidido: como `jobs/set_lineup.py`
+  siempre recalcula desde cero contra el estado actual de la plantilla, si
+  un titular desaparece entre dos pasadas, la siguiente ya lo sustituye
+  antes del cierre real — antes, con una sola ejecución, esa decisión
+  quedaba fija toda la semana pasara lo que pasara justo después. Mismo
+  razonamiento que llevó a `manage_substitutes.yml` de cada 2h a cada 20
+  min (ver "Banquillo/suplentes"). Sin coste de ruido en Telegram: el job
+  ya no notifica en las pasadas sin novedad (con auto-submit activado, sin
+  cambios que aplicar y sin avisos de riesgo — ver docstring de
+  `jobs/set_lineup.py`), igual que `manage_substitutes` ya hacía.
+
+  **Sin confirmar con un caso real**: qué responde la API de Futmondo si
+  se manda un cambio de alineación YA pasado el cierre de jornada. Se
+  asume que lo rechaza o no tiene efecto (como la mayoría de fantasy
+  bloquean la plantilla al empezar el partido), pero correr repetido
+  después del cierre, si la asunción fuera falsa, tampoco haría daño —
+  como mucho sería redundante (ver docstring del job).
+
+  **Sigue sin ser un dato dinámico real** — no hay en el código ninguna
+  fuente que consulte el calendario real de cada jornada (a diferencia de
+  Fotmob para "quién juega hoy", no se usa nada equivalente para "cuándo
+  empieza la jornada"); si alguna jornada excepcional empezara antes de
+  las 15:23 UTC del viernes, seguiría sin cubrirse. La solución completa
+  sería leer ese calendario real en vez de asumir un día/hora fijos — no
+  implementado.
 
 Ranking de criticidad actualizado (de más a menos sensible al delay):
 
-1. **`set_lineup`** (CRÍTICO) — corre UNA VEZ por semana. Sin red de
-   seguridad propia (a diferencia de `manage_substitutes`, que se repite
-   cada 20 min) — si esta única ejecución llega tarde, la alineación de
-   toda la semana queda mal fijada hasta el viernes siguiente. Ver arriba:
-   el riesgo principal ya no es tanto el delay de GitHub (mitigado con el
-   margen de hora y pico al adelantarlo a las 15:23 UTC) sino jornadas
-   excepcionales que empiecen antes de esa hora.
+1. **`set_lineup`** (MEDIO, bajó de CRÍTICO) — ya no corre una sola vez
+   por semana: repetido cada 20 min (15:23-19:43 UTC los viernes, ver
+   arriba), con la misma red de seguridad por frecuencia que
+   `manage_substitutes`. El riesgo que queda es el mismo tipo que el de
+   `manage_substitutes` (delay acumulado reduciendo el margen entre
+   pasadas) más el caso de una jornada excepcional que empiece antes de
+   las 15:23 UTC del viernes (sin cobertura, no es un tema de frecuencia).
 2. **`manage_substitutes`** (MEDIO, mitigado por frecuencia) — el cron a
    20 min ya está para esto: si UNA pasada llega tarde, la siguiente (20
    min después) puede seguir cubriendo la ventana. El riesgo no es un

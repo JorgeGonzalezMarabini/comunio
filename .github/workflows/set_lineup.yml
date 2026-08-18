@@ -3,24 +3,39 @@ name: set_lineup
 on:
   workflow_dispatch: {}
   schedule:
-    # Viernes 15:23 UTC (antes 18:00 UTC) -- confirmado en la FAQ oficial
-    # de Futmondo (help.futmondo.com/article/92): el cierre real es "el
-    # inicio de la jornada, que siempre coincide con el primer partido", NO
-    # una hora de reloj fija. Un partido de viernes de LaLiga puede
-    # arrancar desde ~19:00 CEST (17:00 UTC) -- el cron anterior (18:00 UTC
-    # = 20:00 CEST) podía quedar DESPUÉS del primer partido en jornadas
-    # así, sin que hiciera falta ningún delay de GitHub para llegar tarde.
-    # 15:23 UTC deja ~1h40 de margen frente al horario más temprano
-    # documentado (+ el delay de GitHub, ver README) sin perder calidad de
-    # decisión: los cambios de última hora (lesión/no convocado confirmado
-    # cerca del partido) los cubre manage_substitutes.yml por separado.
-    # Minuto :23 (no en punto) a propósito, mismo motivo que sync_data.yml.
+    # Viernes cada 20 min, 15:23-19:43 UTC (antes una sola vez a las
+    # 18:00 UTC) -- confirmado en la FAQ oficial de Futmondo
+    # (help.futmondo.com/article/92): el cierre real es "el inicio de la
+    # jornada, que siempre coincide con el primer partido", NO una hora de
+    # reloj fija. Un partido de viernes de LaLiga puede arrancar desde
+    # ~19:00 CEST (17:00 UTC) hasta más tarde (~21:30 CEST / 19:30 UTC) --
+    # el cron anterior de una sola ejecución (18:00 UTC = 20:00 CEST) podía
+    # quedar DESPUÉS del primer partido en jornadas tempranas, sin ninguna
+    # otra oportunidad de corregirlo hasta el viernes siguiente.
+    #
+    # Repetido cada 20 min en vez de una sola vez -- decisión explícita del
+    # usuario (2026-08-18) para mitigar el riesgo de un "clausulazo" (u
+    # otra baja) de última hora sobre un titular ya decidido: como
+    # jobs/set_lineup.py SIEMPRE recalcula desde cero contra el estado
+    # actual de la plantilla, si un titular desaparece entre dos pasadas
+    # la siguiente ya lo sustituye antes del cierre real, sin esperar a que
+    # manage_substitutes.yml reaccione (ese solo actúa DESPUÉS del cierre,
+    # sobre la alineación ya fijada). Mismo razonamiento que llevó a
+    # manage_substitutes.yml de cada 2h a cada 20 min (ver README,
+    # "Banquillo/suplentes"). Sin coste de ruido en Telegram: el job ya no
+    # notifica en las pasadas sin novedad (ver docstring de
+    # jobs/set_lineup.py).
+    #
+    # Rango 15:23-19:43 UTC: arranca con el mismo margen de antes frente al
+    # horario más temprano documentado y sigue cubriendo hasta después del
+    # más tardío. Minutos :03/:23/:43 (no en punto) por el mismo motivo que
+    # sync_data.yml -- ":23" se conserva como ancla porque fue la hora
+    # elegida explícitamente por el usuario antes de repetir el cron.
     # Sigue sin ser un dato dinámico real -- si una jornada empezara antes
-    # de esta hora (inusual pero no imposible: mitad de semana tras un
-    # parón, o un partido de viernes más temprano de lo documentado hasta
-    # ahora), seguiría sin cubrirse; la solución completa requeriría leer
+    # de las 15:23 UTC (inusual pero no imposible: mitad de semana tras un
+    # parón), seguiría sin cubrirse; la solución completa requeriría leer
     # el calendario real de la jornada, no implementado todavía.
-    - cron: "23 15 * * 5"
+    - cron: "3,23,43 15-19 * * 5"
 
 permissions:
   contents: write

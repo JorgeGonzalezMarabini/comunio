@@ -1,6 +1,33 @@
 """
 Job: decide y fija la alineación antes del cierre de jornada.
 
+Corre VARIAS veces antes del cierre, no una sola (ver set_lineup.yml) --
+a propósito, para mitigar el riesgo de un "clausulazo" (u otra baja) de
+última hora sobre un titular ya decidido: como `run()` siempre recalcula
+desde cero contra el estado actual de la plantilla, si un titular
+desaparece de la plantilla entre dos pasadas, la siguiente pasada ya lo
+sustituye por su reemplazo antes del cierre real, en vez de quedarse con
+la decisión (ya inválida) de la primera y única ejecución de antes. Mismo
+razonamiento que llevó a manage_substitutes.yml de cada 2h a cada 20 min
+(ver README, "Banquillo/suplentes") aplicado aquí al lado de la
+alineación, no de las sustituciones post-cierre.
+
+Por eso, y a diferencia del resto de jobs (que siempre notifican un
+resumen), esta notifica siempre EXCEPTO cuando no hay nada nuevo que
+contar (auto-submit activado, alineación ya coincidía, sin avisos de
+riesgo) -- ver el `return` antes de `notify()` al final de `run()`.
+Notificar la misma alineación sin cambios cada pasada, durante horas,
+sería puro ruido en Telegram (idéntico motivo al de
+jobs/manage_substitutes.py, ver su docstring).
+
+**Sin confirmar con un caso real** (2026-08-18): qué responde la API de
+Futmondo si `change_lineup()` se llama YA pasado el cierre de jornada. Se
+asume que rechaza el cambio o no tiene efecto (igual que la mayoría de
+juegos de fantasy bloquean la alineación al empezar el partido), pero no
+se ha probado -- si la API en cambio aceptara el cambio sin más, correr
+repetido tras el cierre no haría daño (`change_lineup()` sigue sin
+lanzar en el primer fallo, audita cada intento), solo sería redundante.
+
 Asume que jobs/sync_data.py ya corrió antes en el cron. La decisión (quién
 juega, con qué formación y por qué) SIEMPRE se calcula y se audita en
 `lineup_decisions`, pase lo que pase con el envío a Futmondo.
@@ -184,6 +211,19 @@ def run():
     if risk_warnings:
         message.append("⚠️ Riesgo de plantilla (posición sin suplente disponible):")
         message.extend(f"  - {w}" for w in risk_warnings)
+
+    # A diferencia de jobs/manage_substitutes.py (que solo notifica si hay
+    # sustitución), aquí SÍ se notifica siempre... salvo en este caso: cron
+    # repetido varias veces antes del cierre de jornada (ver
+    # set_lineup.yml, pensado para reaccionar a un clausulazo de última
+    # hora) + auto-submit activado + nada que cambiar + nada anómalo que
+    # avisar sería la MISMA notificación repetida cada pasada durante
+    # horas, puro ruido en Telegram (mismo motivo que manage_substitutes,
+    # ver su docstring). El resto de casos (fallo, envío parcial, riesgo de
+    # plantilla, auto-submit desactivado) siguen notificando siempre --
+    # justo lo que interesa ver si el cron corre repetido.
+    if config.ENABLE_LINEUP_AUTO_SUBMIT and not submit_error and not failed_players and not risk_warnings and changes_needed == 0:
+        return
 
     notify("\n".join(message))
 
