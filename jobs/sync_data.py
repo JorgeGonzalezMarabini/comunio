@@ -24,7 +24,7 @@ import config
 from clients.futmondo_client import FutmondoClient, FUTMONDO_POSITION_MAP
 from clients.laliga_stats_client import build_player_index, get_league_data_with_fallback, match_player
 from db.models import init_db, get_connection, get_open_bids, update_bid_status, get_open_sales, update_sale_status
-from notifier import notify, notify_on_crash
+from notifier import notify, track_job_run
 
 
 def _reconcile_sales(roster_player_ids: set) -> int:
@@ -251,5 +251,5 @@ def run():
 
 
 if __name__ == "__main__":
-    with notify_on_crash("sync_data"):
+    with track_job_run("sync_data"):
         run()

@@ -142,6 +142,21 @@ CREATE TABLE IF NOT EXISTS real_lineup_checks (
     checked_at          TEXT NOT NULL,
     PRIMARY KEY (team, match_date)
 );
+
+-- Duración y resultado de cada ejecución de un job (jobs/*.py, ver
+-- notifier.track_job_run()) -- antes no había ninguna forma de saber
+-- cuánto tarda cada job sin abrir a mano cada ejecución de GitHub Actions.
+-- Una fila por ejecución, tanto si termina bien como si revienta con una
+-- excepción no controlada.
+CREATE TABLE IF NOT EXISTS job_runs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name          TEXT NOT NULL,        -- 'run_market' | 'sync_data' | 'run_sales' | 'set_lineup' | 'manage_substitutes'
+    status            TEXT NOT NULL,        -- 'ok' | 'error'
+    duration_seconds  REAL NOT NULL,
+    error             TEXT,                 -- "TipoExcepcion: mensaje" si status='error', NULL si 'ok'
+    started_at        TEXT NOT NULL,
+    finished_at       TEXT NOT NULL
+);
 """
 
 
@@ -330,6 +345,38 @@ def save_real_lineup_check(
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (team, match_date, fixture_id, 1 if lineup_published else 0, json.dumps(starting_player_ids), checked_at),
+        )
+
+
+def record_job_run(
+    job_name: str,
+    status: str,
+    duration_seconds: float,
+    started_at,
+    error: str = None,
+) -> None:
+    """
+    Persiste cuánto tardó una ejecución de un job (ver
+    notifier.track_job_run(), que llama a esto al terminar `run()`, tanto
+    en éxito como en fallo no controlado) -- antes no había ninguna forma
+    de saber cuánto tarda cada job sin abrir a mano cada ejecución de
+    GitHub Actions.
+
+    `started_at`: datetime (con tz) de cuándo empezó la ejecución --
+    `finished_at` se calcula aquí mismo como "ahora". `status`: 'ok' o
+    'error'. `error`: "TipoExcepcion: mensaje" si status='error', None si
+    'ok'.
+    """
+    from datetime import datetime, timezone
+
+    finished_at = datetime.now(timezone.utc)
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO job_runs (job_name, status, duration_seconds, error, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (job_name, status, duration_seconds, error, started_at.isoformat(), finished_at.isoformat()),
         )
 
 

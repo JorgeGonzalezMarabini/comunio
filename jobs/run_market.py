@@ -51,7 +51,7 @@ from db.models import get_connection, get_bids_risked_today, get_pending_bid_amo
 from engine.bidding_strategy import apply_position_priority, decide_bids_for_market, dynamic_player_cap
 from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
-from notifier import notify, notify_on_crash
+from notifier import notify, track_job_run
 
 
 def _persist_bid(conn, decision: dict, status: str, now: str) -> None:
@@ -184,5 +184,5 @@ def run():
 
 
 if __name__ == "__main__":
-    with notify_on_crash("run_market"):
+    with track_job_run("run_market"):
         run()

@@ -597,15 +597,19 @@ Dos arreglos, ninguno oculta el fallo si de verdad hace falta que se vea:
   cambio de alineación dos veces). Un `HTTPError` (4xx/5xx CON respuesta)
   tampoco se reintenta nunca — ya hubo respuesta, repetir no cambiaría nada.
 
-- **Aviso inmediato de caída** (`notifier.notify_on_crash`, envuelve el
-  `if __name__ == "__main__":` de los 5 jobs): si `run()` deja escapar
-  cualquier excepción no controlada (agotados los reintentos o de otro
-  tipo), se notifica por Telegram ANTES de dejarla propagar — GitHub
-  Actions sigue marcando el job en rojo igual, esto solo evita depender de
-  mirar los logs a mano para enterarse. Cada job ya notificaba siempre sus
-  fallos "esperados" (rechazo de una puja, envío parcial de la
-  alineación...) vía `notify()` al final de `run()`; esto cubre el hueco de
-  los fallos que ni siquiera llegan a esa última línea.
+- **Aviso inmediato de caída + instrumentación de tiempos**
+  (`notifier.track_job_run`, envuelve el `if __name__ == "__main__":` de
+  los 5 jobs): si `run()` deja escapar cualquier excepción no controlada
+  (agotados los reintentos o de otro tipo), se notifica por Telegram ANTES
+  de dejarla propagar — GitHub Actions sigue marcando el job en rojo
+  igual, esto solo evita depender de mirar los logs a mano para enterarse.
+  Cada job ya notificaba siempre sus fallos "esperados" (rechazo de una
+  puja, envío parcial de la alineación...) vía `notify()` al final de
+  `run()`; esto cubre el hueco de los fallos que ni siquiera llegan a esa
+  última línea. Además mide cuánto tarda `run()` y lo persiste en la tabla
+  `job_runs` (éxito o fallo, con la excepción si la hubo) — antes no había
+  ninguna forma de saber cuánto tarda cada job sin abrir cada ejecución de
+  GitHub Actions a mano.
 
 ## Pausar el bot sin tocar los 5 workflows (`ENABLE_BOT`)
 

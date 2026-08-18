@@ -61,7 +61,7 @@ import config
 from clients.futmondo_client import FutmondoClient
 from db.models import get_connection, get_player_features
 from engine.lineup_optimizer import build_substitution_changes
-from notifier import notify, notify_on_crash
+from notifier import notify, track_job_run
 
 
 def run():
@@ -163,5 +163,5 @@ def run():
 
 
 if __name__ == "__main__":
-    with notify_on_crash("manage_substitutes"):
+    with track_job_run("manage_substitutes"):
         run()
