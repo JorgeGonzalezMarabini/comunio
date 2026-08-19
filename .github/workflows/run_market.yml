@@ -11,7 +11,11 @@ on:
     # "cierre real" al que ajustar este cron: con el listado más corto (1
     # día), 2 pasadas/día ya da margen de sobra para no perder ningún
     # candidato entre que sale y que expira.
-    - cron: "0 8,20 * * *"  # dos veces al día -- margen de sobra frente a listados de 1-3 días
+    # Minuto 6 (no en punto), mismo motivo que sync_data.yml: GitHub retrasa
+    # los cron programados EN PUNTO por congestión (minuto más solicitado de
+    # toda la plataforma). Sin deadline externo real (ver README, "Delay de
+    # GitHub Actions y horas críticas"), es seguro mover el minuto.
+    - cron: "6 8,20 * * *"  # dos veces al día -- margen de sobra frente a listados de 1-3 días
 
 permissions:
   contents: write

@@ -3,7 +3,10 @@ name: run_sales
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 9,21 * * *"  # dos veces al día, poco después de run_market
+    # Minuto 6 (no en punto), mismo motivo que sync_data.yml/run_market.yml:
+    # GitHub retrasa los cron EN PUNTO por congestión. Se conserva el hueco
+    # de 1h frente a run_market.
+    - cron: "6 9,21 * * *"  # dos veces al día, poco después de run_market
 
 permissions:
   contents: write

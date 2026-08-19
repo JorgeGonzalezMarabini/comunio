@@ -735,6 +735,13 @@ Ese cambio es seguro para esos dos jobs porque ninguno tiene un deadline
 externo real — solo necesitan correr "con frecuencia suficiente", no en un
 instante exacto.
 
+**(2026-08-19)** `run_market.yml` y `run_sales.yml` seguían en el minuto
+`:00` (`0 8,20 * * *` / `0 9,21 * * *`) pese a que la sección de abajo ya
+había confirmado que ninguno de los dos tiene un cierre de reloj real al
+que ajustarse — no había motivo para dejarlos en el minuto pico. Movidos a
+`:06` (mismo minuto que `sync_data`), conservando el hueco de 1h entre
+ambos.
+
 **`set_lineup` y `run_market` sí tenían, en teoría, un deadline externo
 real** — se investigó cuál es exactamente en la FAQ oficial de Futmondo
 (help.futmondo.com) en vez de suponerlo, con resultado bien distinto para
