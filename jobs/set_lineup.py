@@ -76,6 +76,24 @@ También manda el banquillo/suplentes: un slot FIJO por posición (ver
 get_lineup() confirmando la posición numérica de cada uno). Solo se
 manda un suplente por posición (no una lista) porque Futmondo solo tiene
 sitio para eso.
+
+Cuarto bug real confirmado en producción (2026-08-19, ejecución real
+contra la liga real, jornada del cron de las 09:27): un intercambio
+titular<->suplente normal dentro del mismo grupo de posición (aquí, DEL:
+Fer Niño entraba desde el banquillo por Iván Romero; DEF: Cortés entraba
+desde el banquillo por Tárrega, a la vez) hacía que `build_bench_changes()`
+repitiera, sobre esos mismos 4 jugadores, un `"from"` que
+`build_lineup_changes()` YA había mandado un momento antes en la misma
+pasada — Telegram avisó "enviada a medias" con `"api.error.not_allowed"`
+en los 4. Ver el docstring de `engine.lineup_optimizer.build_bench_changes()`
+para el mecanismo exacto (la foto de `get_lineup()` que ambas funciones
+comparten queda desfasada a mitad de pasada, porque los `changes` de
+`build_lineup_changes()` se mandan primero) y el `already_vacated` que lo
+arregla. El efecto neto sobre Futmondo no llegó a ser incorrecto (los
+`"to"` de relleno sí se aplicaron bien, ver el mismo docstring) — el
+único problema real era la notificación de fallo parcial, ruidosa y
+engañosa, cada vez que tocaba este tipo de intercambio (probablemente el
+caso más común de cambio de alineación semana a semana).
 """
 import json
 from datetime import datetime, timezone
@@ -169,7 +187,14 @@ def run():
                 p["position"]: p["id"] for p in current_lineup_answer.get("bench", {}).get("players", [])
             }
             changes = build_lineup_changes(adjusted, lineup["starters"], current_lineup_by_position, current_bench_by_position)
-            changes += build_bench_changes(substitutes_by_position, current_bench_by_position, current_lineup_by_position)
+            # Ver docstring de build_bench_changes() para el bug real (2026-08-19)
+            # que esto evita: sin decirle qué jugadores YA vació build_lineup_changes()
+            # esta misma pasada, repite un "from" caducado sobre ellos (caso normal:
+            # intercambio titular<->suplente) y Futmondo lo rechaza con "api.error.not_allowed".
+            already_vacated = {c["from"] for c in changes if "from" in c}
+            changes += build_bench_changes(
+                substitutes_by_position, current_bench_by_position, current_lineup_by_position, already_vacated=already_vacated
+            )
             changes_needed = len(changes)
             results = client.change_lineup(changes)
             for r in results:

@@ -8,7 +8,7 @@ confirmar > limitación de API externa > mejora futura/calibración).
 
 Cada entrada indica **qué pasa**, **por qué importa**, **a qué afecta** y
 **dónde está** en el código (archivo:línea) por si hace falta profundizar.
-Última revisión: 2026-08-18.
+Última revisión: 2026-08-19.
 
 ---
 
@@ -546,6 +546,31 @@ medias (cancela pero `place_bid()` posterior falla) queda auditado en
 ---
 
 ## Ya resuelto (para referencia, no es un pendiente)
+
+**`build_bench_changes()` repetía un `"from"` ya caducado en un intercambio
+titular↔suplente** — confirmado y arreglado el 2026-08-19, ejecución real
+contra la liga real (cron de `set_lineup` de las 09:27). Un intercambio
+titular↔suplente normal en dos grupos de posición a la vez (Fer Niño↔Iván
+Romero en DEL, Cortés↔Tárrega en DEF) hizo que Telegram avisara "enviada a
+medias" con `"api.error.not_allowed"` en los 4 jugadores. Causa: la
+misma foto de `get_lineup()` (tomada una vez al principio de `run()`) se
+usa para construir tanto `build_lineup_changes()` como
+`build_bench_changes()`, pero `jobs/set_lineup.py` manda primero TODOS los
+`changes` de la primera y solo después los de la segunda — si el jugador
+implicado ya fue vaciado por `build_lineup_changes()` en la misma pasada
+(justo el caso de un swap normal), el `"from"` que genera
+`build_bench_changes()` a partir de la foto vieja ya no es cierto y
+Futmondo lo rechaza. El efecto neto sobre Futmondo no llegó a ser
+incorrecto (los rellenos sí se aplicaron bien, confirmado porque la pasada
+siguiente del cron, 6 minutos después, ya no encontró ningún `change`
+pendiente) — el problema real era la notificación de fallo parcial,
+ruidosa y engañosa, en el que probablemente es el tipo de cambio de
+alineación más común semana a semana. Arreglado pasando a
+`build_bench_changes()` el conjunto `already_vacated` de jugadores que
+`build_lineup_changes()` ya vació esta misma pasada, para que se calle en
+vez de repetir el `"from"`. Ver `engine/lineup_optimizer.py`
+(`build_bench_changes`), `jobs/set_lineup.py`, `tests/test_lineup_optimizer.py`
+(`test_build_bench_changes_skips_vacate_already_done_by_lineup_changes`).
 
 **Sesgo de xG por posición en `normalize_pool()`** — arreglado el
 2026-08-17. Antes se normalizaba xG (y demás features) contra todo el pool

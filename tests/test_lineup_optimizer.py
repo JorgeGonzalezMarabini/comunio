@@ -352,6 +352,57 @@ def test_build_bench_changes_vacates_before_filling_and_skips_already_correct():
     assert changes[1] == {"cpt": False, "to": "def_bueno", "position": 3, "isBench": True, "multiposition": False}
 
 
+def test_build_bench_changes_skips_vacate_already_done_by_lineup_changes():
+    """
+    Caso real confirmado en producción (2026-08-19, ver docstring de
+    build_bench_changes() y de jobs/set_lineup.py): un intercambio
+    titular<->suplente normal dentro del mismo grupo de posición (aquí,
+    DEL: "del_suplente" entra de titular por "del_titular_saliente", que
+    pasa a ser el nuevo suplente) hace que, sin `already_vacated`, esta
+    función repita sobre esos mismos jugadores un "from" que
+    build_lineup_changes() ya mandó un momento antes en la misma pasada
+    -- Futmondo lo rechaza con "api.error.not_allowed" al no estar ya ahí.
+    """
+    current_bench_by_position = {1: "del_suplente"}  # banquillo DEL antes del cambio
+    current_lineup_by_position = {0: "del_titular_saliente"}  # campo DEL antes del cambio
+
+    # build_lineup_changes() ya vació a los dos jugadores implicados en el
+    # intercambio (el que sale del campo y el que sale del banquillo para
+    # entrar de titular) -- esto es lo que jobs/set_lineup.py calcula a
+    # partir de sus propios `changes` y pasa como `already_vacated`.
+    already_vacated = {"del_titular_saliente", "del_suplente"}
+
+    changes = build_bench_changes(
+        {"POR": None, "DEF": None, "MED": None, "DEL": "del_titular_saliente"},
+        current_bench_by_position,
+        current_lineup_by_position,
+        already_vacated=already_vacated,
+    )
+
+    # Ni el vaciado del banquillo (ocupante antiguo ya vacío) ni el
+    # vaciado del campo (el que entra ya vacío de ahí) se repiten -- solo
+    # queda el relleno real del slot de banquillo.
+    assert changes == [
+        {"cpt": False, "to": "del_titular_saliente", "position": 1, "isBench": True, "multiposition": False}
+    ]
+
+
+def test_build_bench_changes_still_vacates_when_not_already_vacated():
+    """Sin `already_vacated` (o con un set que no incluye al implicado), el comportamiento no cambia."""
+    changes = build_bench_changes(
+        {"POR": None, "DEF": None, "MED": None, "DEL": "del_titular_saliente"},
+        current_bench_by_position={1: "del_suplente"},
+        current_lineup_by_position={0: "del_titular_saliente"},
+        already_vacated=None,
+    )
+
+    assert changes == [
+        {"cpt": False, "from": "del_suplente", "position": 1, "isBench": True, "multiposition": False},
+        {"cpt": False, "from": "del_titular_saliente", "position": 0, "isBench": False, "multiposition": False},
+        {"cpt": False, "to": "del_titular_saliente", "position": 1, "isBench": True, "multiposition": False},
+    ]
+
+
 def test_build_bench_changes_vacates_substitute_from_field_if_still_there():
     """
     Si el suplente elegido para el banquillo está ahora mismo en el

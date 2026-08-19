@@ -356,7 +356,10 @@ def pick_substitutes(bench_players: list[dict]) -> dict:
 
 
 def build_bench_changes(
-    substitutes_by_position: dict, current_bench_by_position: dict = None, current_lineup_by_position: dict = None
+    substitutes_by_position: dict,
+    current_bench_by_position: dict = None,
+    current_lineup_by_position: dict = None,
+    already_vacated: set = None,
 ) -> list[dict]:
     """
     Construye la lista `changes` (mismo mecanismo de vaciar+rellenar que
@@ -379,9 +382,51 @@ def build_bench_changes(
     por si el suplente que entra ya está ahora mismo en el CAMPO (no solo
     en otro slot de banquillo) — hace falta vaciarlo de ahí primero por el
     mismo motivo.
+
+    `already_vacated` (opcional): ids de jugadores que
+    `build_lineup_changes()` YA vació esta misma pasada (ver su docstring
+    y el `set` que devuelve implícitamente como los `"from"` de sus
+    `changes`) — necesario para evitar un CUARTO bug real confirmado en
+    producción (2026-08-19, ver TODO.md y el docstring de
+    jobs/set_lineup.py): `current_bench_by_position`/
+    `current_lineup_by_position` son una foto FIJA tomada antes de mandar
+    ningún `change` (una sola llamada a `get_lineup()` al principio de
+    `run()`), pero `jobs/set_lineup.py` manda primero TODOS los `changes`
+    de `build_lineup_changes()` y SOLO DESPUÉS los de esta función — así
+    que, si el suplente que entra a un slot de banquillo es exactamente el
+    titular que `build_lineup_changes()` acaba de sacar del campo esta
+    misma pasada (o el ocupante de ese slot de banquillo es exactamente el
+    jugador que `build_lineup_changes()` acaba de sacar de ahí para meterlo
+    de titular — el caso normal de "intercambio titular <-> suplente" de
+    toda la vida), esta función, mirando la foto vieja, cree que todavía
+    hace falta vaciarlo Y MANDA UN SEGUNDO `"from"` sobre un jugador que ya
+    no está en ese slot (ya lo vació `build_lineup_changes()` un rato
+    antes, en una llamada HTTP previa). Futmondo rechaza ese `"from"`
+    caducado con `"api.error.not_allowed"`.
+
+    Confirmado con un caso real (jornada del 2026-08-19, cron de las
+    09:27): el once decidido intercambiaba a la vez Fer Niño (banquillo)
+    por Iván Romero (titular) en DEL y a Cortés (banquillo) por Tárrega
+    (titular) en DEF — el intercambio titular<->suplente más normal que
+    hay. La notificación de Telegram reportó "enviada a medias" con
+    `"api.error.not_allowed"` en los 4: Fer Niño e Iván Romero (el vaciado
+    de banquillo/campo de `build_bench_changes()` repetido sobre lo que
+    `build_lineup_changes()` ya había vaciado en DEL) y Cortés/Tárrega
+    (mismo problema en DEF). Los `to` (rellenar) de ambos grupos sí
+    llegaron a aplicarse bien (el slot de destino ya estaba libre de
+    verdad) — por eso la siguiente pasada del cron, 6 minutos después, ya
+    no encontró ningún `change` pendiente y audita "enviada" sin más: el
+    efecto neto en Futmondo quedó correcto, el único problema era el ruido
+    de 4 fallos fantasma en la notificación (y, en general, arriesgarse a
+    que Futmondo interprete ese `"from"` caducado de otra forma con datos
+    distintos no confirmada). `jobs/set_lineup.py` pasa aquí el conjunto de
+    `"from"` de `build_lineup_changes()` para que esta función se calle
+    ante un jugador que sabe con certeza que ya está vacío, en vez de
+    fiarse a ciegas de la foto vieja.
     """
     current_bench_by_position = current_bench_by_position or {}
     current_lineup_by_position = current_lineup_by_position or {}
+    already_vacated = already_vacated or set()
     current_field_slot_by_player = {pid: slot for slot, pid in current_lineup_by_position.items() if pid is not None}
 
     vacate_changes = []
@@ -393,11 +438,11 @@ def build_bench_changes(
         current_occupant = current_bench_by_position.get(slot)
         if current_occupant == player_id:
             continue
-        if current_occupant is not None:
+        if current_occupant is not None and current_occupant not in already_vacated:
             vacate_changes.append(
                 {"cpt": False, "from": current_occupant, "position": slot, "isBench": True, "multiposition": False}
             )
-        if player_id in current_field_slot_by_player:
+        if player_id in current_field_slot_by_player and player_id not in already_vacated:
             vacate_changes.append(
                 {
                     "cpt": False,
