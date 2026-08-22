@@ -558,6 +558,35 @@ elegir alineación (el precio de un jugador ya en tu plantilla es coste
 hundido, no debe influir en quién juega) — ver `config.EVALUATOR_WEIGHTS`
 vs `config.LINEUP_EVALUATOR_WEIGHTS`.
 
+## Lesión confirmada descarta el fichaje; duda solo penaliza el score
+
+A petición del usuario (2026-08-22): hasta ahora `EVALUATOR_WEIGHTS`
+trataba "doubt" (duda) e "injuredN" (lesión confirmada) exactamente igual
+— una única `injury_penalty` de 0.10 sobre el score, sin distinguir. Eso
+significaba que un candidato de mercado con lesión confirmada pero muy
+buenas stats previas podía seguir ganando en score a un candidato sano
+mediocre y recibir puja real, arriesgando presupuesto en un jugador que
+normalmente es baja segura varias jornadas.
+
+Ahora (`jobs/run_market.py` + `clients.futmondo_client.
+is_confirmed_injured_status()`): un candidato con lesión confirmada se
+descarta del mercado ANTES de evaluar/puntuar, igual que los candidatos
+con puja local ya abierta — nunca recibe puja, por buenas que sean sus
+stats. "doubt" (duda: el jugador todavía puede llegar a jugar) sigue
+evaluándose con normalidad, solo que con una penalización de score más
+dura que antes (`config.EVALUATOR_WEIGHTS["doubt_penalty"] = 0.20`, el
+doble del antiguo `injury_penalty`).
+
+Cambio deliberadamente acotado a la decisión de FICHAJE: `engine/
+squad_risk.py`, `engine/lineup_optimizer.py` y `engine/selling_strategy.py`
+siguen usando `is_injury_status()` sin distinguir gravedad (solo
+sano/no-sano) — ahí no tiene sentido "descartar" a un jugador ya propio
+de la plantilla, y esos módulos ya tenían su propio criterio razonado
+(sanos primero, margen de suplentes, etc., ver secciones de arriba).
+`config.LINEUP_EVALUATOR_WEIGHTS` tampoco cambia: sigue con
+`injury_penalty = 0.10` sobre `is_injured_or_doubtful` (duda Y lesión por
+igual), igual que siempre.
+
 ## La posición sí importa al puntuar: xG se normaliza por posición
 
 Arreglado 2026-08-17 (ya estaba señalado como TODO desde el principio,

@@ -2,6 +2,8 @@ import runpy
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import config
 import jobs.run_market as run_market
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
@@ -217,6 +219,74 @@ def test_run_market_skips_candidate_with_already_open_local_bid(tmp_db):
     with get_connection() as conn:
         # Sigue habiendo solo la puja original -- no se insertó una segunda fila.
         assert conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"] == 1
+
+
+def test_run_market_discards_confirmed_injured_candidate_without_bidding(tmp_db):
+    """
+    A petición del usuario (2026-08-22): un candidato con lesión CONFIRMADA
+    ("injured2") se descarta antes de evaluar, aunque tenga muy buenas
+    stats -- nunca se puja por él, ni siquiera con score bajo (no llega a
+    calcularse un score, sencillamente no entra en la evaluación).
+    """
+    _seed_player("lesionado", "DEL", price=350_000, points=20, status="injured2")  # stats excelentes
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [{"id": "lesionado", "slug": "jugador-lesionado", "value": 350_000}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería pujar por un candidato con lesión confirmada")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "lesión confirmada" in captured[0]
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"] == 0
+
+
+def test_run_market_still_bids_on_doubtful_candidate_with_reduced_score(tmp_db):
+    """
+    "doubt" (duda) NO se descarta -- sigue evaluándose y puede recibir
+    puja, solo que con un score más bajo (config.EVALUATOR_WEIGHTS
+    ["doubt_penalty"]) que un candidato idéntico pero sano.
+    """
+    _seed_player("en_duda", "DEL", price=350_000, points=10, status="doubt")
+    _seed_player("sano", "MED", price=350_000, points=10, status="")
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [
+                {"id": "en_duda", "slug": "jugador-en_duda", "value": 350_000},
+                {"id": "sano", "slug": "jugador-sano", "value": 350_000},
+            ]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    with get_connection() as conn:
+        rows = {r["player_id"]: r["score"] for r in conn.execute("SELECT player_id, score FROM bids")}
+    # Ambos se pujaron (duda no descarta), pero el de duda con score menor.
+    assert set(rows) == {"en_duda", "sano"}
+    assert rows["en_duda"] < rows["sano"]
+    assert rows["sano"] - rows["en_duda"] == pytest.approx(config.EVALUATOR_WEIGHTS["doubt_penalty"])
 
 
 def test_run_market_prioritizes_at_risk_position_over_higher_score(tmp_db):

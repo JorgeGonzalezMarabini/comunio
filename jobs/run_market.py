@@ -52,6 +52,18 @@ candidatos a cualquier jugador con una puja local todavía `'placed'`
 (`db.models.get_open_bids()`) antes de evaluar, en vez de reintentar una
 "mejora" que no tiene ningún efecto real.
 
+Lesión confirmada vs. duda (a petición del usuario, 2026-08-22): "doubt"
+(duda, el jugador todavía puede llegar a jugar) e "injuredN" (lesión ya
+confirmada, ver `clients.futmondo_client.is_confirmed_injured_status()`)
+ya NO se tratan igual aquí. "doubt" sigue evaluándose con el resto de
+candidatos, solo que con una penalización de score más dura que antes
+(`config.EVALUATOR_WEIGHTS["doubt_penalty"]`, ver `engine/evaluator.py`).
+Una lesión confirmada, en cambio, se descarta ANTES de evaluar — igual que
+los candidatos con puja local ya abierta de arriba — porque normalmente es
+baja segura varias jornadas: cualquier penalización de score, por dura que
+sea, siempre podría llegar a compensarse con muy buenas stats en el resto
+de métricas, y aquí eso sería justo el error que se quiere evitar.
+
 Cancelar+pujar mejor (TODO.md #13, `engine.bidding_strategy.
 find_cancel_swap_candidates`): fase APARTE, después del loop normal de
 arriba, para los candidatos buenos (score/precio válidos, ver
@@ -77,7 +89,12 @@ from datetime import datetime, timezone
 import requests
 
 import config
-from clients.futmondo_client import FutmondoClient, FutmondoOfferError, real_pending_bid_amount
+from clients.futmondo_client import (
+    FutmondoClient,
+    FutmondoOfferError,
+    is_confirmed_injured_status,
+    real_pending_bid_amount,
+)
 from db.models import (
     get_connection,
     get_bids_risked_today,
@@ -133,6 +150,19 @@ def run():
         notify(
             f"run_market: {len(skipped_already_bid)} candidato(s) en mercado, todos con puja local ya "
             "pendiente -- nada nuevo que evaluar esta ejecución."
+        )
+        return
+
+    # Descarta directamente los candidatos con lesión CONFIRMADA (ver
+    # docstring del módulo) -- a diferencia de "doubt", que sigue abajo en
+    # `raw_candidates` y solo se penaliza en el score
+    # (config.EVALUATOR_WEIGHTS["doubt_penalty"]).
+    skipped_injured = [p for p in raw_candidates if is_confirmed_injured_status(p.get("status"))]
+    raw_candidates = [p for p in raw_candidates if not is_confirmed_injured_status(p.get("status"))]
+    if not raw_candidates:
+        notify(
+            f"run_market: {len(skipped_injured)} candidato(s) en mercado, todos con lesión confirmada -- "
+            "nada nuevo que evaluar esta ejecución."
         )
         return
 
@@ -362,6 +392,11 @@ def run():
     if risk_warnings:
         summary.append("⚠️ Riesgo de plantilla detectado (priorizado al pujar):")
         summary.extend(f"  - {w}" for w in risk_warnings)
+    if skipped_injured:
+        summary.append(
+            f"🚑 {len(skipped_injured)} candidato(s) descartado(s) del mercado por lesión confirmada: "
+            + ", ".join(str(p["id"]) for p in skipped_injured)
+        )
     if pending_committed:
         summary.append(f"(comprometido en pujas pendientes sin resolver: {pending_committed})")
 

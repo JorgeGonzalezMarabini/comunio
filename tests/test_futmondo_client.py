@@ -13,6 +13,8 @@ from clients.futmondo_client import (
     FutmondoAuthError,
     FutmondoClient,
     FutmondoOfferError,
+    is_confirmed_injured_status,
+    is_doubtful_status,
     is_injury_status,
     real_pending_bid_amount,
     total_pending_bid_amount,
@@ -337,6 +339,56 @@ def test_futmondo_position_map_translates_spanish_roles_to_short_codes():
 )
 def test_is_injury_status(status, expected):
     assert is_injury_status(status) is expected
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (None, False),
+        ("", False),
+        ("ok", False),
+        ("doubt", True),
+        ("DOUBT", True),
+        # "doubt" es duda, NO lesión confirmada -- is_doubtful_status()
+        # debe distinguirlo de "injuredN"/"lesion"/"lesión".
+        ("injured", False),
+        ("injured2", False),
+        ("lesion", False),
+        ("lesión", False),
+    ],
+)
+def test_is_doubtful_status_only_matches_doubt(status, expected):
+    assert is_doubtful_status(status) is expected
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (None, False),
+        ("", False),
+        ("ok", False),
+        ("doubt", False),
+        ("DOUBT", False),
+        ("injured", True),
+        ("INJURED", True),
+        ("injured2", True),
+        ("lesion", True),
+        ("lesión", True),
+    ],
+)
+def test_is_confirmed_injured_status_excludes_doubt(status, expected):
+    assert is_confirmed_injured_status(status) is expected
+
+
+@pytest.mark.parametrize("status", ["doubt", "injured", "injured2", "lesion", "lesión", None, "", "ok"])
+def test_is_injury_status_is_the_union_of_doubtful_and_confirmed_injured(status):
+    """
+    Regresión: is_injury_status() debe seguir siendo exactamente el OR de
+    is_doubtful_status()/is_confirmed_injured_status() para no romper a
+    engine/squad_risk.py, engine/lineup_optimizer.py y
+    engine/selling_strategy.py, que solo distinguen sano/no-sano.
+    """
+    assert is_injury_status(status) == (is_doubtful_status(status) or is_confirmed_injured_status(status))
 
 
 def test_total_pending_bid_amount_sums_amounts():

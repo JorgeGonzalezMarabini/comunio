@@ -176,7 +176,18 @@ FUTMONDO_POSITION_MAP = {
 # valores exactos porque "injured2" sugiere que hay más tiers sin
 # confirmar todavía (¿"injured1"? ¿"injured3"?) y "injured" los cubre a
 # todos sin tener que enumerarlos.
-FUTMONDO_INJURY_STATUS_SUBSTRINGS = ("injured", "doubt", "lesion", "lesión")
+#
+# Separado en dos subconjuntos (a petición del usuario, 2026-08-22) porque
+# "doubt" e "injuredN" ya NO se tratan igual en la decisión de FICHAJE
+# (ver engine/evaluator.py y jobs/run_market.py): "doubt" es duda -- el
+# jugador todavía puede llegar a jugar -- mientras que "injuredN" es
+# lesión ya CONFIRMADA -- normalmente baja segura varias jornadas. El
+# resto de módulos (engine/squad_risk.py, engine/lineup_optimizer.py,
+# engine/selling_strategy.py) sigue usando is_injury_status() sin
+# distinguir gravedad -- ahí solo importa sano/no-sano, no por qué.
+FUTMONDO_DOUBT_STATUS_SUBSTRINGS = ("doubt",)
+FUTMONDO_INJURED_STATUS_SUBSTRINGS = ("injured", "lesion", "lesión")
+FUTMONDO_INJURY_STATUS_SUBSTRINGS = FUTMONDO_DOUBT_STATUS_SUBSTRINGS + FUTMONDO_INJURED_STATUS_SUBSTRINGS
 
 
 def is_injury_status(status: str | None) -> bool:
@@ -186,11 +197,34 @@ def is_injury_status(status: str | None) -> bool:
     datos reales de producción para "doubt" e "injuredN" (ver TODO.md #5);
     "lesion"/"lesión" quedan solo como colchón defensivo sin confirmar,
     ya que la evidencia real apunta a que el campo es en inglés.
+
+    No distingue gravedad -- para eso ver is_doubtful_status()/
+    is_confirmed_injured_status(), pensadas para quien necesite tratar
+    duda y lesión confirmada de forma distinta.
+    """
+    return is_doubtful_status(status) or is_confirmed_injured_status(status)
+
+
+def is_doubtful_status(status: str | None) -> bool:
+    """Solo "doubt" -- duda/riesgo de no jugar, sin lesión confirmada."""
+    if not status:
+        return False
+    status_lower = status.lower()
+    return any(s in status_lower for s in FUTMONDO_DOUBT_STATUS_SUBSTRINGS)
+
+
+def is_confirmed_injured_status(status: str | None) -> bool:
+    """
+    Lesión ya confirmada ("injuredN", tier numerado -- o "lesion"/"lesión"
+    como colchón defensivo, ver comentario de FUTMONDO_INJURY_STATUS_SUBSTRINGS),
+    a diferencia de is_doubtful_status() ("doubt", solo duda). Usado por
+    jobs/run_market.py para descartar directamente a un candidato de
+    fichaje del mercado, en vez de solo penalizarlo en el score.
     """
     if not status:
         return False
     status_lower = status.lower()
-    return any(s in status_lower for s in FUTMONDO_INJURY_STATUS_SUBSTRINGS)
+    return any(s in status_lower for s in FUTMONDO_INJURED_STATUS_SUBSTRINGS)
 
 
 def total_pending_bid_amount(bids_placed_locally: list[dict]) -> int:

@@ -109,18 +109,37 @@ ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower(
 # Configurables para poder ajustarlos con el tiempo sin tocar código.
 # Para DECIDIR PUJAS: el precio importa (relación calidad/precio del
 # mercado, con presupuesto limitado que repartir entre candidatos).
+#
+# "injury_penalty" -> "doubt_penalty" (a petición del usuario, 2026-08-22):
+# aquí ya NO hace falta penalizar lesión confirmada en el score -- se
+# descarta directamente el candidato ANTES de evaluar (ver
+# clients.futmondo_client.is_confirmed_injured_status() y
+# jobs/run_market.py), así que score_player() nunca llega a ver un
+# candidato con lesión confirmada en esta ruta. Lo que sí queda por
+# penalizar es "doubt" (duda, el jugador todavía puede llegar a jugar) --
+# con más peso que antes (0.10 -> 0.20, el doble) porque antes esa misma
+# penalización suave se repartía entre dos casos bien distintos (duda Y
+# lesión confirmada) sin que ninguno de los dos estuviera bien servido.
 EVALUATOR_WEIGHTS = {
     "futmondo_points_per_price": 0.35,  # rendimiento Futmondo relativo al precio
     "futmondo_trend": 0.15,             # tendencia de puntuación reciente
     "xg": 0.25,                         # expected goals (Understat)
     "minutes_played": 0.15,             # continuidad / peso en su equipo
-    "injury_penalty": 0.10,             # penalización si lesionado/duda
+    "doubt_penalty": 0.20,              # penalización si en duda (no lesión confirmada, esa se descarta antes)
 }
 
 # Para ELEGIR ALINEACIÓN: el precio NO debe importar — un jugador de la
 # plantilla ya está comprado, su precio es coste hundido. Reutilizar
 # EVALUATOR_WEIGHTS aquí penalizaría injustamente a los fichajes caros
 # (ver jobs/set_lineup.py). Mismas features, sin "futmondo_points_per_price".
+#
+# Sigue usando "injury_penalty" (duda Y lesión confirmada por igual) sin
+# tocar, a diferencia de EVALUATOR_WEIGHTS de arriba: aquí no tiene
+# sentido "descartar" a un lesionado de la plantilla propia como se hace
+# con un candidato de mercado -- ya es tuyo. Quién juega de verdad ya lo
+# decide `engine.lineup_optimizer._rank_healthy_first()` (sanos siempre
+# primero, un lesionado solo si no queda ningún sano en su posición); este
+# peso solo afecta al score que ordena dentro de cada grupo.
 LINEUP_EVALUATOR_WEIGHTS = {
     "futmondo_points_per_price": 0.0,
     "futmondo_trend": 0.30,

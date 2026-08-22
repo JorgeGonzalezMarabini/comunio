@@ -16,7 +16,7 @@ para poder ajustarlos con el tiempo sin tocar esta lógica.
 from __future__ import annotations
 
 import config
-from clients.futmondo_client import is_injury_status
+from clients.futmondo_client import is_doubtful_status, is_injury_status
 
 
 def score_player(player_stats: dict, weights: dict = None) -> float:
@@ -31,7 +31,8 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
             "trend": float,              # normalizado 0..1 dentro del pool
             "xg": float,                 # normalizado 0..1 dentro del pool (xG/90)
             "minutes_played_ratio": float,  # normalizado 0..1 dentro del pool
-            "is_injured_or_doubtful": bool,
+            "is_injured_or_doubtful": bool,  # duda O lesión confirmada -- consumido por "injury_penalty"
+            "is_doubtful": bool,              # SOLO duda (no lesión confirmada) -- consumido por "doubt_penalty"
         }
 
     `weights`: por defecto config.EVALUATOR_WEIGHTS (pensado para decidir
@@ -40,9 +41,22 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
     comprado, su precio es coste hundido y no debería influir en quién
     juega (ver jobs/set_lineup.py).
 
+    Los pesos deciden qué penalización por estado aplicar, según qué
+    clave traigan (ambas son opcionales e independientes, pueden
+    combinarse si algún día hiciera falta):
+      - "injury_penalty": resta si `is_injured_or_doubtful` es True (duda
+        O lesión confirmada, sin distinguir) — el caso de
+        LINEUP_EVALUATOR_WEIGHTS, donde no tiene sentido "descartar" a un
+        jugador ya propio.
+      - "doubt_penalty": resta si `is_doubtful` es True (SOLO duda) — el
+        caso de EVALUATOR_WEIGHTS (pujas): la lesión CONFIRMADA ya se
+        descarta antes de llegar aquí (ver jobs/run_market.py y
+        clients.futmondo_client.is_confirmed_injured_status()), así que
+        no necesita penalización de score, solo la duda la necesita.
+
     Devuelve un score comparable entre jugadores (mayor = mejor). Con los
-    pesos por defecto, el rango típico es aprox. [-0.10, 0.90] (la suma de
-    pesos positivos es 0.90, injury_penalty resta hasta 0.10 más).
+    pesos de EVALUATOR_WEIGHTS, el rango típico es aprox. [-0.20, 0.90] (la
+    suma de pesos positivos es 0.90, doubt_penalty resta hasta 0.20 más).
 
     TODO: los pesos son un punto de partida razonado, no calibrado todavía
     contra resultados reales de la liga — ajustar con el tiempo en
@@ -58,8 +72,10 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
         + w["minutes_played"] * player_stats.get("minutes_played_ratio", 0)
     )
 
-    if player_stats.get("is_injured_or_doubtful"):
+    if "injury_penalty" in w and player_stats.get("is_injured_or_doubtful"):
         score -= w["injury_penalty"]
+    if "doubt_penalty" in w and player_stats.get("is_doubtful"):
+        score -= w["doubt_penalty"]
 
     return score
 
@@ -193,6 +209,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
                 "xg": norm_xg90[i],
                 "minutes_played_ratio": norm_minutes[i],
                 "is_injured_or_doubtful": is_injury_status(p.get("status")),
+                "is_doubtful": is_doubtful_status(p.get("status")),
             }
         )
     return normalized

@@ -25,6 +25,56 @@ def test_score_player_weights_and_injury_penalty():
     assert lesionado == pytest.approx(max_positivo - weights["injury_penalty"])
 
 
+def test_score_player_doubt_penalty_is_independent_of_injury_penalty():
+    """
+    config.EVALUATOR_WEIGHTS ya no lleva "injury_penalty" (la lesión
+    confirmada se descarta antes de llegar aquí, ver jobs/run_market.py) --
+    solo "doubt_penalty", que lee "is_doubtful", no "is_injured_or_doubtful".
+    """
+    weights = {
+        "futmondo_points_per_price": 0.35,
+        "futmondo_trend": 0.15,
+        "xg": 0.25,
+        "minutes_played": 0.15,
+        "doubt_penalty": 0.20,
+    }
+    sano = score_player(
+        {"points_per_price": 1.0, "trend": 1.0, "xg": 1.0, "minutes_played_ratio": 1.0, "is_doubtful": False},
+        weights=weights,
+    )
+    en_duda = score_player(
+        {"points_per_price": 1.0, "trend": 1.0, "xg": 1.0, "minutes_played_ratio": 1.0, "is_doubtful": True},
+        weights=weights,
+    )
+    max_positivo = sum(v for k, v in weights.items() if k != "doubt_penalty")
+    assert sano == pytest.approx(max_positivo)
+    assert en_duda == pytest.approx(max_positivo - weights["doubt_penalty"])
+    # Una lesión confirmada (is_injured_or_doubtful=True) NO debe restar
+    # nada aquí -- estos pesos no llevan "injury_penalty".
+    lesionado_sin_duda = score_player(
+        {
+            "points_per_price": 1.0,
+            "trend": 1.0,
+            "xg": 1.0,
+            "minutes_played_ratio": 1.0,
+            "is_doubtful": False,
+            "is_injured_or_doubtful": True,
+        },
+        weights=weights,
+    )
+    assert lesionado_sin_duda == pytest.approx(max_positivo)
+
+
+def test_score_player_config_evaluator_weights_doubt_penalty_doubles_old_injury_penalty():
+    """
+    A petición del usuario (2026-08-22): "doubt" debe pesar más que antes
+    en la decisión de puja. config.EVALUATOR_WEIGHTS["doubt_penalty"] es
+    ahora 0.20, el doble del antiguo "injury_penalty" (0.10).
+    """
+    assert config.EVALUATOR_WEIGHTS["doubt_penalty"] == pytest.approx(0.20)
+    assert "injury_penalty" not in config.EVALUATOR_WEIGHTS
+
+
 def test_rank_players_orders_by_score_desc():
     ranked = rank_players(
         [
@@ -51,6 +101,33 @@ def test_normalize_pool_minmax_and_injury_flag():
     # El lesionado se marca correctamente
     assert by_id["lesionado"]["is_injured_or_doubtful"] is True
     assert by_id["caro"]["is_injured_or_doubtful"] is False
+    # "injured" es lesión confirmada, no duda -- is_doubtful debe ser False.
+    assert by_id["lesionado"]["is_doubtful"] is False
+    assert by_id["caro"]["is_doubtful"] is False
+
+
+def test_normalize_pool_distinguishes_doubt_from_confirmed_injury():
+    """
+    "doubt" (duda) marca is_doubtful=True pero is_injured_or_doubtful
+    también True (sigue siendo "no sano" para squad_risk/lineup_optimizer/
+    selling_strategy); "injured2" (lesión confirmada) marca is_doubtful=False.
+    """
+    raw = [
+        {"id": "en_duda", "price": 1_000_000, "average_points": 5.0, "status": "doubt"},
+        {"id": "lesion_confirmada", "price": 1_000_000, "average_points": 5.0, "status": "injured2"},
+        {"id": "sano", "price": 1_000_000, "average_points": 5.0, "status": "ok"},
+    ]
+    normalized = normalize_pool(raw)
+    by_id = {p["id"]: p for p in normalized}
+
+    assert by_id["en_duda"]["is_doubtful"] is True
+    assert by_id["en_duda"]["is_injured_or_doubtful"] is True
+
+    assert by_id["lesion_confirmada"]["is_doubtful"] is False
+    assert by_id["lesion_confirmada"]["is_injured_or_doubtful"] is True
+
+    assert by_id["sano"]["is_doubtful"] is False
+    assert by_id["sano"]["is_injured_or_doubtful"] is False
 
 
 def test_normalize_pool_normalizes_xg_within_position_group_not_whole_pool():
