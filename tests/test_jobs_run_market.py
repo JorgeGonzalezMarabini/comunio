@@ -502,6 +502,60 @@ def test_run_market_main_does_not_record_job_run_when_bot_disabled(tmp_db, monke
     assert "ENABLE_BOT=false" in capsys.readouterr().out
 
 
+def test_run_market_scores_sacrificable_bids_freshly_not_frozen(tmp_db):
+    """
+    Regresión (2026-08-22, a petición del usuario): el score de una puja
+    abierta que se pasa a find_cancel_swap_candidates() para decidir si
+    merece la pena sacrificarla debe recalcularse con los datos de HOY
+    (mismos pesos/boosts que el resto del mercado), no leerse tal cual de
+    `bids.score` -- ese valor queda congelado desde el momento en que se
+    pujó y puede llevar días/semanas desactualizado.
+    """
+    _seed_player("old", "DEF", price=1_000_000, points=10)  # jugador con la puja abierta
+    _seed_player("bloqueado", "DEF", price=1_000_000, points=10)  # candidato nuevo, bloqueado por presupuesto=0
+
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            # Score congelado a un valor que evaluate_players() nunca podría producir hoy --
+            # si el fix funciona, el que llega a sacrificable_bids no puede ser este.
+            ("old", 1_044_999, "placed", 12345.0, NOW),
+        )
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}  # nada entra por la vía normal -- todo queda "blocked"
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {
+                        "id": "old",
+                        "slug": "jugador-old",
+                        "value": 1_000_000,
+                        "bid": {"id": "futmondo-bid-old", "price": 1_044_999},
+                    },
+                    {"id": "bloqueado", "slug": "jugador-bloqueado", "value": 1_000_000},
+                ]
+            }
+
+    with (
+        patch("jobs.run_market.FutmondoClient", FakeClient),
+        patch("jobs.run_market.find_cancel_swap_candidates", return_value=[]) as mock_swap,
+        patch("jobs.run_market.notify"),
+    ):
+        run_market.run()
+
+    assert mock_swap.called
+    sacrificable_bids = mock_swap.call_args[0][1]
+    assert len(sacrificable_bids) == 1
+    assert sacrificable_bids[0]["player_id"] == "old"
+    assert sacrificable_bids[0]["score"] != 12345.0
+
+
 # --- Cancelar+pujar mejor (TODO.md #13) ---
 #
 # La lógica pura de qué cancelar/cuándo ya se prueba a fondo en

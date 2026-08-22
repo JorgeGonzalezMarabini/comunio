@@ -242,9 +242,17 @@ BIDDING_CANCEL_SWAP_MIN_MARGIN = float(os.getenv("BIDDING_CANCEL_SWAP_MIN_MARGIN
 BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY = float(os.getenv("BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY", "6"))
 
 # Máximo de cancelaciones-para-pujar-mejor por ejecución de run_market --
-# 1 a propósito mientras no hay histórico real de esta feature; nada de
-# cascadas la primera vez que corre contra la cuenta real.
-BIDDING_MAX_CANCEL_SWAPS_PER_RUN = int(os.getenv("BIDDING_MAX_CANCEL_SWAPS_PER_RUN", "1"))
+# empezó en 1 a propósito mientras no había histórico real de esta
+# feature. Subido a 3 (2026-08-22, a petición del usuario) al confirmar
+# que el límite de plantilla (ver jobs/run_market.py) hace que "candidato
+# bueno bloqueado" pase de ser un caso raro (solo por presupuesto/tope) a
+# ser la situación NORMAL en cuanto la plantilla está casi llena -- con 1
+# swap por pasada, el resto de candidatos igual de buenos se quedaban
+# esperando al siguiente cron, con riesgo de que otro manager se
+# adelantara. Sigue acotado (no ilimitado): cada swap individual sigue
+# exigiendo el margen de score (BIDDING_CANCEL_SWAP_MIN_MARGIN) y el
+# colchón antes de expirar (BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY).
+BIDDING_MAX_CANCEL_SWAPS_PER_RUN = int(os.getenv("BIDDING_MAX_CANCEL_SWAPS_PER_RUN", "3"))
 
 # --- Venta de jugadores (engine/selling_strategy.py) ---
 # % mínimo de plusvalía (precio actual vs. precio de referencia,

@@ -231,8 +231,14 @@ def run():
         # plantilla + mercado EN LA MISMA llamada, para que sean
         # comparables entre sí (ver docstring del módulo) -- de aquí sale
         # tanto el listón (squad) como el "lineup_score" de cada candidato
-        # de mercado que se compara contra ese listón.
-        lineup_scored = evaluate_players(squad_raw + raw_candidates, weights=config.LINEUP_EVALUATOR_WEIGHTS)
+        # de mercado que se compara contra ese listón. Incluye también
+        # `skipped_already_bid` (candidatos con puja local ya abierta,
+        # excluidos de `raw_candidates` arriba) -- si no, su "lineup_score"
+        # más abajo saldría de normalizar un pool DISTINTO al de este run,
+        # no comparable (ver engine.evaluator.normalize_pool).
+        lineup_scored = evaluate_players(
+            squad_raw + raw_candidates + skipped_already_bid, weights=config.LINEUP_EVALUATOR_WEIGHTS
+        )
         lineup_score_by_id = {p["id"]: p["score"] for p in lineup_scored}
         squad_ids = {p["id"] for p in squad_raw}
         squad_lineup_ranked = [p for p in lineup_scored if p["id"] in squad_ids]
@@ -240,11 +246,29 @@ def run():
     else:
         risk_warnings = []
 
-    ranked = evaluate_players(raw_candidates)
-    for p in ranked:
+    # Evalúa `raw_candidates` y `skipped_already_bid` EN LA MISMA llamada
+    # (mismo motivo que arriba: normalize_pool normaliza dentro del pool
+    # que se le pasa, así que evaluarlos por separado daría scores en
+    # escalas distintas, no comparables entre sí).
+    ranked_pool = evaluate_players(raw_candidates + skipped_already_bid)
+    for p in ranked_pool:
         if p["id"] in lineup_score_by_id:
             p["lineup_score"] = lineup_score_by_id[p["id"]]
+    ranked = [p for p in ranked_pool if p["id"] not in already_bid_ids]
+    already_bid_ranked = [p for p in ranked_pool if p["id"] in already_bid_ids]
     prioritized = apply_position_priority(ranked, at_risk_positions, upgrade_thresholds=upgrade_thresholds)
+
+    # Score "fresco" (2026-08-22, a petición del usuario) de los
+    # candidatos con puja abierta -- MISMOS pesos/boosts que `prioritized`
+    # (riesgo de posición / mejora del once CON LOS DATOS DE HOY), para
+    # comparar swaps contra la prioridad actual de la plantilla, no contra
+    # el score que ese candidato tenía congelado en `bids.score` desde el
+    # momento en que se pujó (pudo quedar desactualizado si el riesgo de
+    # plantilla cambió desde entonces). Ver find_cancel_swap_candidates.
+    fresh_score_by_player_id = {
+        p["id"]: p["score"]
+        for p in apply_position_priority(already_bid_ranked, at_risk_positions, upgrade_thresholds=upgrade_thresholds)
+    }
 
     remaining_budget = information.get("answer", {}).get("budget", 0)
     already_risked = get_bids_risked_today()
@@ -310,7 +334,13 @@ def run():
                 {
                     "local_row_id": b["id"],
                     "player_id": b["player_id"],
-                    "score": b["score"],
+                    # Fresco si se pudo recalcular con los datos de hoy
+                    # (ver fresh_score_by_player_id arriba); si no --
+                    # jugador ya no en la BD como "on_market", desajuste
+                    # puntual con sync_data -- cae al score congelado que
+                    # ya traía la fila local, más seguro que descartar
+                    # sin más una puja sacrificable de verdad.
+                    "score": fresh_score_by_player_id.get(b["player_id"], b["score"]),
                     "amount": b["amount"],
                     "bid_id": bid_info["id"],
                     "expires_at": expires_at,
