@@ -134,7 +134,13 @@ def decide_sales(
     `squad`: items reales de FutmondoClient.get_roster()["answer"] (necesita
     "id", "name", "role", "status", "value") tal cual, sin normalizar
     antes; aquí dentro se traduce la posición (FUTMONDO_POSITION_MAP) para
-    poder cruzarla con engine.squad_risk.
+    poder cruzarla con engine.squad_risk. Un jugador con `market: true` (ya
+    puesto en venta en una pasada anterior -- ver docstring de
+    FutmondoClient.get_roster) nunca es candidato, sin mirar las cinco vías
+    de abajo: poner en venta no es instantáneo, así que sigue en la
+    plantilla varias pasadas, y reintentar `list_for_sale()` sobre un
+    listado que ya existe falla con `api.error.not_found` (confirmado en
+    vivo 2026-08-22, jugador Dieng).
 
     `bought_by_bot`: {player_id: precio pagado} — normalmente
     `db.models.get_won_bid_prices()`. Solo los jugadores presentes aquí son
@@ -273,6 +279,18 @@ def decide_sales(
         current_price = player.get("value", 0)
         if purchase_price <= 0 or current_price <= 0:
             continue  # no comprado por el bot (o sin precio de referencia): no es candidato
+
+        if player.get("market"):
+            # Ya puesto en venta en una pasada anterior (`market: true` en
+            # el item de roster -- ver docstring de FutmondoClient.get_roster,
+            # "solo en roster: buyPrice, market"). Poner en venta no es
+            # instantáneo (ver docstring de jobs/run_sales.py), así que
+            # sigue en la plantilla varias pasadas hasta que alguien lo
+            # compre. Sin este corte, cada pasada lo volvía a decidir como
+            # candidato y `FutmondoClient.list_for_sale()` fallaba con
+            # `api.error.not_found` al reintentar un listado que ya existe
+            # (confirmado en vivo 2026-08-22, jugador Dieng).
+            continue
 
         profit = current_price - purchase_price
         profit_pct = profit / purchase_price

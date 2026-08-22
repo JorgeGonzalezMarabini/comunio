@@ -68,6 +68,22 @@ def test_decide_sales_below_profit_threshold_is_ignored():
     )
 
 
+def test_decide_sales_ignores_player_already_on_market():
+    """
+    Regresión del incidente en vivo 2026-08-22 (jugador Dieng): un jugador
+    con `market: true` (ya puesto en venta en una pasada anterior -- ver
+    docstring de FutmondoClient.get_roster) nunca vuelve a ser candidato,
+    aunque cumpla de sobra el umbral de rentabilidad -- si no, cada pasada
+    lo redecide y `FutmondoClient.list_for_sale()` falla con
+    `api.error.not_found` al reintentar un listado que ya existe.
+    """
+    squad = _full_442_squad()
+    bought_by_bot = {"20": 500_000}  # Medio0 (id=20)
+    squad[5]["value"] = 900_000  # +80%, de sobra por encima del umbral por defecto
+    squad[5]["market"] = True
+    assert decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot) == []
+
+
 def test_decide_sales_blocks_sale_that_would_leave_position_uncovered():
     """
     Regresión del fallo real detectado: vender es tan capaz de dejar una
