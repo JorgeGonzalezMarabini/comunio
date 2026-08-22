@@ -118,74 +118,137 @@ def test_decide_sales_allows_selling_injured_profitable_player_freely():
     assert decisions[0]["player_id"] == squad[9]["id"]
 
 
-# --- Corte de pérdidas en lesión confirmada (a petición del usuario, 2026-08-22) ---
+# --- Corte de pérdidas: genérico + más agresivo en lesión confirmada
+# (a petición del usuario, 2026-08-22 -- versión "radical": el corte
+# aplica a CUALQUIER jugador, pero es más bajo para lesión confirmada) ---
+#
+# En todos estos tests: min_profit_pct=0.10, max_loss_pct=0.20 (genérico),
+# injury_max_loss_pct=0.10 (lesión confirmada, más bajo que el genérico).
 
 
-def test_decide_sales_ignores_small_loss_below_injury_cut_threshold():
-    """Una pérdida pequeña (por debajo del umbral de corte) no fuerza la venta -- sigue sin llegar a ningún umbral."""
+def test_decide_sales_ignores_small_loss_below_any_threshold():
+    """Una pérdida pequeña (por debajo de CUALQUIER umbral) no fuerza la venta."""
     squad = _full_442_squad()
     squad[9]["status"] = "injured2"  # Delantero0, lesión confirmada
     bought_by_bot = {str(squad[9]["id"]): 500_000}
-    squad[9]["value"] = 480_000  # -4%: ni llega a +10% de rentabilidad ni baja del -15% de corte
+    squad[9]["value"] = 480_000  # -4%: ni +10% de rentabilidad ni -10% de corte por lesión
 
     decisions = decide_sales(
-        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.10, injury_max_loss_pct=0.15
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
     )
     assert decisions == []
 
 
-def test_decide_sales_cuts_losses_on_confirmed_injury_beyond_threshold():
+def test_decide_sales_confirmed_injury_cuts_losses_at_lower_threshold_than_generic():
     """
-    Un lesionado CONFIRMADO que ya perdió más del umbral de corte se pone en
-    venta aunque sea con pérdidas -- no espera a recuperar plusvalía
-    (evitar la falacia del coste hundido).
+    Un lesionado CONFIRMADO se vende con una pérdida (-12%) que NO llegaría
+    a activar el corte genérico (-20%) -- su umbral es más bajo a
+    propósito: tiende a seguir perdiendo valor, así que se corta antes.
     """
     squad = _full_442_squad()
     squad[9]["status"] = "injured2"  # Delantero0, lesión confirmada
     bought_by_bot = {str(squad[9]["id"]): 1_000_000}
-    squad[9]["value"] = 800_000  # -20%, más allá del umbral de corte del 15%
+    squad[9]["value"] = 880_000  # -12%: por debajo del -20% genérico, pero por encima del -10% de lesión
 
     decisions = decide_sales(
-        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.10, injury_max_loss_pct=0.15
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
     )
     assert len(decisions) == 1
     assert decisions[0]["player_id"] == squad[9]["id"]
-    assert decisions[0]["profit"] == -200_000
+    assert decisions[0]["profit"] == -120_000
     assert "falacia del coste hundido" in decisions[0]["reason"]
+    assert "lesión confirmada" in decisions[0]["reason"]
 
 
-def test_decide_sales_doubt_status_never_triggers_loss_cut():
+def test_decide_sales_generic_loss_cut_applies_to_healthy_player_too():
     """
-    "doubt" (duda, no lesión confirmada) queda fuera del corte de
-    pérdidas a propósito -- sigue necesitando el umbral normal de
-    rentabilidad como cualquier jugador sano, aunque tenga una pérdida
-    igual de grande que el caso anterior.
+    A petición del usuario: el corte de pérdidas ya NO es exclusivo de
+    lesionados -- un jugador SANO con una pérdida grande (-25%, por encima
+    del umbral genérico del 20%) también se vende, sin esperar a que
+    "recupere" (con margen de banquillo de sobra, igual que exige
+    cualquier venta de un jugador sano -- ver test de más abajo para el
+    caso SIN margen).
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 750_000  # -25%, sano
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert "corte de pérdidas genérico" in decisions[0]["reason"]
+
+
+def test_decide_sales_doubt_status_uses_generic_threshold_not_the_lower_injury_one():
+    """
+    "doubt" (duda, no lesión confirmada) usa el umbral GENÉRICO, no el más
+    bajo de lesión -- con -12% (activaría el corte de lesión) NO se vende,
+    porque no llega al -20% genérico.
     """
     squad = _full_442_squad()
     squad[9]["status"] = "doubt"  # Delantero0, solo duda
     bought_by_bot = {str(squad[9]["id"]): 1_000_000}
-    squad[9]["value"] = 800_000  # misma pérdida del -20% que el test anterior
+    squad[9]["value"] = 880_000  # -12%: misma pérdida que activaría el corte de lesión confirmada
 
     decisions = decide_sales(
-        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.10, injury_max_loss_pct=0.15
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
     )
     assert decisions == []
 
 
-def test_decide_sales_cutting_losses_ignores_bench_margin_like_any_injured_player():
+def test_decide_sales_doubt_status_still_gets_generic_loss_cut_eventually():
+    """"doubt" no está exento del corte de pérdidas -- con -25% sí supera el umbral genérico y se vende."""
+    squad = _full_442_squad()
+    squad[9]["status"] = "doubt"
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 750_000  # -25%, supera el umbral genérico del 20%
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+
+
+def test_decide_sales_cutting_losses_ignores_bench_margin_for_confirmed_injury():
     """
     El corte de pérdidas de un lesionado confirmado que es el ÚNICO de su
     posición se vende igual (un lesionado nunca contó como "disponible",
-    así que no hay margen de banquillo que proteger) -- a diferencia de un
-    sano en la misma posición, que sí quedaría bloqueado.
+    así que no hay margen de banquillo que proteger).
     """
     squad = _full_442_squad()
     squad[0]["status"] = "injured2"  # Portero, único de su posición
     bought_by_bot = {str(squad[0]["id"]): 1_000_000}
-    squad[0]["value"] = 700_000  # -30%, más allá del umbral de corte del 15%
+    squad[0]["value"] = 850_000  # -15%, por encima del -10% de corte por lesión
 
     decisions = decide_sales(
-        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.10, injury_max_loss_pct=0.15
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
     )
     assert len(decisions) == 1
     assert decisions[0]["player_id"] == squad[0]["id"]
+
+
+def test_decide_sales_generic_loss_cut_still_blocked_by_bench_margin_for_healthy_player():
+    """
+    A diferencia de un lesionado, el corte de pérdidas de un jugador SANO
+    sigue respetando el margen de suplentes -- si es el único de su
+    posición, no se vende aunque supere el umbral genérico de pérdida.
+    """
+    squad = _full_442_squad()
+    bought_by_bot = {str(squad[0]["id"]): 1_000_000}  # Portero, único de su posición, sano
+    squad[0]["value"] = 700_000  # -30%, muy por encima del umbral genérico del 20%
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
+    )
+    assert decisions == []
