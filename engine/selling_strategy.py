@@ -303,13 +303,14 @@ def decide_sales(
 def _parse_summary_date(value) -> datetime | None:
     """
     Parsea la fecha de una entrada de `FutmondoClient.get_player_summary()
-    ["answer"]["prices"]` -- ver TODO.md: el formato real de ese campo NO
-    está confirmado con una captura real (a diferencia de casi todo lo
-    demás en clients/futmondo_client.py), así que se soportan a la vez
-    string ISO-8601 (como `expirationDate`/`creationDate`, SÍ confirmados
-    en otros endpoints) y epoch numérico (segundos o milisegundos) por si
-    acaso. Cualquier valor que no encaje en ninguno de los dos -> None, y
-    quien llama debe tratarlo como "sin dato", nunca reventar por esto.
+    ["answer"]["prices"]` -- string ISO-8601 con milisegundos y `Z`,
+    CONFIRMADO en vivo 2026-08-22 (ver TODO.md #14 y docstring de
+    `get_player_summary()`), igual que `expirationDate`/`creationDate`. Se
+    soporta también epoch numérico (segundos o milisegundos) como
+    fallback defensivo, nunca visto en la práctica pero sin coste
+    mantenerlo. Cualquier valor que no encaje en ninguno de los dos ->
+    None, y quien llama debe tratarlo como "sin dato", nunca reventar por
+    esto.
     """
     if value is None:
         return None
@@ -345,11 +346,13 @@ def compute_revaluation_premium_pct(
     tardar en reflejar del todo una revalorización muy reciente.
 
     `prices`: histórico tal cual devuelve `FutmondoClient.get_player_summary()
-    ["answer"]["prices"]` (lista de `{"date", "price", ...}`, ver TODO.md:
-    formato NO confirmado con captura real todavía -- por eso esta función
-    es deliberadamente conservadora y nunca revienta con datos inesperados,
-    ver `_parse_summary_date()`). Entradas sin "date"/"price" parseables (o
-    con precio <= 0) se descartan sin más, no cuentan como dato.
+    ["answer"]["prices"]` (lista de `{"date", "price", ...}`; formato
+    CONFIRMADO en vivo 2026-08-22, ver TODO.md #14 y docstring de
+    `get_player_summary()` -- `date` ISO-8601, `price` es el VM diario
+    real). Esta función se mantiene igualmente defensiva más allá de esa
+    confirmación (nunca revienta con datos inesperados, ver
+    `_parse_summary_date()`): entradas sin "date"/"price" parseables (o con
+    precio <= 0) se descartan sin más, no cuentan como dato.
 
     Condiciones, TODAS necesarias para proponer una prima > 0 (si falla
     cualquiera, devuelve `(0.0, None)` -- ninguna prima, se pide el VM tal
@@ -432,9 +435,8 @@ def apply_revaluation_premium(decision: dict, prices: list[dict], now: datetime 
     Función pura (no llama a Futmondo): `jobs/run_sales.py` obtiene
     `prices` (de `FutmondoClient.get_player_summary()`) por cada decisión y
     decide si llamar a esto -- controlado por
-    `config.ENABLE_SELLING_REVALUATION_PREMIUM` (False por defecto
-    mientras el formato real de `prices` no esté confirmado con una
-    captura real, ver TODO.md).
+    `config.ENABLE_SELLING_REVALUATION_PREMIUM` (True por defecto desde que
+    se confirmó en vivo el formato real de `prices`, ver TODO.md #14).
 
     Si no hay prima que aplicar, devuelve `decision` TAL CUAL (ni siquiera
     una copia) -- comportamiento idéntico al de antes de esta feature.

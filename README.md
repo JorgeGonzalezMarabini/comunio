@@ -32,7 +32,7 @@ afecta cada uno y dónde está: ver [`TODO.md`](TODO.md).
 - [x] `jobs/sync_data.py` — mapeo real Futmondo + Understat -> `db/models.py`; reconcilia pujas/ventas comparando plantilla y mercado actuales (sin endpoint externo de "mis ofertas", a diferencia de Comunio — ver sección dedicada); cruce con Understat por cascada de fiabilidad (nombre completo -> apellido+equipo -> apellido único -> similitud de texto), no solo nombre exacto — ver sección dedicada
 - [x] `jobs/run_market.py` — pipeline completo: candidatos de mercado -> evaluator -> bidding_strategy -> `place_bid()` real
 - [x] `jobs/set_lineup.py` — pipeline completo: plantilla -> evaluator (pesos distintos a los de puja) -> dificultad de rival -> `pick_lineup()` -> `build_lineup_changes()`/`build_bench_changes()` -> `change_lineup()` real, titulares y un suplente por posición (slot fijo confirmado, ver sección dedicada)
-- [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada)
+- [x] `jobs/run_sales.py` — identifica jugadores con plusvalía suficiente (`engine/selling_strategy.py`) y los pone en venta — **cambio de comportamiento deliberado** frente a Comunio: ya no se filtra por "solo comprados por el bot" (ver sección dedicada); pide el VM tal cual salvo revalorización rápida sostenida, donde aplica una prima acotada por encima (`config.ENABLE_SELLING_REVALUATION_PREMIUM`, ver sección dedicada)
 - [x] `jobs/manage_substitutes.py` — sustitución MANUAL de un titular confirmado fuera (lesionado/en duda, o no incluido en el once real de su equipo hoy) por su suplente ya asignado en el banquillo (`engine.lineup_optimizer.build_substitution_changes()`), para ligas sin el "entrenador automático" de pago activado (ver sección "Banquillo/suplentes"); `config.ENABLE_SUBSTITUTE_AUTO_SUBMIT` **activado** desde el 2026-08-17 (decisión explícita del usuario); la secuencia de sustitución real (4 llamadas: vaciar+rellenar, nunca "to"+"from" combinados) se arregló y se confirmó en vivo el 2026-08-18 abriendo el navegador contra la propia app de Futmondo (ver "Banquillo/suplentes" y `TODO.md` #1)
 - [x] Cliente de alineaciones reales (`clients/football_lineups_client.py`, Fotmob) — detecta titulares sanos no incluidos en el once real de su equipo (rotación, no solo lesión); Fotmob elegida tras descartar en vivo API-Football (plan gratuito sin acceso a temporada en curso), SofaScore (403 en todo, bloqueo de bot a nivel de borde igual que FBref), ESPN (403 Akamai) y TheSportsDB (datos de alineación corruptos); detrás de `config.ENABLE_REAL_LINEUP_CHECK` (**false por defecto**, sin key ni cuenta que configurar) — ver sección "Banquillo/suplentes" para el TODO pendiente (timing exacto de confirmación, estabilidad a medio plazo de una API no oficial)
 - [~] Jobs y scheduler en GitHub Actions — los 5 YAMLs están actualizados a las variables de entorno de Futmondo (`FUTMONDO_*`); **pendiente**: configurar los nuevos Secrets/Variables en GitHub (ver sección "Activar el cron")
@@ -666,6 +666,43 @@ SANO tampoco entra aquí por mucho que concentre capital (si concentra y
 además es rentable o ha perdido mucho, ya lo cubren las otras dos vías).
 Esta venta forzada tampoco compite por margen de banquillo, igual que el
 corte de pérdidas por lesión.
+
+## Prima sobre el precio de venta por revalorización rápida sostenida
+
+A petición del usuario (2026-08-22): hasta ahora `asking_price` era
+siempre el VM tal cual (`value`), sin más — pedir el VM es la opción más
+simple y segura (ver más arriba). Pero el VM oficial de Futmondo puede
+tardar en reflejar del todo una subida muy reciente, así que
+`engine/selling_strategy.py` añade una prima opcional POR ENCIMA del VM
+cuando un jugador lleva subiendo de forma rápida y sostenida.
+
+`compute_revaluation_premium_pct()` usa el histórico diario de VM de
+`FutmondoClient.get_player_summary()["answer"]["prices"]` (formato
+CONFIRMADO en vivo el mismo día contra la cuenta real — Koke y Roberto
+Fernández, 7 días de histórico cada uno tras el reinicio de la liga: fecha
+ISO-8601 con milisegundos, orden ascendente, `price` = VM diario real
+idéntico al `value` de roster/market en esa fecha) y exige TRES
+condiciones antes de proponer nada: datos suficientes dentro de la
+ventana (`config.SELLING_REVALUATION_MIN_DATA_POINTS`/`_LOOKBACK_DAYS`),
+ninguna bajada día a día dentro de esa ventana (un solo día a la baja
+descarta la prima entera — busca tendencia sostenida, no un pico
+puntual), y una subida total por encima de
+`config.SELLING_REVALUATION_MIN_PCT_TO_PROJECT`. Si se cumplen, proyecta
+solo una FRACCIÓN de esa subida
+(`config.SELLING_REVALUATION_PROJECTION_FRACTION`, 50% por defecto),
+nunca la subida completa, y siempre topada por
+`config.SELLING_REVALUATION_MAX_PREMIUM_PCT` (15% por defecto) —
+corrido contra el histórico real de Roberto Fernández (+30.2% sostenido
+en 7 días) dio una prima de +15.0% (tope alcanzado), confirmando que el
+cálculo funciona sobre datos reales.
+
+`jobs/run_sales.py` solo llama a `get_player_summary()` sobre los
+candidatos que `decide_sales()` YA decidió vender (no toda la plantilla),
+y cualquier fallo de red deja el precio en el VM tal cual, sin bloquear la
+venta. Controlado por `config.ENABLE_SELLING_REVALUATION_PREMIUM`
+(**activado** desde que se confirmó el formato real, ver `TODO.md` #14) —
+impacto acotado en cualquier caso: solo sube el precio PEDIDO, nunca gasta
+dinero.
 
 ## La posición sí importa al puntuar: xG se normaliza por posición
 

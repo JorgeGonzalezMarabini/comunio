@@ -545,38 +545,52 @@ medias (cancela pero `place_bid()` posterior falla) queda auditado en
 
 ---
 
-## 14. Formato de `get_player_summary()["answer"]["prices"]` sin confirmar con captura real
+## 14. ~~Formato de `get_player_summary()["answer"]["prices"]` sin confirmar con captura real~~ (confirmado en vivo, 2026-08-22)
 
-**Qué pasa**: a petición del usuario (2026-08-22), se añadió una prima
-opcional sobre el precio de venta pedido cuando un jugador lleva subiendo
-de forma sostenida (`engine.selling_strategy.compute_revaluation_premium_pct`/
+**Qué pasaba**: se añadió una prima opcional sobre el precio de venta
+pedido cuando un jugador lleva subiendo de forma sostenida
+(`engine.selling_strategy.compute_revaluation_premium_pct`/
 `apply_revaluation_premium`), usando el histórico diario de VM de
-`FutmondoClient.get_player_summary()["answer"]["prices"]`. El shape de esa
-lista (`{"date", "price", "c", "s", ...}`) viene de una respuesta real
-capturada para `data`, pero **`prices` en concreto se vio vacío** en esa
-misma captura — no hay confirmación de qué formato tiene `date` (¿ISO-8601
-como `expirationDate`/`creationDate`? ¿epoch?), en qué orden vienen las
-entradas, ni si `price` es de verdad el VM diario y no otra cosa (`c`/`s`
-tampoco están confirmados, ver docstring de `get_player_summary`).
+`FutmondoClient.get_player_summary()["answer"]["prices"]`, pero la única
+captura disponible hasta entonces trajo ese campo vacío -- sin confirmar
+formato de `date`, orden de las entradas, ni si `price` era de verdad el
+VM diario.
 
-**Por qué importa**: activar la prima sobre datos mal interpretados podría
-inflar precios de venta sin base real (aunque el impacto es acotado: solo
-sube el precio PEDIDO, nunca gasta dinero, y `_parse_summary_date()` +
-`compute_revaluation_premium_pct()` son deliberadamente defensivos --
-cualquier dato que no encaje se descarta sin más, nunca revienta).
+**Confirmado con captura real** (2026-08-22, cuenta real, jugador Koke
+—`504e58bb4d8bec9a67000187`— y Roberto Fernández —`668015b50ab8ba417f327194`—,
+7 días de histórico cada uno tras el reinicio de la liga):
+
+```
+{"answer": {"data": {...}, "prices": [
+    {"_id": "...", "c": 10669590, "s": 475703,
+     "date": "2026-08-16T02:25:24.619Z", "price": 7420417},
+    ... (una entrada por día, orden ASCENDENTE -- más antigua primero)
+    {"_id": "...", "c": 9075071,  "s": 535614,
+     "date": "2026-08-22T02:25:27.595Z", "price": 6688588}
+], "points": [...], "championship": {...}, ...}}
+```
+
+- `date`: ISO-8601 con milisegundos y `Z` (`fromisoformat()` tras
+  `.replace("Z", "+00:00")` lo parsea bien, confirmado) — igual que
+  `expirationDate`/`creationDate`, NO epoch.
+- Orden: ascendente (más antigua primero) — aunque no importa en la
+  práctica, `compute_revaluation_premium_pct()` ordena igualmente antes de
+  usarlo.
+- `price`: SÍ es el VM diario — coincide exacto con `value` del roster/
+  market del mismo jugador en la misma fecha (Koke: 6.688.588 en ambos).
+- `c`/`s` siguen sin confirmar qué representan (no se usan).
+
+`compute_revaluation_premium_pct()` corrido contra el histórico real de
+Roberto Fernández (+30.2% sostenido en 7 días, ninguna bajada) devolvió
+`(0.15, "revalorización sostenida +30.2% en 7 dato(s) de los últimos 7
+días -> prima proyectada +15.0% (tope 15.0%)")` — proyección y tope
+funcionando como se diseñó, sobre datos reales.
 
 **Afecta a**: `engine/selling_strategy.py` (`_parse_summary_date`,
 `compute_revaluation_premium_pct`, `apply_revaluation_premium`),
-`jobs/run_sales.py`.
-
-**Mitigación actual**: `config.ENABLE_SELLING_REVALUATION_PREMIUM` en
-`false` por defecto -- no se activa en producción hasta confirmar el
-formato real con una captura de `get_player_summary()` sobre un jugador
-que sí tenga histórico de precios.
-
-**Dónde**: `engine/selling_strategy.py:301-...`, `jobs/run_sales.py`,
-`config.py` (`SELLING_REVALUATION_*`), `clients/futmondo_client.py:440-449`
-(`get_player_summary`, docstring con la forma capturada de `prices`).
+`jobs/run_sales.py`, `config.py` (`ENABLE_SELLING_REVALUATION_PREMIUM`,
+seguía en `false` en el momento de esta confirmación -- ver commit para si
+ya se activó después).
 
 ---
 

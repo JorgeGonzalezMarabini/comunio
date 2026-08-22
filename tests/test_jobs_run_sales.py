@@ -56,6 +56,9 @@ def test_run_sales_lists_profitable_player_and_persists(tmp_db):
         def get_information(self):
             return {"answer": {"budget": 0}}
 
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}  # sin histórico -- ENABLE_SELLING_REVALUATION_PREMIUM activo por defecto, sin prima aquí
+
         def list_for_sale(self, player_id, price):
             return {"code": "api.general.ok"}
 
@@ -103,6 +106,9 @@ def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_
 
         def get_information(self):
             return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}  # sin histórico -- ENABLE_SELLING_REVALUATION_PREMIUM activo por defecto, sin prima aquí
 
         def list_for_sale(self, player_id, price):
             raise FutmondoOfferError("algo salió mal")

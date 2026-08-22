@@ -16,7 +16,8 @@ se usa el registro LOCAL de pujas ganadas (`db.models.get_won_bid_prices()`)
 como fuente de verdad de qué se compró y a qué precio.
 
 Prima por revalorización rápida (config.ENABLE_SELLING_REVALUATION_PREMIUM,
-apagado por defecto -- ver docstring en config.py y
+activado por defecto desde que se confirmó en vivo el formato de
+get_player_summary() -- ver docstring en config.py, TODO.md #14 y
 engine.selling_strategy.compute_revaluation_premium_pct/
 apply_revaluation_premium): si está activo, por cada candidato ya decidido
 se pide el histórico diario de VM (FutmondoClient.get_player_summary()) y

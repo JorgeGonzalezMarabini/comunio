@@ -439,12 +439,20 @@ class FutmondoClient:
 
     def get_player_summary(self, player_id: str) -> dict:
         """
-        Ficha de un jugador. **100% confirmado**. Respuesta real:
+        Ficha de un jugador. **100% confirmado**, incluido `prices` con
+        histórico real (2026-08-22, ver TODO.md #14 -- la captura anterior
+        había traído esa lista vacía). Respuesta real:
             {"answer": {"data": {...igual que un item de roster/market...},
-             "prices": [{"date", "price", "c", "s", ...}, ...]}}
-        `prices` es el histórico de valor de mercado día a día — `c`/`s`
-        sin confirmar qué representan exactamente (¿compras/ventas del
-        día?), no se usan todavía.
+             "prices": [{"_id", "c", "s", "date", "price"}, ...] (una
+             entrada por día, orden ASCENDENTE -- más antigua primero),
+             "points": [...], "championship": {...}, ...}}
+        `prices` es el histórico de VALOR DE MERCADO día a día — `date` es
+        ISO-8601 con milisegundos y `Z` (igual que `expirationDate`/
+        `creationDate`, NO epoch) y `price` SÍ es el VM diario (coincide
+        exacto con `value` del roster/market del mismo jugador en la misma
+        fecha). Consumido por `engine.selling_strategy.
+        compute_revaluation_premium_pct()`. `c`/`s` siguen sin confirmar
+        qué representan (no se usan).
 
         Idempotente (solo lectura) -> reintenta ante fallo de conexión
         transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).

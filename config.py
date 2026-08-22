@@ -300,14 +300,15 @@ SELLING_INJURY_CONCENTRATION_MAX_PCT = float(os.getenv("SELLING_INJURY_CONCENTRA
 # conservadora de esa subida por encima del VM, en vez de pedir el VM tal
 # cual sin más (comportamiento anterior a este cambio).
 #
-# Apagado por defecto (a diferencia del resto de límites de venta, que ya
-# tenían histórico de decisiones): el formato real de "prices" (fecha,
-# orden, si "price" es de verdad el VM diario) NO está confirmado con una
-# captura real todavía (ver TODO.md) -- activar esto en producción antes
-# de esa confirmación podría aplicar primas basadas en datos mal
-# interpretados. `jobs/run_sales.py` solo llama a get_player_summary() y
+# Activado por defecto (a petición del usuario, 2026-08-22): el formato
+# real de "prices" (fecha ISO-8601, orden ascendente, "price" = VM diario
+# real) ya está CONFIRMADO en vivo contra la cuenta real (Koke y Roberto
+# Fernández, 7 días de histórico cada uno, ver TODO.md #14) -- ya no hay
+# riesgo de aplicar una prima sobre un formato mal interpretado. Impacto
+# acotado en cualquier caso: solo sube el precio PEDIDO al vender, nunca
+# gasta dinero. `jobs/run_sales.py` solo llama a get_player_summary() y
 # aplica la prima si este flag está a true.
-ENABLE_SELLING_REVALUATION_PREMIUM = os.getenv("ENABLE_SELLING_REVALUATION_PREMIUM", "false").lower() == "true"
+ENABLE_SELLING_REVALUATION_PREMIUM = os.getenv("ENABLE_SELLING_REVALUATION_PREMIUM", "true").lower() == "true"
 
 # Ventana de días hacia atrás sobre la que se mide la subida sostenida.
 SELLING_REVALUATION_LOOKBACK_DAYS = float(os.getenv("SELLING_REVALUATION_LOOKBACK_DAYS", "7"))
