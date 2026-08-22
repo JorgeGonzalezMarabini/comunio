@@ -64,6 +64,14 @@ baja segura varias jornadas: cualquier penalización de score, por dura que
 sea, siempre podría llegar a compensarse con muy buenas stats en el resto
 de métricas, y aquí eso sería justo el error que se quiere evitar.
 
+Plantilla completa (a raíz de 11 pujas fallidas en vivo, 2026-08-22): antes
+de evaluar cualquier candidato se compara `len(roster)` contra
+`information.answer.configuration.numberOfPlayers` -- si la plantilla ya
+está al máximo que permite la liga, Futmondo rechaza CUALQUIER puja nueva
+con `FutmondoOfferError("api.market.max_number_players_in_roster")` sin
+importar posición ni presupuesto, así que el job corta aquí en vez de
+generar pujas condenadas a fallar.
+
 Cancelar+pujar mejor (TODO.md #13, `engine.bidding_strategy.
 find_cancel_swap_candidates`): fase APARTE, después del loop normal de
 arriba, para los candidatos buenos (score/precio válidos, ver
@@ -174,6 +182,22 @@ def run():
     all_players = get_player_features(only_on_market=False)
     squad_raw = [p for p in all_players if p["id"] in roster_ids]
 
+    # Límite total de plantilla (confirmado en vivo 2026-08-22:
+    # "api.market.max_number_players_in_roster" -- Futmondo rechaza
+    # CUALQUIER puja nueva si la plantilla ya tiene el máximo de jugadores
+    # que permite la liga, sin importar posición ni presupuesto/tope). Se
+    # pide `get_information()` ya aquí (en vez de más abajo, donde antes
+    # solo se usaba para `budget`) para cortar ANTES de evaluar candidatos
+    # y así no generar pujas que van a fallar seguro.
+    information = client.get_information()
+    max_roster_size = information.get("answer", {}).get("configuration", {}).get("numberOfPlayers")
+    if max_roster_size is not None and len(roster_ids) >= max_roster_size:
+        notify(
+            f"run_market: plantilla completa ({len(roster_ids)}/{max_roster_size}) -- no se puja esta "
+            f"ejecución ({len(raw_candidates)} candidato(s) en mercado descartado(s))."
+        )
+        return
+
     at_risk_positions = set()
     upgrade_thresholds = {}
     lineup_score_by_id = {}
@@ -201,7 +225,6 @@ def run():
             p["lineup_score"] = lineup_score_by_id[p["id"]]
     prioritized = apply_position_priority(ranked, at_risk_positions, upgrade_thresholds=upgrade_thresholds)
 
-    information = client.get_information()
     remaining_budget = information.get("answer", {}).get("budget", 0)
     already_risked = get_bids_risked_today()
 

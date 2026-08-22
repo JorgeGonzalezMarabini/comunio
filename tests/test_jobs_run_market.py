@@ -90,6 +90,39 @@ def test_run_market_business_rejection_is_audited_as_failed_without_crashing(tmp
     assert row["status"] == "failed"
 
 
+def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
+    """
+    Regresión (2026-08-22, 11 pujas fallidas en vivo): si la plantilla ya
+    tiene `configuration.numberOfPlayers` jugadores, Futmondo rechaza
+    CUALQUIER puja con `api.market.max_number_players_in_roster` sin
+    importar posición ni presupuesto -- el job debe cortar antes de
+    evaluar candidatos, sin llamar a place_bid() ni auditar pujas 'failed'.
+    """
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": str(i)} for i in range(15)]}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"numberOfPlayers": 15}}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería intentar pujar con la plantilla llena")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "plantilla completa" in captured[0]
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"]
+    assert count == 0
+
+
 def test_run_market_player_no_longer_in_market_is_audited_as_failed(tmp_db):
     """El mercado cambió entre evaluar y pujar -- el candidato ya no aparece en get_market()."""
     _seed_player("4069", "DEF", price=350_000)
