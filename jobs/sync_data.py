@@ -17,6 +17,14 @@ en la plantilla, la puja se da por ganada; si ya no está ni en plantilla
 ni en el mercado, se da por perdida (aunque en realidad pudiera ser que el
 propio manager rival ganó, o que expiró sin comprador, no se puede
 distinguir con los datos disponibles).
+
+Además, cada sync hace un backfill idempotente de la plantilla inicial (ver
+`_backfill_initial_squad_bids`): a los jugadores que llegaron con el equipo
+(no comprados por el bot) se les registra una puja 'won' sintética por su VM
+actual, porque ese VM sí se descontó del presupuesto inicial -- sin esto,
+`engine.selling_strategy.decide_sales()` los descarta como candidatos a
+venta sin mirar su lesión/pérdida de valor (no aparecían en
+`get_won_bid_prices()`).
 """
 from datetime import datetime, timezone
 
@@ -65,6 +73,53 @@ def _reconcile_bids(roster_player_ids: set, market_player_ids: set) -> dict:
             update_bid_status(bid["id"], "lost")
             counts["lost"] += 1
     return counts
+
+
+def _backfill_initial_squad_bids(conn, roster_players: list, now: str) -> int:
+    """
+    Los jugadores de la plantilla INICIAL (asignados al crear el equipo, no
+    comprados por el bot vía puja) no tienen ninguna fila 'won' en `bids` --
+    por eso `engine.selling_strategy.decide_sales()` los descarta como
+    candidatos a venta sin siquiera mirar su lesión/pérdida de valor (ver
+    `purchase_price = bought_by_bot.get(...) or 0` -> `continue`). Su VM SÍ
+    se descontó del presupuesto inicial del equipo al repartir la plantilla,
+    así que aquí se registra una puja 'won' sintética por su VM actual (no
+    tenemos guardado el VM exacto del momento del reparto, es la mejor
+    aproximación disponible) para que sí entren a evaluación de venta, a
+    petición del usuario (2026-08-22, ver Mendy: lesionado y nunca evaluado
+    por este motivo).
+
+    Se ejecuta en cada sync, pero es idempotente por diseño: en cuanto un
+    jugador tiene alguna puja 'won' (esta sintética o una real ganada más
+    adelante), deja de tocarse.
+
+    Devuelve cuántas pujas sintéticas se han añadido (para la notificación).
+    """
+    added = 0
+    for player in roster_players:
+        value = player.get("value")
+        if not value or value <= 0:
+            continue  # sin VM fiable, no se puede fijar un precio de referencia
+        player_id = str(player["id"])
+        already_won = conn.execute(
+            "SELECT 1 FROM bids WHERE player_id = ? AND status = 'won' LIMIT 1", (player_id,)
+        ).fetchone()
+        if already_won:
+            continue
+        conn.execute(
+            """
+            INSERT INTO bids (player_id, amount, status, score, reason, created_at)
+            VALUES (?, ?, 'won', NULL, ?, ?)
+            """,
+            (
+                player_id,
+                value,
+                "Plantilla inicial: VM descontado del presupuesto al crear el equipo (backfill automático de sync_data)",
+                now,
+            ),
+        )
+        added += 1
+    return added
 
 
 def _parse_int(value) -> int | None:
@@ -280,6 +335,11 @@ def run():
             _upsert_player_and_snapshot(conn, player, now, on_market=True)  # siempre True: viene del listado de mercado
             _cross_with_understat(conn, player)
 
+        # Backfill de pujas 'won' sintéticas para la plantilla inicial (ver
+        # docstring de _backfill_initial_squad_bids) -- necesita que las filas
+        # de `players` ya existan (FK), por eso va tras el upsert de roster.
+        backfilled = _backfill_initial_squad_bids(conn, roster_players, now)
+
     # Reconciliar el estado de nuestras propias pujas (ver docstring de
     # _reconcile_bids): ninguna otra parte del bot actualiza 'placed' a
     # 'won'/'lost' después de colocarlas.
@@ -297,6 +357,8 @@ def run():
     ]
     if reconciled["won"] or reconciled["lost"]:
         message.append(f"Pujas resueltas desde el último sync: {reconciled['won']} ganada(s), {reconciled['lost']} perdida(s).")
+    if backfilled:
+        message.append(f"Pujas 'won' sintéticas añadidas para plantilla inicial: {backfilled}.")
     if sold:
         message.append(f"Ventas completadas desde el último sync: {sold}.")
     notify(" ".join(message))

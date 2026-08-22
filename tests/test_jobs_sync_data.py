@@ -129,6 +129,75 @@ def test_reconcile_sales_leaves_still_owned_players_listed(tmp_db):
     assert sold == 0
 
 
+def test_backfill_initial_squad_bids_adds_won_bid_at_current_value(tmp_db, roster_player_factory):
+    """
+    Un jugador de la plantilla inicial (nunca comprado por el bot, cero
+    filas en `bids`) debe recibir una puja 'won' sintética por su VM actual,
+    para que engine.selling_strategy.decide_sales() no lo descarte sin
+    evaluarlo (motivo real: Mendy, lesionado, nunca puesto a la venta).
+    """
+    roster_player = roster_player_factory(id=1001, name="Mendy", role="defensa", value=4_603_280)
+
+    with get_connection() as conn:
+        added = sync_data._backfill_initial_squad_bids(conn, [roster_player], NOW)
+
+    assert added == 1
+    with get_connection() as conn:
+        row = conn.execute("SELECT amount, status FROM bids WHERE player_id = ?", ("1001",)).fetchone()
+    assert row["status"] == "won"
+    assert row["amount"] == 4_603_280
+
+
+def test_backfill_initial_squad_bids_is_idempotent_once_won_bid_exists(tmp_db, roster_player_factory):
+    """No debe duplicar ni tocar a un jugador que ya tiene una puja 'won' (comprado por el bot, o ya backfilleado antes)."""
+    roster_player = roster_player_factory(id=1001, name="Comprado por el bot", role="defensa", value=2_000_000)
+    with get_connection() as conn:
+        conn.execute("INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)", ("1001", 1_500_000, "won", NOW))
+
+    with get_connection() as conn:
+        added = sync_data._backfill_initial_squad_bids(conn, [roster_player], NOW)
+
+    assert added == 0
+    with get_connection() as conn:
+        rows = conn.execute("SELECT amount FROM bids WHERE player_id = ?", ("1001",)).fetchall()
+    assert [r["amount"] for r in rows] == [1_500_000]  # sin fila nueva, precio real de compra intacto
+
+
+def test_backfill_initial_squad_bids_skips_players_without_reliable_value(tmp_db, roster_player_factory):
+    """Sin VM fiable (None o <= 0) no se puede fijar un precio de referencia -- no se inventa una puja."""
+    roster_player = roster_player_factory(id=1001, name="Sin VM", role="defensa", value=None)
+
+    with get_connection() as conn:
+        added = sync_data._backfill_initial_squad_bids(conn, [roster_player], NOW)
+
+    assert added == 0
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM bids WHERE player_id = ?", ("1001",)).fetchone()
+    assert row["n"] == 0
+
+
+def test_run_full_job_backfills_won_bid_for_initial_squad_player(tmp_db, roster_player_factory):
+    """Test de integración: run() completo debe dejar al jugador de plantilla inicial disponible en get_won_bid_prices()."""
+    roster_player = roster_player_factory(id=1001, name="Mendy", role="defensa", value=4_603_280)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", {})):
+        sync_data.run()
+
+    from db.models import get_won_bid_prices
+    assert get_won_bid_prices() == {"1001": 4_603_280}
+    assert "Pujas 'won' sintéticas añadidas para plantilla inicial: 1" in captured[-1]
+
+
 def test_run_full_job_with_fake_client(tmp_db, roster_player_factory):
     roster_player = roster_player_factory(id=1001, name="Jugador Propio", role="defensa")
 
