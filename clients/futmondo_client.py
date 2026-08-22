@@ -658,27 +658,35 @@ class FutmondoClient:
         venta, sin el cual `jobs/run_sales.py` nunca generaba ingresos
         reales por mucho que un jugador puesto en venta recibiera ofertas.
 
-        **100% confirmado en vivo de principio a fin** (2026-08-22, liga de
-        prueba de `.env.test`): con un segundo manager real pujando 2.700.000€
-        sobre "Fer Niño" (puesto en venta a 2.623.496€), se aceptó la oferta
-        desde la UI real de app.futmondo.com y se verificó el resultado por
-        API antes/después: `get_information().budget` subió exactamente
-        2.700.000€ (106.618.140€ -> 109.318.140€) y el jugador desapareció
-        de `get_my_players_in_market()`. El endpoint y el shape del body se
-        obtuvieron primero viendo `POST /1/market/acceptbid` disparado en
-        `performance.getEntriesByType('resource')` al aceptar (el capturador
-        de red normal, `read_network_requests`, no llegó a registrar esta
-        llamada concreta -- posible limitación con fetches muy rápidos)
-        y CONFIRMANDO el nombre de los parámetros leyendo el propio bundle
-        `main.dart.js` de la app (no minifica literales de string, mismo
-        método que documenta el docstring del módulo para otros hallazgos):
+        **100% confirmado en vivo de principio a fin, DOS veces** (2026-08-22,
+        liga de prueba de `.env.test`):
+        1. Primera vez: con un segundo manager real pujando 2.700.000€ sobre
+           "Fer Niño" (puesto en venta a 2.623.496€), se aceptó la oferta
+           desde la UI real de app.futmondo.com. El endpoint y el shape del
+           body se obtuvieron viendo `POST /1/market/acceptbid` disparado en
+           `performance.getEntriesByType('resource')` al aceptar (el
+           capturador de red normal, `read_network_requests`, no llegó a
+           registrar esta llamada concreta -- posible limitación con
+           fetches muy rápidos) y CONFIRMANDO el nombre de los parámetros
+           leyendo el propio bundle `main.dart.js` de la app (no minifica
+           literales de string, mismo método que documenta el docstring del
+           módulo para otros hallazgos). Se verificó el resultado por API
+           antes/después: `get_information().budget` subió exactamente
+           2.700.000€ (106.618.140€ -> 109.318.140€) y el jugador desapareció
+           de `get_my_players_in_market()`.
+        2. Segunda vez, ya con este método implementado: nueva oferta real de
+           1.000.000€ de otro manager sobre "Pablo Durán", aceptada llamando
+           a `accept_sale_offer()` DIRECTAMENTE por API (sin pasar por la UI
+           en absoluto). La llamada devolvió `{"answer": {"code":
+           "api.general.ok"}}` tal cual se esperaba, y se confirmó el efecto
+           igual que la primera vez: `budget` subió exactamente 1.000.000€
+           (109.318.140€ -> 110.318.140€) y el jugador salió tanto de
+           `get_my_players_in_market()` como de `get_roster()`.
 
             POST /1/market/acceptbid
             body.query: {..., "bid": <bid_id>, "player_id": <player_id>}
             respuesta real: {"answer": {"code": "api.general.ok"}, ...}
-            (la respuesta exacta de ESTA llamada en vivo no se releyó -- se
-            verificó el efecto, no el código de respuesta -- pero se asume
-            el mismo patrón `answer.code` que el resto de escrituras)
+            (confirmado directamente en la segunda prueba, ver arriba)
 
         `bid_id`/`player_id`: salen de `get_my_players_in_market()`, del
         listado propio del jugador (`item["id"]`) y de la oferta dentro de

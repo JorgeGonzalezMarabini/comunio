@@ -691,6 +691,19 @@ clic. Hallazgos:
     player_id)` (y su opuesto `reject_sale_offer()`, este último SOLO
     confirmado por nombre en el bundle, nunca llamado de verdad).
 
+**Actualización 2026-08-22 (misma tarde) -- segunda confirmación, esta vez 100% por API**:
+antes de integrar la llamada en `jobs/run_sales.py`, el usuario creó otra
+venta de prueba y consiguió otra oferta real (1.000.000€ de
+"jorge.gonzalez" sobre "Pablo Durán"). Se llamó a `accept_sale_offer()`
+DIRECTAMENTE por API con `.env.test` (sin tocar la UI esta vez) y
+funcionó a la primera: devolvió `{"answer": {"code": "api.general.ok"}}`
+y el efecto se confirmó igual que la vez anterior -- `budget` subió
+exactamente 1.000.000€ (109.318.140€ -> 110.318.140€) y "Pablo Durán"
+desapareció tanto de `get_my_players_in_market()` como de `get_roster()`.
+Con esto, `accept_sale_offer()` queda confirmado de forma independiente
+de la UI -- ya no depende de que el usuario inicie sesión a mano para
+que el bot pueda usarlo en el cron real.
+
 **Lo que queda (ya no es "sin confirmar el mecanismo", es "falta
 integrarlo")**: `jobs/run_sales.py` sigue sin llamar a
 `accept_sale_offer()` -- todavía no lee `get_my_players_in_market()` para
