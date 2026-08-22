@@ -104,11 +104,13 @@ def run():
     budget = information.get("answer", {}).get("budget", 0)
 
     # Ocupación de plantilla (mismo campo que jobs/run_market.py usa para
-    # cortar pujas por límite de plazas) -- se incluye SIEMPRE en la
-    # notificación para poder correlacionar a simple vista "plantilla
-    # llena/casi llena + nada que vender" con que run_market esté
-    # bloqueando pujas por falta de plazas.
-    max_roster_size = information.get("answer", {}).get("configuration", {}).get("numberOfPlayers")
+    # cortar pujas por límite de plazas -- `playersInRoster`, NO
+    # `numberOfPlayers`, ver docstring de ese módulo: ese otro campo es el
+    # número de jugadores INICIALES de la liga, no el máximo) -- se
+    # incluye SIEMPRE en la notificación para poder correlacionar a simple
+    # vista "plantilla llena/casi llena + nada que vender" con que
+    # run_market esté bloqueando pujas por falta de plazas.
+    max_roster_size = information.get("answer", {}).get("configuration", {}).get("playersInRoster")
     occupancy = f"{len(roster_items)}/{max_roster_size}" if max_roster_size is not None else str(len(roster_items))
 
     # Oportunidad de mercado (a petición del usuario, 2026-08-22, ver

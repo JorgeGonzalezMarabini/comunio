@@ -660,6 +660,58 @@ aceptarla, igual que se hizo con `cancelbid`/`cancelsell`.
 
 ---
 
+## 16. ~~`configuration.numberOfPlayers` confundido con el máximo de plantilla~~ (bug real en producción, confirmado y arreglado, 2026-08-22)
+
+**Qué pasaba**: el mismo día que se añadió el límite de plantilla en
+`jobs/run_market.py`/`jobs/run_sales.py` (a raíz de 11 pujas fallidas en
+vivo por `api.market.max_number_players_in_roster`), se asumió sin
+confirmar que `information.answer.configuration.numberOfPlayers` era el
+máximo de jugadores que permite la liga. En producción esto cortó las
+pujas con el mensaje "plantilla completa (15/15)" en una liga cuyo
+máximo real, confirmado por el usuario mirando la pantalla de info de la
+liga ("Máximo número de jugadores en plantilla"), era **18**, no 15 —
+el bot se quedó bloqueado sin poder pujar por nada, muy por debajo del
+límite real.
+
+**Investigado** (2026-08-22, a petición del usuario): sin ninguna oferta
+de mercado real que interceptar en el momento, se inspeccionó
+directamente el bundle `main.dart.js` de la propia app web de Futmondo
+(dart2js no minifica los literales de string, así que los nombres de
+campo — e incluso la lógica de validación de formularios — quedan
+legibles tal cual en el JS compilado; técnica nueva para este proyecto,
+sin necesitar generar tráfico de red real). Se encontraron DOS campos
+DISTINTOS dentro de `configuration`:
+  - `numberOfPlayers`: se inicializa a `15` por defecto en el código del
+    formulario de CREACIÓN de liga — es el número de jugadores INICIALES
+    con el que arranca cada equipo, no un máximo.
+  - `playersInRoster`: se valida con `if(r>0&&r<=11)r=11` (nunca por
+    debajo de 11) antes de guardarse — es el máximo real de jugadores en
+    plantilla, y corresponde a "Máximo número de jugadores en plantilla"
+    en la pantalla de info de la liga.
+
+Confirmado cruzando con la cuenta real: la liga en cuestión tenía
+`numberOfPlayers=15` pero `playersInRoster=18` en su pantalla de info,
+coincidiendo exactamente con el bug observado (bloqueo en 15, no en 18).
+
+**Arreglado**: `jobs/run_market.py` y `jobs/run_sales.py` ahora leen
+`configuration.playersInRoster` en vez de `configuration.numberOfPlayers`
+para el límite de plantilla y la ocupación reportada. Documentado en el
+docstring de `clients/futmondo_client.py.get_information()` para que no
+se repita la confusión.
+
+**Verificado con test**:
+`test_run_market_ignores_numberOfPlayers_field_for_roster_limit` (nuevo,
+`tests/test_jobs_run_market.py`) — plantilla de 15 con
+`numberOfPlayers=15` pero sin `playersInRoster` informado no debe cortar
+las pujas. Resto de tests de plantilla llena/hueco parcial actualizados
+para usar `playersInRoster`. Suite completa: 314 passed.
+
+**Afecta a**: `jobs/run_market.py`, `jobs/run_sales.py`,
+`clients/futmondo_client.py` (`get_information()`),
+`tests/test_jobs_run_market.py`, `tests/test_jobs_run_sales.py`.
+
+---
+
 ## Ya resuelto (para referencia, no es un pendiente)
 
 **`build_bench_changes()` repetía un `"from"` ya caducado en un intercambio

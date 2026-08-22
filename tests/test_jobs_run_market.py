@@ -104,10 +104,13 @@ def test_run_market_business_rejection_is_audited_as_failed_without_crashing(tmp
 def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
     """
     Regresión (2026-08-22, 11 pujas fallidas en vivo): si la plantilla ya
-    tiene `configuration.numberOfPlayers` jugadores, Futmondo rechaza
-    CUALQUIER puja con `api.market.max_number_players_in_roster` sin
-    importar posición ni presupuesto -- el job debe cortar antes de
-    evaluar candidatos, sin llamar a place_bid() ni auditar pujas 'failed'.
+    tiene `configuration.playersInRoster` jugadores (el máximo REAL de la
+    liga -- NO `configuration.numberOfPlayers`, que es el número de
+    jugadores INICIALES, ver docstring de clients/futmondo_client.py),
+    Futmondo rechaza CUALQUIER puja con
+    `api.market.max_number_players_in_roster` sin importar posición ni
+    presupuesto -- el job debe cortar antes de evaluar candidatos, sin
+    llamar a place_bid() ni auditar pujas 'failed'.
     """
     _seed_player("4069", "DEF", price=350_000)
 
@@ -116,7 +119,7 @@ def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
             return {"answer": [{"id": str(i)} for i in range(15)]}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000, "configuration": {"numberOfPlayers": 15}}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"playersInRoster": 15}}}
 
         def get_market(self):
             return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
@@ -132,6 +135,43 @@ def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"]
     assert count == 0
+
+
+def test_run_market_ignores_numberOfPlayers_field_for_roster_limit(tmp_db):
+    """
+    Regresión (2026-08-22, a petición del usuario -- bug real en vivo):
+    `configuration.numberOfPlayers` es el número de jugadores INICIALES de
+    la liga (confirmado inspeccionando main.dart.js de la propia app,
+    ver docstring de clients/futmondo_client.py.get_information()), NO el
+    máximo real -- este job nunca debe leerlo para decidir si la plantilla
+    está llena. Plantilla de 15 (== numberOfPlayers) pero SIN
+    `playersInRoster` informado -> no hay máximo confirmado, no se corta.
+    """
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": str(i)} for i in range(15)]}
+
+        def get_information(self):
+            # Liga real con tope 18 -- pero numberOfPlayers=15 (jugadores
+            # iniciales) NUNCA debe leerse como si fuera el máximo.
+            return {"answer": {"budget": 20_000_000, "configuration": {"numberOfPlayers": 15}}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "plantilla completa" not in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT status FROM bids").fetchone()
+    assert row["status"] == "placed"
 
 
 def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
@@ -150,7 +190,7 @@ def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
             return {"answer": [{"id": "999"}]}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000, "configuration": {"numberOfPlayers": 2}}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"playersInRoster": 2}}}
 
         def get_market(self):
             return {

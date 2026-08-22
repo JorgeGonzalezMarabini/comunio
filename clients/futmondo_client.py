@@ -380,9 +380,32 @@ class FutmondoClient:
             {"answer": {"budget": <int>, "teamValue": <int>, "points": ...,
              "championship": <nombre>, "championshipMode": "social"|...,
              "league": {...}, "configuration": {"budget", "numberOfPlayers",
-             ...}, ...}}
+             "playersInRoster", ...}, ...}}
         `budget` es el saldo TOTAL (no descuenta pujas pendientes, igual que
         el "credit" de Comunio — ver real_pending_bid_amount()).
+
+        `configuration.numberOfPlayers` vs. `configuration.playersInRoster`
+        (a petición del usuario, 2026-08-22, confirmado inspeccionando el
+        bundle `main.dart.js` de la propia app -- dart2js no minifica los
+        literales de string, así que los nombres de campo y hasta la
+        lógica de validación quedan legibles tal cual): son dos campos
+        DISTINTOS que se confundieron en `jobs/run_market.py`/
+        `jobs/run_sales.py` el mismo día que se añadió el límite de
+        plantilla, causando que el bot cortara las pujas de golpe muy por
+        debajo del máximo real de la liga.
+          - `numberOfPlayers`: número de jugadores INICIALES de la liga
+            (el reparto al crearla) -- en el código de creación de liga de
+            la propia app se ve inicializado a `15` por defecto. NO es un
+            límite máximo.
+          - `playersInRoster`: el máximo REAL de jugadores en plantilla
+            ("Máximo número de jugadores en plantilla" en la pantalla de
+            info de la liga) -- en el código de la propia app se valida
+            con `if(r>0&&r<=11)r=11` (nunca por debajo de 11) antes de
+            guardarlo. Es este campo el que hay que comparar contra
+            `len(roster)` para el límite real de plantilla.
+        Confirmado además contra una cuenta real: una liga con
+        `numberOfPlayers=15` (plantilla ya en 15/15 según ese campo) tenía
+        en realidad `playersInRoster=18` en su pantalla de info.
 
         Idempotente (solo lectura) -> reintenta ante fallo de conexión
         transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`) — el
