@@ -8,7 +8,7 @@ confirmar > limitación de API externa > mejora futura/calibración).
 
 Cada entrada indica **qué pasa**, **por qué importa**, **a qué afecta** y
 **dónde está** en el código (archivo:línea) por si hace falta profundizar.
-Última revisión: 2026-08-19.
+Última revisión: 2026-08-22.
 
 ---
 
@@ -591,6 +591,72 @@ funcionando como se diseñó, sobre datos reales.
 `jobs/run_sales.py`, `config.py` (`ENABLE_SELLING_REVALUATION_PREMIUM`,
 seguía en `false` en el momento de esta confirmación -- ver commit para si
 ya se activó después).
+
+---
+
+## 15. Venta de jugadores: falta el paso de ACEPTAR una oferta recibida (crítico, sin confirmar en vivo)
+
+**Qué pasa**: `jobs/run_sales.py` solo pone al jugador en venta
+(`list_for_sale()` -> `POST /1/market/putonmarket`) y ahí termina su
+trabajo. Tanto el código como su docstring asumían que la venta se
+completa sola una vez otro manager "compra" — `jobs/sync_data.py`
+(`_reconcile_sales()`, líneas 30-44) solo detecta que una venta se
+completó comparando si el jugador desapareció de la plantilla en el
+siguiente sync; en ningún punto del código se leen ni se aceptan ofertas.
+
+A petición del usuario (2026-08-22, información nueva sobre el
+funcionamiento real de Futmondo): tras poner un jugador en venta, otros
+managers hacen OFERTAS sobre él, y el vendedor tiene que ACEPTAR una
+explícitamente para que la venta se complete — no es automático como se
+había asumido. Sin este paso, un jugador puesto en venta se quedaría
+listado indefinidamente sin venderse nunca, por muchas ofertas que
+reciba, y todo el motor de venta (las 4 vías de `engine/selling_strategy.
+decide_sales()`) generaría 0 ingresos reales en la práctica.
+
+**Por qué importa**: vender es la vía principal de generación de ingresos
+del bot (ver docstring de `jobs/run_sales.py`, README "Economía") — sin
+completar el ciclo compra→venta, el presupuesto solo puede reducirse con
+el tiempo. Máxima prioridad en cuanto se pueda confirmar en vivo; se
+sube por delante de los demás TODOs pendientes porque, de confirmarse,
+invalida la utilidad práctica de todo lo construido en
+`engine/selling_strategy.py` hasta ahora, no solo un caso concreto.
+
+**Pista ya vista en captura pero sin confirmar**
+(`clients/futmondo_client.py:69`): `POST /1/market/rosterbids` está
+documentado como *"ofertas de cláusula que otros managers han hecho
+sobre TU plantilla"* (`type="roster"` en la query) — pero etiquetado
+explícitamente como ofertas de CLÁUSULA (pagar el precio de rescisión),
+sin confirmar si es el mismo mecanismo para aceptar una oferta sobre un
+jugador puesto en venta normal (`list_for_sale`/`putonmarket`). Podría
+ser el endpoint correcto (mismo concepto general de "oferta sobre tu
+plantilla", solo que con otro `type`), un mecanismo totalmente distinto,
+o ambos casos conviviendo en el mismo endpoint — sin confirmar.
+
+**Investigado pero sin poder capturar en vivo (2026-08-22)**: en el
+momento de detectar esto, el usuario no tenía ninguna oferta de venta
+real pendiente que interceptar con Chrome DevTools (mismo método usado
+para confirmar TODO #1/#3/#13). Bloqueado hasta la próxima vez que un
+jugador puesto en venta reciba una oferta real.
+
+**Afecta a**: `jobs/run_sales.py` (necesitará un paso nuevo -- leer
+ofertas recibidas y aceptar la mejor, quizás un job aparte tipo
+`jobs/accept_sale_offers.py`, o ampliarlo dentro del mismo job),
+`jobs/sync_data.py` (`_reconcile_sales()`, cuya lógica actual de
+"desapareció de la plantilla = vendido" puede seguir sirviendo como
+confirmación POSTERIOR una vez la venta se complete, pero no sustituye
+la aceptación activa), `clients/futmondo_client.py` (nuevo método tipo
+`get_sale_offers()`/`accept_sale_offer()`, y confirmar si
+`/1/market/rosterbids` sirve para esto).
+
+**Dónde**: `clients/futmondo_client.py:69` (endpoint visto sin usar),
+`jobs/run_sales.py`, `jobs/sync_data.py:30-44` (`_reconcile_sales`),
+`engine/selling_strategy.py` (sin cambios necesarios en la lógica de
+DECISIÓN, esto es puramente de EJECUCIÓN tras decidir vender).
+
+**Siguiente paso**: la próxima vez que un jugador puesto en venta por el
+bot (o listado a mano para probar) reciba una oferta real, capturar con
+Chrome DevTools la petición real que dispara la UI de Futmondo al
+aceptarla, igual que se hizo con `cancelbid`/`cancelsell`.
 
 ---
 

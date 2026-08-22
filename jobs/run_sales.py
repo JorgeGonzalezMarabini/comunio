@@ -9,6 +9,17 @@ poner en venta solo deja al jugador listado, visible para que otro manager
 (o el "Computer") lo compre. jobs/sync_data.py reconcilia después si la
 venta se completó (comparando la plantilla en cada sync).
 
+**CRÍTICO, sin confirmar (TODO.md #15, a petición del usuario,
+2026-08-22)**: según información del usuario, Futmondo NO vende
+automáticamente al mejor postor -- otros managers hacen OFERTAS sobre el
+jugador listado, y hace falta ACEPTAR una explícitamente para completar
+la venta. Ese paso de aceptación NO está implementado en ningún sitio de
+este código (ni aquí ni en jobs/sync_data.py) -- si se confirma, un
+jugador puesto en venta por este job podría quedarse listado
+indefinidamente sin venderse nunca, por muchas ofertas que reciba. Sin
+confirmar todavía con captura real (ver TODO.md #15 para el endpoint
+visto pero sin usar y el motivo por el que no se pudo capturar aún).
+
 Igual que en Comunio, solo se consideran candidatos los jugadores
 "comprados por el bot" — aquí, en vez de un campo de Futmondo (`buyPrice`
 no sirve para distinguir origen, ver TODO.md #4/engine/selling_strategy.py),
