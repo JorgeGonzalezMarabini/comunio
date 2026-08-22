@@ -5,6 +5,7 @@ __pycache__/
 
 # Secretos locales (nunca commitear credenciales reales)
 .env
+.env.test
 
 # IDE
 .idea/
