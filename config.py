@@ -264,6 +264,20 @@ SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.20"))
 # partida razonado, sin calibrar todavía con resultados reales.
 SELLING_INJURY_MAX_LOSS_PCT = float(os.getenv("SELLING_INJURY_MAX_LOSS_PCT", "0.10"))
 
+# % máximo (positivo, ej. 0.15 = 15%) del capital TOTAL del equipo (suma
+# del valor de mercado de toda la plantilla + presupuesto disponible) que
+# puede estar inmovilizado en UN solo jugador con lesión CONFIRMADA (no
+# "doubt" -- ver clients.futmondo_client.is_confirmed_injured_status())
+# antes de ponerlo en venta, aunque ni siquiera haya llegado a
+# SELLING_INJURY_MAX_LOSS_PCT de pérdida (a petición del usuario,
+# 2026-08-22, ver docstring de engine/selling_strategy.py). La intención
+# no es la rentabilidad de la operación sino evitar tener gran parte del
+# capital inmovilizado en un jugador que no se puede usar mientras esté
+# lesionado -- un problema de concentración de capital, no de plusvalía.
+# 15% es un punto de partida razonado, sin calibrar todavía con
+# resultados reales.
+SELLING_INJURY_CONCENTRATION_MAX_PCT = float(os.getenv("SELLING_INJURY_CONCENTRATION_MAX_PCT", "0.15"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real de Futmondo (confirmado por captura, campo "strategy" de
 # /1/userteam/lineup): CON guiones, ej. "4-4-2" — a diferencia de Comunio,

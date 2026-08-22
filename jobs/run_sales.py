@@ -58,7 +58,15 @@ def run():
         notify("run_sales: la plantilla vino vacía, nada que evaluar.")
         return
 
-    decisions = decide_sales(roster_items, bought_by_bot=get_won_bid_prices())
+    # `budget` se pasa a decide_sales() para calcular el capital TOTAL del
+    # equipo (plantilla + presupuesto) que usa la concentración de capital
+    # en lesión confirmada (config.SELLING_INJURY_CONCENTRATION_MAX_PCT,
+    # ver engine/selling_strategy.py) -- sin esto, esa señal solo vería el
+    # valor de la plantilla, subestimando el capital real disponible.
+    information = client.get_information()
+    budget = information.get("answer", {}).get("budget", 0)
+
+    decisions = decide_sales(roster_items, bought_by_bot=get_won_bid_prices(), budget=budget)
     if not decisions:
         notify("run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución.")
         return

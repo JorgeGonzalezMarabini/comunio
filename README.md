@@ -619,6 +619,29 @@ margen de banquillo (ninguno de los dos contó nunca como "disponible" en
 jugador de su posición. El corte genérico de un jugador SANO sí sigue
 respetando ese margen, igual que una venta por rentabilidad normal.
 
+## Venta: concentración de capital en lesión confirmada
+
+A petición del usuario (2026-08-22): las dos vías de arriba solo miran
+RENTABILIDAD (plusvalía o pérdida de la operación). Pero un lesionado
+puede ser un problema aunque su pérdida sea pequeña, si simplemente
+representa una parte demasiado grande del capital del equipo — mientras
+esté lesionado no se puede usar, así que tener mucho capital inmovilizado
+ahí es un coste de oportunidad real (ese dinero no puede fichar a nadie
+más).
+
+Por eso `engine/selling_strategy.py:decide_sales()` añade una TERCERA vía,
+que no mira plusvalía/pérdida en absoluto: un jugador con lesión
+CONFIRMADA cuyo valor supera `config.SELLING_INJURY_CONCENTRATION_MAX_PCT`
+(15% por defecto) del capital TOTAL del equipo (suma del valor de toda la
+plantilla + `budget` disponible, este último ahora obtenido por
+`jobs/run_sales.py` vía `client.get_information()` y pasado a
+`decide_sales()`) se pone en venta igualmente. Como con las otras dos
+vías, "doubt" queda fuera — todavía puede llegar a jugar, y un jugador
+SANO tampoco entra aquí por mucho que concentre capital (si concentra y
+además es rentable o ha perdido mucho, ya lo cubren las otras dos vías).
+Esta venta forzada tampoco compite por margen de banquillo, igual que el
+corte de pérdidas por lesión.
+
 ## La posición sí importa al puntuar: xG se normaliza por posición
 
 Arreglado 2026-08-17 (ya estaba señalado como TODO desde el principio,

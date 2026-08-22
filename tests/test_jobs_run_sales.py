@@ -32,6 +32,9 @@ def test_run_sales_no_profitable_candidates_notifies_and_returns(tmp_db):
         def get_roster(self):
             return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # nadie comprado por el bot -> nada que vender
 
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
     captured = []
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
         run_sales.run()
@@ -49,6 +52,9 @@ def test_run_sales_lists_profitable_player_and_persists(tmp_db):
     class FakeClient(FutmondoClient):
         def get_roster(self):
             return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
 
         def list_for_sale(self, player_id, price):
             return {"code": "api.general.ok"}
@@ -74,6 +80,9 @@ def test_run_sales_never_lists_player_that_would_leave_position_uncovered(tmp_db
         def get_roster(self):
             return {"answer": roster}
 
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
     captured = []
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
         run_sales.run()
@@ -91,6 +100,9 @@ def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_
     class FakeClient(FutmondoClient):
         def get_roster(self):
             return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
 
         def list_for_sale(self, player_id, price):
             raise FutmondoOfferError("algo salió mal")

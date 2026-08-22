@@ -52,6 +52,20 @@ sin jugar (no puntúa, el mercado lo penaliza más), así que aquí sí hay
 motivo real para cortar la pérdida más pronto que en el caso genérico.
 "doubt" usa el umbral genérico, no el de lesión — todavía puede llegar a
 jugar, no hay la misma base para asumir que solo va a perder valor.
+
+Concentración de capital en lesión CONFIRMADA (a petición del usuario,
+2026-08-22): las dos vías de arriba solo miran RENTABILIDAD (plusvalía o
+pérdida de LA OPERACIÓN). Pero un jugador lesionado es un problema
+también si simplemente representa una parte demasiado grande del capital
+del equipo (plantilla + presupuesto), aunque no esté ni cerca de
+`injury_max_loss_pct` — mientras esté lesionado no se puede usar, así que
+tener mucho capital inmovilizado ahí es un coste de oportunidad real
+(ese dinero no puede fichar a nadie más). Por eso, un jugador con lesión
+CONFIRMADA cuyo valor supera `injury_concentration_max_pct`
+(config.SELLING_INJURY_CONCENTRATION_MAX_PCT) del capital total
+(suma del valor de TODA la plantilla + `budget`) también se pone en
+venta, sin mirar plusvalía/pérdida en absoluto. Como con las dos vías
+anteriores, "doubt" queda fuera — todavía puede llegar a jugar.
 """
 from __future__ import annotations
 
@@ -67,6 +81,8 @@ def decide_sales(
     bought_by_bot: dict[str, int] = None,
     max_loss_pct: float = None,
     injury_max_loss_pct: float = None,
+    budget: int = 0,
+    injury_concentration_max_pct: float = None,
 ) -> list[dict]:
     """
     `squad`: items reales de FutmondoClient.get_roster()["answer"] (necesita
@@ -95,8 +111,23 @@ def decide_sales(
     bajando cuanto más tiempo pasa sin jugar, así que aquí sí hay motivo
     para cortar la pérdida más pronto. "doubt" usa `max_loss_pct`, no este.
 
+    `budget`: presupuesto disponible ahora mismo (normalmente
+    `FutmondoClient.get_information()["answer"]["budget"]`) — se suma al
+    valor de mercado de toda la plantilla para calcular el capital TOTAL
+    del equipo, usado por `injury_concentration_max_pct` (ver abajo). Por
+    defecto 0 (solo cuenta el valor de la plantilla) si el llamador no lo
+    tiene a mano.
+
+    `injury_concentration_max_pct`: por defecto
+    config.SELLING_INJURY_CONCENTRATION_MAX_PCT — % máximo del capital
+    total (plantilla + `budget`) que puede estar inmovilizado en UN jugador
+    con lesión CONFIRMADA antes de ponerlo en venta, sin mirar
+    rentabilidad en absoluto (ver docstring del módulo: no es un problema
+    de plusvalía, es de concentración de capital en un jugador que no se
+    puede usar). No aplica a "doubt".
+
     Devuelve una decisión por cada jugador que cumpla CUALQUIERA de estas
-    dos condiciones (Y cuya posición siga teniendo margen de suplentes
+    tres condiciones (Y cuya posición siga teniendo margen de suplentes
     sanos después de la venta, salvo que ya esté lesionado/en duda —
     ver más abajo):
       1. Su revalorización (`value` vs. el precio pagado en
@@ -105,6 +136,10 @@ def decide_sales(
       2. Ha perdido más del umbral de corte que le corresponda
          (`injury_max_loss_pct` si tiene lesión CONFIRMADA, `max_loss_pct`
          para cualquier otro caso, incluido "doubt") — corte de pérdidas.
+      3. Tiene lesión CONFIRMADA y su valor supera
+         `injury_concentration_max_pct` del capital total — concentración
+         de capital, solo para lesión confirmada (no "doubt"), sin mirar
+         plusvalía/pérdida.
 
     Cada decisión:
         {"player_id", "asking_price", "purchase_price", "profit",
@@ -128,7 +163,18 @@ def decide_sales(
     injury_max_loss_pct = (
         config.SELLING_INJURY_MAX_LOSS_PCT if injury_max_loss_pct is None else injury_max_loss_pct
     )
+    injury_concentration_max_pct = (
+        config.SELLING_INJURY_CONCENTRATION_MAX_PCT
+        if injury_concentration_max_pct is None
+        else injury_concentration_max_pct
+    )
     bought_by_bot = bought_by_bot or {}
+
+    # Capital total del equipo (plantilla + presupuesto disponible) --
+    # denominador de injury_concentration_max_pct, ver docstring. Se
+    # calcula sobre TODA la plantilla (no solo los candidatos), es el
+    # patrimonio real del equipo en este momento.
+    total_capital = sum(p.get("value", 0) or 0 for p in squad) + max(0, budget)
 
     candidates = []
     for player in squad:
@@ -149,10 +195,28 @@ def decide_sales(
         loss_threshold = injury_max_loss_pct if is_confirmed_injured else max_loss_pct
         cutting_losses = profit_pct <= -loss_threshold
 
-        if profit_pct < min_profit_pct and not cutting_losses:
+        # Concentración de capital: solo lesión CONFIRMADA, sin mirar
+        # rentabilidad -- demasiado capital inmovilizado en un jugador que
+        # no se puede usar es un problema en sí mismo (ver docstring).
+        concentration_pct = (current_price / total_capital) if total_capital > 0 else 0.0
+        overconcentrated = is_confirmed_injured and concentration_pct >= injury_concentration_max_pct
+
+        if profit_pct < min_profit_pct and not cutting_losses and not overconcentrated:
             continue
 
-        candidates.append((player, purchase_price, profit, profit_pct, cutting_losses, is_confirmed_injured, loss_threshold))
+        candidates.append(
+            (
+                player,
+                purchase_price,
+                profit,
+                profit_pct,
+                cutting_losses,
+                is_confirmed_injured,
+                loss_threshold,
+                overconcentrated,
+                concentration_pct,
+            )
+        )
 
     # Más rentables primero: si el margen de plantilla en una posición no
     # alcanza para vender a todos los candidatos de esa posición, se
@@ -171,7 +235,17 @@ def decide_sales(
     bench_remaining = {position: info["bench"] for position, info in depth.items()}
 
     decisions = []
-    for player, purchase_price, profit, profit_pct, cutting_losses, is_confirmed_injured, loss_threshold in candidates:
+    for (
+        player,
+        purchase_price,
+        profit,
+        profit_pct,
+        cutting_losses,
+        is_confirmed_injured,
+        loss_threshold,
+        overconcentrated,
+        concentration_pct,
+    ) in candidates:
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
         is_injured_or_doubtful = is_injury_status(player.get("status"))
 
@@ -183,7 +257,17 @@ def decide_sales(
                 continue  # vender aquí dejaría la posición sin cubrir -- no se vende, por rentable que sea
             bench_remaining[position] -= 1
 
-        if cutting_losses:
+        # Prioridad del motivo mostrado (no son excluyentes entre sí, un
+        # candidato puede cumplir varios a la vez): rentabilidad normal
+        # primero (el caso más informativo/común), luego corte de
+        # pérdidas, luego concentración de capital (la única vía que ni
+        # siquiera mira profit_pct).
+        if profit_pct >= min_profit_pct:
+            reason = (
+                f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
+                f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
+            )
+        elif cutting_losses:
             if is_confirmed_injured:
                 motivo = "lesión confirmada, con umbral de corte más bajo (tiende a seguir perdiendo valor)"
             else:
@@ -195,8 +279,10 @@ def decide_sales(
             )
         else:
             reason = (
-                f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
-                f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
+                f"lesión confirmada, concentración de capital: vale {player.get('value', 0)} "
+                f"({concentration_pct:.1%} del capital total del equipo) >= umbral "
+                f"{injury_concentration_max_pct:.1%}; se vende sin mirar plusvalía/pérdida ({profit_pct:+.1%}), "
+                "para no tener capital inmovilizado en un jugador que no se puede usar"
             )
 
         decisions.append(

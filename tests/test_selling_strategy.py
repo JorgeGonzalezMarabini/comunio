@@ -252,3 +252,101 @@ def test_decide_sales_generic_loss_cut_still_blocked_by_bench_margin_for_healthy
         min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
     )
     assert decisions == []
+
+
+# --- Concentración de capital en lesión confirmada (a petición del usuario, 2026-08-22) ---
+#
+# En todos estos tests: min_profit_pct=0.10, max_loss_pct=0.20,
+# injury_max_loss_pct=0.10, injury_concentration_max_pct=0.15 -- el
+# jugador de interés vale bastante más que el resto de la plantilla (que
+# se queda en los 500.000 por defecto de _full_442_squad()) para que
+# represente una parte grande del capital total, con una plusvalía/pérdida
+# pequeña a propósito para aislar la señal de concentración de las otras
+# dos vías (rentabilidad y corte de pérdidas).
+
+_CONCENTRATION_KWARGS = dict(
+    min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10, injury_concentration_max_pct=0.15,
+)
+
+
+def test_decide_sales_sells_confirmed_injured_player_overconcentrating_capital():
+    """
+    Un lesionado confirmado que vale una parte grande del capital total del
+    equipo se vende aunque su plusvalía/pérdida no active ninguna otra vía
+    -- el problema es tener capital inmovilizado en un jugador inutilizable,
+    no la rentabilidad de la operación.
+    """
+    squad = _full_442_squad()
+    squad[9]["status"] = "injured2"  # Delantero0, lesión confirmada
+    squad[9]["value"] = 2_000_000  # el resto de la plantilla sigue en 500.000 c/u
+    bought_by_bot = {str(squad[9]["id"]): 1_900_000}  # +5.3%: ni rentable ni en corte de pérdidas
+
+    decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert "concentración de capital" in decisions[0]["reason"]
+
+
+def test_decide_sales_ignores_confirmed_injured_player_below_concentration_threshold():
+    """Un lesionado confirmado que NO concentra suficiente capital (y sin plusvalía/pérdida relevante) no se vende."""
+    squad = _full_442_squad()
+    squad[9]["status"] = "injured2"
+    # Sube un poco de valor, pero no lo bastante para superar el 15% del capital total.
+    squad[9]["value"] = 600_000
+    bought_by_bot = {str(squad[9]["id"]): 580_000}  # +3.4%
+
+    decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
+    assert decisions == []
+
+
+def test_decide_sales_concentration_rule_does_not_apply_to_doubt_status():
+    """
+    "doubt" queda fuera de la concentración de capital, igual que del corte
+    de pérdidas agresivo -- todavía puede llegar a jugar.
+    """
+    squad = _full_442_squad()
+    squad[9]["status"] = "doubt"
+    squad[9]["value"] = 2_000_000  # misma concentración que el test de lesión confirmada
+    bought_by_bot = {str(squad[9]["id"]): 1_900_000}
+
+    decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
+    assert decisions == []
+
+
+def test_decide_sales_concentration_rule_does_not_apply_to_healthy_player():
+    """Un jugador SANO que concentra mucho capital no se vende por eso -- la regla es solo para lesión confirmada."""
+    squad = _full_442_squad()
+    squad[9]["value"] = 2_000_000  # sano, misma concentración que los tests anteriores
+    bought_by_bot = {str(squad[9]["id"]): 1_900_000}
+
+    decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
+    assert decisions == []
+
+
+def test_decide_sales_concentration_counts_budget_as_part_of_total_capital():
+    """
+    Un presupuesto grande diluye la concentración -- el mismo lesionado que
+    se vendía sin presupuesto (test de arriba) deja de superar el umbral si
+    se añade bastante `budget` al capital total.
+    """
+    squad = _full_442_squad()
+    squad[9]["status"] = "injured2"
+    squad[9]["value"] = 2_000_000
+    bought_by_bot = {str(squad[9]["id"]): 1_900_000}
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, budget=20_000_000, **_CONCENTRATION_KWARGS
+    )
+    assert decisions == []
+
+
+def test_decide_sales_concentration_rule_ignores_bench_margin_like_any_confirmed_injury():
+    """La venta forzada por concentración de capital tampoco respeta margen de banquillo -- puede ser el único de su posición."""
+    squad = _full_442_squad()
+    squad[0]["status"] = "injured2"  # Portero, único de su posición
+    squad[0]["value"] = 2_000_000
+    bought_by_bot = {str(squad[0]["id"]): 1_900_000}
+
+    decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[0]["id"]
