@@ -519,6 +519,25 @@ referencia es el importe realmente pagado en esa puja — misma semántica
 que `purchaseInfo != null` en Comunio, sin necesitar confirmar el
 significado exacto de un campo de la API de Futmondo.
 
+**Backfill de la plantilla inicial** (a petición del usuario, 2026-08-22,
+caso real: Mendy lesionado, nunca evaluado para venta): la consecuencia de
+lo anterior es que un jugador de la plantilla INICIAL (nunca comprado por
+el bot vía puja) no tenía NINGUNA fila `'won'` en `bids`, así que
+`decide_sales()` lo descartaba como candidato sin más, sin llegar siquiera
+a mirar su lesión/pérdida de valor. Como el VM de esos jugadores SÍ se
+descontó del presupuesto inicial al repartir el equipo, `jobs/sync_data.py`
+(`_backfill_initial_squad_bids()`) registra en cada sync una puja `'won'`
+sintética por su VM ACTUAL (no se guardó el VM exacto del momento del
+reparto, es la mejor aproximación disponible) para todo jugador de
+plantilla sin ninguna puja `'won'` — idempotente: en cuanto un jugador
+tiene alguna puja `'won'` (esta sintética, o una real más adelante), deja
+de tocarse. Efecto colateral esperado: como el precio de referencia
+backfilleado es igual al VM del día del backfill, ese jugador arranca en
+`profit_pct=0%` — no se pondrá a la venta el mismo día salvo que ya
+concentre mucho capital o esté lesionado (ver más abajo, "se vende
+SIEMPRE"); se irá evaluando en los sync siguientes según se mueva su VM
+real.
+
 ## Cláusula de rescisión y riesgo de plantilla (`engine/squad_risk.py`)
 
 Futmondo también tiene cláusula de rescisión (`POST /1/market/rosterclause`,
@@ -613,40 +632,63 @@ esa función responde a una pregunta distinta ("¿este titular está
 confirmado fuera?"), no a una prioridad entre varios candidatos
 disponibles.
 
-## Venta: corte de pérdidas genérico, más agresivo en lesión confirmada
+## Venta: corte de pérdidas (un único umbral para todos los estados)
 
-A petición del usuario (2026-08-22, dos iteraciones): hasta este cambio,
-un jugador solo era candidato a venta si su revalorización superaba
-`config.SELLING_MIN_PROFIT_PCT` (10% por defecto) — sano, en duda o
-lesionado, sin distinción, y sin ninguna otra vía posible. Esperar a que
-"recupere" plusvalía sin límite es la falacia del coste hundido en
-cualquier jugador, no solo en los lesionados: aferrarse a cuánto se pagó
-en el pasado en vez de valorar el jugador por lo que es AHORA.
+A petición del usuario (2026-08-22, tres iteraciones, ver historial de
+commits): hasta el primer cambio, un jugador solo era candidato a venta
+si su revalorización superaba `config.SELLING_MIN_PROFIT_PCT` (10% por
+defecto) — sano, en duda o lesionado, sin distinción, y sin ninguna otra
+vía posible. Esperar a que "recupere" plusvalía sin límite es la falacia
+del coste hundido en cualquier jugador, no solo en los lesionados:
+aferrarse a cuánto se pagó en el pasado en vez de valorar el jugador por
+lo que es AHORA.
 
-Ahora (`engine/selling_strategy.py:decide_sales()`) hay dos umbrales de
-PÉRDIDA, además del de rentabilidad:
-
-- `config.SELLING_MAX_LOSS_PCT` (20% por defecto) — genérico, aplica a
-  **cualquier** jugador (sano, en duda o lesionado): si ha perdido más de
-  esto, se pone en venta igualmente, aunque sea con pérdidas.
-- `config.SELLING_INJURY_MAX_LOSS_PCT` (10% por defecto, MÁS BAJO que el
-  genérico) — solo para lesión CONFIRMADA
-  (`clients.futmondo_client.is_confirmed_injured_status()`, no "doubt"):
-  su valor tiende a seguir bajando cuanto más tiempo pasa sin jugar, así
-  que aquí sí hay motivo para cortar la pérdida más pronto que en el caso
-  genérico. "doubt" usa el umbral genérico, no este — todavía puede
-  llegar a jugar, no hay la misma base para asumir que solo va a perder
-  valor.
+Por eso `engine/selling_strategy.py:decide_sales()` añade un umbral de
+PÉRDIDA, además del de rentabilidad: `config.SELLING_MAX_LOSS_PCT` (10%
+por defecto) — si un jugador ha perdido más de esto, se pone en venta
+igualmente, aunque sea con pérdidas. **El mismo umbral para CUALQUIER
+estado** (sano, en duda o lesión confirmada) — antes (segunda iteración)
+había dos umbrales distintos: uno genérico (20%) para sano/duda y otro
+más agresivo (10%) solo para lesión confirmada, razonado porque un
+lesionado tiende a seguir perdiendo valor cuanto más tiempo pasa sin
+jugar. Esa distinción se retiró en la tercera iteración: la lesión
+confirmada ya tiene su propia vía incondicional (ver más abajo, "se vende
+SIEMPRE"), así que ya no hace falta protegerla con un umbral aparte —
+el argumento de "cortar antes porque va a seguir cayendo" se generaliza
+sin más al resto de la plantilla, del mismo modo que empezar a subir de
+valor ya bastaba para vender sin mirar el estado del jugador.
 
 El corte de pérdidas de un lesionado (o en duda) tampoco compite por
 margen de banquillo (ninguno de los dos contó nunca como "disponible" en
 `assess_squad_depth`, ver arriba) — puede vender incluso si es el único
-jugador de su posición. El corte genérico de un jugador SANO sí sigue
-respetando ese margen, igual que una venta por rentabilidad normal.
+jugador de su posición. El corte de un jugador SANO sí sigue respetando
+ese margen, igual que una venta por rentabilidad normal.
+
+## Venta: lesión confirmada, se vende SIEMPRE
+
+A petición del usuario (2026-08-22, caso real: Mendy lesionado, recién
+backfilleado a `profit_pct=0%` — ver "Backfill de la plantilla inicial"
+más arriba —, sin pérdida ni concentración de capital suficiente para
+activar ninguna de las vías anteriores, se quedaba sin vender
+indefinidamente pese a ser inservible): un jugador con lesión CONFIRMADA
+(`clients.futmondo_client.is_confirmed_injured_status()`, no "doubt") es
+sencillamente INSERVIBLE mientras dure — no puede jugar ni puntuar — y
+ocupa una plaza de plantilla que podría liberarse para fichar a otro que
+sí sume.
+
+Por eso `engine/selling_strategy.py:decide_sales()` vende SIEMPRE a
+cualquier jugador con lesión confirmada, sin mirar
+rentabilidad/pérdida/concentración en absoluto — generalización sin
+condiciones de las vías de corte de pérdidas y concentración de arriba,
+que solo cubrían el caso cuando además cruzaba un umbral de pérdida o de
+tamaño. "doubt" queda fuera, igual que en las otras vías de lesión —
+todavía puede llegar a jugar, así que su valor actual sigue siendo
+información útil. Tampoco compite por margen de banquillo, igual que el
+resto de vías de lesión.
 
 ## Venta: concentración de capital en lesión confirmada
 
-A petición del usuario (2026-08-22): las dos vías de arriba solo miran
+A petición del usuario (2026-08-22): las vías de arriba solo miran
 RENTABILIDAD (plusvalía o pérdida de la operación). Pero un lesionado
 puede ser un problema aunque su pérdida sea pequeña, si simplemente
 representa una parte demasiado grande del capital del equipo — mientras
@@ -654,18 +696,21 @@ esté lesionado no se puede usar, así que tener mucho capital inmovilizado
 ahí es un coste de oportunidad real (ese dinero no puede fichar a nadie
 más).
 
-Por eso `engine/selling_strategy.py:decide_sales()` añade una TERCERA vía,
-que no mira plusvalía/pérdida en absoluto: un jugador con lesión
+Por eso `engine/selling_strategy.py:decide_sales()` tiene también esta
+vía, que no mira plusvalía/pérdida en absoluto: un jugador con lesión
 CONFIRMADA cuyo valor supera `config.SELLING_INJURY_CONCENTRATION_MAX_PCT`
 (15% por defecto) del capital TOTAL del equipo (suma del valor de toda la
 plantilla + `budget` disponible, este último ahora obtenido por
 `jobs/run_sales.py` vía `client.get_information()` y pasado a
-`decide_sales()`) se pone en venta igualmente. Como con las otras dos
-vías, "doubt" queda fuera — todavía puede llegar a jugar, y un jugador
-SANO tampoco entra aquí por mucho que concentre capital (si concentra y
-además es rentable o ha perdido mucho, ya lo cubren las otras dos vías).
-Esta venta forzada tampoco compite por margen de banquillo, igual que el
-corte de pérdidas por lesión.
+`decide_sales()`) se pone en venta igualmente. En la práctica, cualquier
+lesión confirmada que llegue aquí ya se vendería de todos modos por la
+vía incondicional de arriba — esta vía se mantiene porque da un motivo
+más específico en el `reason` auditado cuando también aplica (útil para
+saber SI ADEMÁS concentraba demasiado capital, no solo que estaba
+lesionado). Como con las demás vías de lesión, "doubt" queda fuera —
+todavía puede llegar a jugar, y un jugador SANO tampoco entra aquí por
+mucho que concentre capital. Esta venta forzada tampoco compite por
+margen de banquillo.
 
 ## Prima sobre el precio de venta por revalorización rápida sostenida
 

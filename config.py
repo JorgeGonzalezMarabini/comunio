@@ -307,35 +307,36 @@ BIDDING_MAX_REPRICE_DOWNS_PER_RUN = int(os.getenv("BIDDING_MAX_REPRICE_DOWNS_PER
 # con resultados reales.
 SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
 
-# Umbral de PÉRDIDA (positivo, ej. 0.20 = -20%) a partir del cual
+# Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
 # llegue a SELLING_MIN_PROFIT_PCT, incluso con pérdidas -- corte de
 # pérdidas genérico para no caer en la falacia del coste hundido con
 # cualquier jugador que se ha convertido en un lastre, esperando "a que
 # recupere" sin más motivo que lo que costó en su día (a petición del
-# usuario, 2026-08-22, versión más radical que la anterior -- antes esto
-# solo aplicaba a lesión confirmada; ver docstring de
-# engine/selling_strategy.py). 20% es un punto de partida razonado, sin
-# calibrar todavía con resultados reales.
-SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.20"))
-
-# Igual que SELLING_MAX_LOSS_PCT pero MÁS BAJO (corta antes) y SOLO para
-# lesión CONFIRMADA (no "doubt" -- ver clients.futmondo_client.
-# is_confirmed_injured_status()): el valor de un jugador lesionado tiende
-# a seguir bajando cuanto más tiempo pasa sin jugar, así que aquí sí hay
-# motivo para cortar la pérdida más pronto que en el caso genérico de
-# arriba. "doubt" sigue usando SELLING_MAX_LOSS_PCT, no este umbral --
-# todavía puede llegar a jugar, no hay la misma base para asumir que solo
-# va a perder valor. 10% (la mitad del umbral genérico) es un punto de
-# partida razonado, sin calibrar todavía con resultados reales.
-SELLING_INJURY_MAX_LOSS_PCT = float(os.getenv("SELLING_INJURY_MAX_LOSS_PCT", "0.10"))
+# usuario, 2026-08-22).
+#
+# UNIFICADO en un solo umbral para todos los estados (a petición del
+# usuario, 2026-08-22, tras añadir la venta SIEMPRE de lesión confirmada en
+# engine/selling_strategy.py): antes había dos umbrales, uno genérico
+# (0.20) para sano/duda y otro más agresivo (0.10, ex-SELLING_INJURY_MAX_
+# LOSS_PCT) solo para lesión confirmada, razonado porque un lesionado
+# tiende a seguir perdiendo valor cuanto más tiempo pasa sin jugar. Ya no
+# hace falta esa distinción para lesión confirmada -- se vende siempre
+# pase lo que pase con su pérdida, con su propia vía incondicional -- así
+# que el argumento de "corta antes porque va a seguir bajando" se
+# generaliza sin más al resto de la plantilla: si empieza a caer, se corta
+# pronto, igual que si empieza a subir conviene vender (SELLING_MIN_
+# PROFIT_PCT). 10% (el valor antes exclusivo de lesión confirmada) es
+# ahora el único umbral, para todos los estados. Sin calibrar todavía con
+# resultados reales.
+SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.10"))
 
 # % máximo (positivo, ej. 0.15 = 15%) del capital TOTAL del equipo (suma
 # del valor de mercado de toda la plantilla + presupuesto disponible) que
 # puede estar inmovilizado en UN solo jugador con lesión CONFIRMADA (no
 # "doubt" -- ver clients.futmondo_client.is_confirmed_injured_status())
 # antes de ponerlo en venta, aunque ni siquiera haya llegado a
-# SELLING_INJURY_MAX_LOSS_PCT de pérdida (a petición del usuario,
+# SELLING_MAX_LOSS_PCT de pérdida (a petición del usuario,
 # 2026-08-22, ver docstring de engine/selling_strategy.py). La intención
 # no es la rentabilidad de la operación sino evitar tener gran parte del
 # capital inmovilizado en un jugador que no se puede usar mientras esté

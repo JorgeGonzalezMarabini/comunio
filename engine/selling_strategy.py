@@ -30,35 +30,38 @@ por muy rentable que sea la operación — a diferencia de la prioridad de
 puja (un empujón blando), esto es un bloqueo duro: no hay ninguna
 plusvalía que compense quedarte con una posición vacía.
 
-Corte de pérdidas, genérico + más agresivo en lesión CONFIRMADA (a
-petición del usuario, 2026-08-22, versión más radical que la primera
-iteración de este mismo cambio -- esa primera versión limitaba el corte
-solo a lesión confirmada, ver historial de commits): hasta ahora un
-jugador solo era candidato a venta si superaba `min_profit_pct` — sin
-ninguna otra vía, esperando indefinidamente a que "recupere" plusvalía
-por muy mal que fuera la operación. Eso es la falacia del coste hundido
-en estado puro: aferrarse a cuánto se pagó en el pasado en vez de decidir
-por lo que el jugador es AHORA.
+Corte de pérdidas, un único umbral para TODOS los estados (a petición del
+usuario, 2026-08-22 -- tercera vuelta de este mismo cambio, ver historial
+de commits: primero solo lesión confirmada, luego genérico con un umbral
+más bajo exclusivo para lesión confirmada, ahora unificado del todo):
+hasta ahora un jugador solo era candidato a venta si superaba
+`min_profit_pct` — sin ninguna otra vía, esperando indefinidamente a que
+"recupere" plusvalía por muy mal que fuera la operación. Eso es la
+falacia del coste hundido en estado puro: aferrarse a cuánto se pagó en
+el pasado en vez de decidir por lo que el jugador es AHORA.
 
 Por eso, además de la vía normal (`min_profit_pct`), CUALQUIER jugador
 (sano, en duda o lesionado) que haya perdido más de `max_loss_pct`
-(config.SELLING_MAX_LOSS_PCT, umbral genérico) se pone en venta
-igualmente, aunque sea con pérdidas — cortar una pérdida grande no debería
-depender de por qué bajó. Un jugador con lesión CONFIRMADA (no "doubt" —
-ver `clients.futmondo_client.is_confirmed_injured_status()`) usa en su
-lugar `injury_max_loss_pct` (config.SELLING_INJURY_MAX_LOSS_PCT), MÁS BAJO
-que el genérico: su valor tiende a seguir bajando cuanto más tiempo pasa
-sin jugar (no puntúa, el mercado lo penaliza más), así que aquí sí hay
-motivo real para cortar la pérdida más pronto que en el caso genérico.
-"doubt" usa el umbral genérico, no el de lesión — todavía puede llegar a
-jugar, no hay la misma base para asumir que solo va a perder valor.
+(config.SELLING_MAX_LOSS_PCT) se pone en venta igualmente, aunque sea con
+pérdidas — cortar una pérdida grande no debería depender de por qué bajó,
+del mismo modo que empezar a subir de valor ya bastaba para vender (vía
+normal) sin mirar el estado del jugador. Un único umbral para todos: antes
+había un umbral genérico (0.20) para sano/duda y otro más agresivo (0.10)
+solo para lesión confirmada -- razonado porque un lesionado tiende a
+seguir perdiendo valor cuanto más tiempo pasa sin jugar. Esa distinción ya
+no hace falta: la lesión confirmada tiene su propia vía incondicional más
+abajo (se vende siempre, pase lo que pase con su pérdida), así que el
+umbral de corte de pérdidas pasa a ser el mismo (el antes exclusivo de
+lesión, más agresivo) para cualquier jugador, sano o en duda incluidos —
+si un jugador empieza a caer de valor, no hay motivo para esperar más a
+cortarlo que para el que empieza a subir.
 
 Concentración de capital en lesión CONFIRMADA (a petición del usuario,
 2026-08-22): las dos vías de arriba solo miran RENTABILIDAD (plusvalía o
 pérdida de LA OPERACIÓN). Pero un jugador lesionado es un problema
 también si simplemente representa una parte demasiado grande del capital
 del equipo (plantilla + presupuesto), aunque no esté ni cerca de
-`injury_max_loss_pct` — mientras esté lesionado no se puede usar, así que
+`max_loss_pct` — mientras esté lesionado no se puede usar, así que
 tener mucho capital inmovilizado ahí es un coste de oportunidad real
 (ese dinero no puede fichar a nadie más). Por eso, un jugador con lesión
 CONFIRMADA cuyo valor supera `injury_concentration_max_pct`
@@ -121,7 +124,6 @@ def decide_sales(
     formation: str = None,
     bought_by_bot: dict[str, int] = None,
     max_loss_pct: float = None,
-    injury_max_loss_pct: float = None,
     budget: int = 0,
     injury_concentration_max_pct: float = None,
     own_squad_features: list[dict] = None,
@@ -143,17 +145,11 @@ def decide_sales(
     como fallback silencioso, para no reintroducir la ambigüedad original.
 
     `max_loss_pct`: por defecto config.SELLING_MAX_LOSS_PCT — umbral de
-    PÉRDIDA genérico (positivo, ej. 0.20 = -20%) a partir del cual
-    CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque
-    no llegue a `min_profit_pct`, incluso con pérdidas (ver docstring del
-    módulo: corte de pérdidas para no caer en la falacia del coste
-    hundido).
-
-    `injury_max_loss_pct`: por defecto config.SELLING_INJURY_MAX_LOSS_PCT
-    — igual que `max_loss_pct` pero MÁS BAJO (corta antes) y solo para
-    jugadores con lesión CONFIRMADA (no "doubt"): su valor tiende a seguir
-    bajando cuanto más tiempo pasa sin jugar, así que aquí sí hay motivo
-    para cortar la pérdida más pronto. "doubt" usa `max_loss_pct`, no este.
+    PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual CUALQUIER jugador
+    (sano, en duda o lesionado, el mismo umbral para todos -- ver docstring
+    del módulo) se pone en venta aunque no llegue a `min_profit_pct`,
+    incluso con pérdidas (corte de pérdidas para no caer en la falacia del
+    coste hundido).
 
     `budget`: presupuesto disponible ahora mismo (normalmente
     `FutmondoClient.get_information()["answer"]["budget"]`) — se suma al
@@ -193,9 +189,8 @@ def decide_sales(
       1. Su revalorización (`value` vs. el precio pagado en
          `bought_by_bot`) supera `min_profit_pct` (por defecto
          config.SELLING_MIN_PROFIT_PCT) — vía normal, para todos.
-      2. Ha perdido más del umbral de corte que le corresponda
-         (`injury_max_loss_pct` si tiene lesión CONFIRMADA, `max_loss_pct`
-         para cualquier otro caso, incluido "doubt") — corte de pérdidas.
+      2. Ha perdido más de `max_loss_pct` — corte de pérdidas, mismo
+         umbral para cualquier estado (sano, en duda o lesionado).
       3. Tiene lesión CONFIRMADA y su valor supera
          `injury_concentration_max_pct` del capital total — concentración
          de capital, solo para lesión confirmada (no "doubt"), sin mirar
@@ -231,9 +226,6 @@ def decide_sales(
     """
     min_profit_pct = config.SELLING_MIN_PROFIT_PCT if min_profit_pct is None else min_profit_pct
     max_loss_pct = config.SELLING_MAX_LOSS_PCT if max_loss_pct is None else max_loss_pct
-    injury_max_loss_pct = (
-        config.SELLING_INJURY_MAX_LOSS_PCT if injury_max_loss_pct is None else injury_max_loss_pct
-    )
     injury_concentration_max_pct = (
         config.SELLING_INJURY_CONCENTRATION_MAX_PCT
         if injury_concentration_max_pct is None
@@ -285,14 +277,14 @@ def decide_sales(
         profit = current_price - purchase_price
         profit_pct = profit / purchase_price
 
-        # Corte de pérdidas: umbral distinto según el estado -- lesión
-        # CONFIRMADA usa injury_max_loss_pct (más bajo, corta antes,
-        # ver docstring del módulo); cualquier otro caso (sano o "doubt")
-        # usa el umbral genérico max_loss_pct. Se vende aunque no llegue a
+        # Corte de pérdidas: mismo umbral (max_loss_pct) para CUALQUIER
+        # estado -- sano, en duda o lesión confirmada (ver docstring del
+        # módulo: unificado, la lesión confirmada ya tiene su propia vía
+        # incondicional más abajo). Se vende aunque no llegue a
         # min_profit_pct, incluso con pérdidas.
         is_confirmed_injured = is_confirmed_injured_status(player.get("status"))
         is_injured_or_doubtful = is_injury_status(player.get("status"))
-        loss_threshold = injury_max_loss_pct if is_confirmed_injured else max_loss_pct
+        loss_threshold = max_loss_pct
         cutting_losses = profit_pct <= -loss_threshold
 
         # Concentración de capital: solo lesión CONFIRMADA, sin mirar
@@ -403,14 +395,12 @@ def decide_sales(
                 f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
             )
         elif cutting_losses:
-            if is_confirmed_injured:
-                motivo = "lesión confirmada, con umbral de corte más bajo (tiende a seguir perdiendo valor)"
-            else:
-                motivo = "corte de pérdidas genérico"
+            motivo = "corte de pérdidas (lesión confirmada)" if is_confirmed_injured else "corte de pérdidas"
             reason = (
                 f"{motivo}: pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
-                f"({profit_pct:+.1%}) -- pérdida >= umbral de corte {loss_threshold:.1%}; se vende aunque no "
-                "llegue al umbral de rentabilidad, para no caer en la falacia del coste hundido"
+                f"({profit_pct:+.1%}) -- pérdida >= umbral de corte {loss_threshold:.1%} (mismo umbral para "
+                "cualquier estado); se vende aunque no llegue al umbral de rentabilidad, para no caer en la "
+                "falacia del coste hundido"
             )
         elif overconcentrated:
             reason = (
