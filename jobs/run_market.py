@@ -52,6 +52,18 @@ candidatos a cualquier jugador con una puja local todavía `'placed'`
 (`db.models.get_open_bids()`) antes de evaluar, en vez de reintentar una
 "mejora" que no tiene ningún efecto real.
 
+Ofertas sobre jugadores de OTRO MANAGER (a petición del usuario,
+2026-08-22, ver TODO.md #15, `config.ENABLE_BIDS_ON_MANAGER_LISTINGS`):
+todavía sin confirmar en vivo si ganar una puja de compra requiere que el
+OTRO MANAGER acepte una oferta explícitamente (como parece ser el caso al
+vender, TODO.md #15) o si se resuelve sola. Mientras ese flag siga en
+`False` (por defecto), este job solo evalúa/puja por candidatos puestos
+en venta por el propio Futmondo (item de mercado con `"computer": True`,
+ver `clients/futmondo_client.py`) y, en cada pasada, cancela cualquier
+puja YA ABIERTA sobre un jugador de otro manager (`"computer": False`) —
+así no queda presupuesto ni plaza de plantilla comprometidos
+indefinidamente en una oferta cuya resolución no depende de nosotros.
+
 Lesión confirmada vs. duda (a petición del usuario, 2026-08-22): "doubt"
 (duda, el jugador todavía puede llegar a jugar) e "injuredN" (lesión ya
 confirmada, ver `clients.futmondo_client.is_confirmed_injured_status()`)
@@ -148,6 +160,52 @@ def run():
 
     client = FutmondoClient()
 
+    # Mercado en vivo -- se pide YA aquí, antes que nada más, porque hace
+    # falta para dos cosas: (a) cancelar pujas abiertas sobre jugadores de
+    # OTRO MANAGER si config.ENABLE_BIDS_ON_MANAGER_LISTINGS es False (ver
+    # docstring del módulo/TODO.md #15), y (b) filtrar por el mismo motivo
+    # los candidatos nuevos, antes de evaluarlos. (a) se ejecuta SIEMPRE,
+    # incluso si no hay ningún candidato nuevo que evaluar esta pasada
+    # (por eso va antes del primer `if not raw_candidates`, no después).
+    market_items = client.get_market().get("answer", [])
+    market_by_id = {str(p["id"]): p for p in market_items}
+
+    # Pujas de compra YA ABIERTAS sobre un jugador de OTRO MANAGER (a
+    # petición del usuario, 2026-08-22, ver TODO.md #15/docstring del
+    # módulo): mientras no se confirme que ganar esa puja funciona igual
+    # que comprarle a "el Computer" del juego, no queremos presupuesto ni
+    # una plaza de plantilla escasa comprometidos indefinidamente en una
+    # oferta que depende de que otro manager decida aceptarla. Se ejecuta
+    # en CADA pasada (no solo la primera vez) para que, si el flag pasa de
+    # true a false más adelante, la siguiente ejecución limpie sola
+    # cualquier puja que ya no cumpla la política.
+    cancelled_manager_bids, failed_manager_bid_cancels = [], []
+    if not config.ENABLE_BIDS_ON_MANAGER_LISTINGS:
+        for b in get_open_bids():
+            market_item = market_by_id.get(str(b["player_id"]))
+            if market_item is None or market_item.get("computer", False):
+                continue  # ya no está en mercado (se resolverá solo en el próximo sync), o SÍ es del Computer
+            bid_info = market_item.get("bid")
+            if not bid_info:
+                continue  # sin id de oferta CONFIRMADO en este snapshot -- nunca cancelar a ciegas
+            try:
+                client.cancel_bid(bid_info["id"])
+                update_bid_status(b["id"], "cancelled")
+                cancelled_manager_bids.append(b["player_id"])
+            except (requests.RequestException, FutmondoOfferError) as e:
+                failed_manager_bid_cancels.append((b["player_id"], str(e)))
+        if cancelled_manager_bids or failed_manager_bid_cancels:
+            lines = [
+                "run_market: revisión de pujas sobre jugadores de otro manager "
+                "(config.ENABLE_BIDS_ON_MANAGER_LISTINGS=false):"
+            ]
+            if cancelled_manager_bids:
+                lines.append(f"  - {len(cancelled_manager_bids)} cancelada(s): {', '.join(cancelled_manager_bids)}")
+            if failed_manager_bid_cancels:
+                lines.append(f"  - {len(failed_manager_bid_cancels)} fallida(s) al cancelar:")
+                lines.extend(f"    - jugador {pid}: {err}" for pid, err in failed_manager_bid_cancels)
+            notify("\n".join(lines))
+
     raw_candidates = get_player_features(only_on_market=True)
     if not raw_candidates:
         notify("run_market: no hay candidatos en mercado en la BD (¿corrió sync_data antes?).")
@@ -167,6 +225,25 @@ def run():
             "pendiente -- nada nuevo que evaluar esta ejecución."
         )
         return
+
+    # Descarta candidatos puestos en venta por OTRO MANAGER mientras
+    # config.ENABLE_BIDS_ON_MANAGER_LISTINGS siga en False (ver bloque de
+    # arriba/TODO.md #15) -- un candidato sin item de mercado confirmado
+    # en este snapshot (desajuste puntual con sync_data) se trata como "no
+    # es del Computer" por precaución, nunca se puja a ciegas.
+    skipped_manager_listed = []
+    if not config.ENABLE_BIDS_ON_MANAGER_LISTINGS:
+        skipped_manager_listed = [
+            p for p in raw_candidates if not market_by_id.get(p["id"], {}).get("computer", False)
+        ]
+        raw_candidates = [p for p in raw_candidates if market_by_id.get(p["id"], {}).get("computer", False)]
+        if not raw_candidates:
+            notify(
+                f"run_market: {len(skipped_manager_listed)} candidato(s) en mercado, todos puestos en venta "
+                "por otro manager (config.ENABLE_BIDS_ON_MANAGER_LISTINGS=false) -- nada nuevo que evaluar "
+                "esta ejecución."
+            )
+            return
 
     # Descarta directamente los candidatos con lesión CONFIRMADA (ver
     # docstring del módulo) -- a diferencia de "doubt", que sigue abajo en
@@ -273,13 +350,12 @@ def run():
     remaining_budget = information.get("answer", {}).get("budget", 0)
     already_risked = get_bids_risked_today()
 
-    # Presupuesto: se pide el mercado ya aquí (no solo más abajo para
-    # pujar) para poder cruzar la auditoría local con la fuente confirmada
-    # del propio Futmondo (TODO.md #3, resuelto) -- se toma el MAYOR de
-    # las dos, nunca solo la local, para que una BD perdida/desincronizada
-    # no pueda hacer que se subestime el compromiso real.
-    market_items = client.get_market().get("answer", [])
-    market_by_id = {str(p["id"]): p for p in market_items}
+    # Presupuesto: reusa `market_items`/`market_by_id` ya pedidos arriba
+    # (mismo fetch, ahora adelantado para la política de otro manager) --
+    # cruza la auditoría local con la fuente confirmada del propio
+    # Futmondo (TODO.md #3, resuelto), tomando el MAYOR de las dos, nunca
+    # solo la local, para que una BD perdida/desincronizada no pueda hacer
+    # que se subestime el compromiso real.
     pending_committed = max(get_pending_bid_amount(), real_pending_bid_amount(market_items))
 
     # Tope por jugador dinámico (ver engine.bidding_strategy.
@@ -476,6 +552,12 @@ def run():
         summary.append(
             f"🚑 {len(skipped_injured)} candidato(s) descartado(s) del mercado por lesión confirmada: "
             + ", ".join(str(p["id"]) for p in skipped_injured)
+        )
+    if skipped_manager_listed:
+        summary.append(
+            f"👤 {len(skipped_manager_listed)} candidato(s) descartado(s) por estar en venta por otro manager "
+            "(config.ENABLE_BIDS_ON_MANAGER_LISTINGS=false): "
+            + ", ".join(str(p["id"]) for p in skipped_manager_listed)
         )
     if pending_committed:
         summary.append(f"(comprometido en pujas pendientes sin resolver: {pending_committed})")

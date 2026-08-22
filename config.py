@@ -148,6 +148,23 @@ LINEUP_EVALUATOR_WEIGHTS = {
     "injury_penalty": 0.10,
 }
 
+# Pujar por un jugador puesto en venta por OTRO MANAGER (a petición del
+# usuario, 2026-08-22, ver TODO.md #15): no está confirmado si eso
+# funciona igual que pujar por uno puesto en venta por "el Computer" del
+# propio juego (market item `"computer": True`, ver
+# clients/futmondo_client.py) -- si el mecanismo normal de venta requiere
+# que el VENDEDOR acepte una oferta explícitamente (como parece ser el
+# caso, TODO.md #15, todavía sin confirmar en vivo), una puja sobre un
+# jugador de otro manager podría quedarse pendiente indefinidamente sin
+# resolverse nunca, comprometiendo presupuesto y una plaza de plantilla
+# escasa sin ningún control sobre cuándo (o si) se resuelve. Por eso,
+# DESACTIVADO por defecto: `jobs/run_market.py` solo considera candidatos
+# puestos en venta por el propio Futmondo (`computer=True`) mientras este
+# flag siga en False, y además cancela en cada pasada cualquier puja YA
+# ABIERTA sobre un jugador de otro manager -- hasta que TODO.md #15 se
+# confirme en vivo y se pueda activar con seguridad.
+ENABLE_BIDS_ON_MANAGER_LISTINGS = os.getenv("ENABLE_BIDS_ON_MANAGER_LISTINGS", "false").lower() == "true"
+
 # --- Límites de seguridad de pujas (engine/bidding_strategy.py) ---
 # Ninguno de estos límites se debe saltar nunca, pase lo que pase el modelo.
 BIDDING_SAFETY_LIMITS = {

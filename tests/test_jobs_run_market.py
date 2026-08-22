@@ -30,8 +30,19 @@ def _seed_player(pid, position, price, points=10, on_market=1, status="", last_p
 
 
 def test_run_market_no_candidates_notifies_and_returns(tmp_db):
+    """
+    `get_market()` se pide SIEMPRE ahora, incluso sin candidatos en la BD
+    (ver docstring del módulo/TODO.md #15: la revisión de pujas sobre otro
+    manager debe ejecutarse en cada pasada) -- de ahí el FakeClient en vez
+    del FutmondoClient real tal cual.
+    """
     captured = []
-    with patch("jobs.run_market.FutmondoClient", FutmondoClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+
+    class FakeClient(FutmondoClient):
+        def get_market(self):
+            return {"answer": []}
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
         run_market.run()
 
     assert "no hay candidatos" in captured[0]
@@ -48,7 +59,7 @@ def test_run_market_places_bid_and_persists(tmp_db):
             return {"answer": {"budget": 20_000_000}}
 
         def get_market(self):
-            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000}]}
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
             return {"code": "api.general.ok"}
@@ -76,7 +87,7 @@ def test_run_market_business_rejection_is_audited_as_failed_without_crashing(tmp
             return {"answer": {"budget": 20_000_000}}
 
         def get_market(self):
-            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000}]}
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
             raise FutmondoOfferError("api.market.max_number_players_in_roster")
@@ -108,7 +119,7 @@ def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
             return {"answer": {"budget": 20_000_000, "configuration": {"numberOfPlayers": 15}}}
 
         def get_market(self):
-            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000}]}
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
             raise AssertionError("no debería intentar pujar con la plantilla llena")
@@ -144,8 +155,8 @@ def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
         def get_market(self):
             return {
                 "answer": [
-                    {"id": "mejor", "slug": "jugador-mejor", "value": 350_000},
-                    {"id": "peor", "slug": "jugador-peor", "value": 350_000},
+                    {"id": "mejor", "slug": "jugador-mejor", "value": 350_000, "computer": True},
+                    {"id": "peor", "slug": "jugador-peor", "value": 350_000, "computer": True},
                 ]
             }
 
@@ -162,8 +173,17 @@ def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
     assert rows == {"mejor"}
 
 
-def test_run_market_player_no_longer_in_market_is_audited_as_failed(tmp_db):
-    """El mercado cambió entre evaluar y pujar -- el candidato ya no aparece en get_market()."""
+def test_run_market_player_no_longer_in_market_is_audited_as_failed(tmp_db, monkeypatch):
+    """
+    El mercado cambió entre evaluar y pujar -- el candidato ya no aparece
+    en get_market(). Necesita ENABLE_BIDS_ON_MANAGER_LISTINGS=true: con el
+    default (false), un candidato ausente del mercado en vivo ya se
+    descarta ANTES de evaluar (ver docstring del módulo/TODO.md #15, no
+    hay forma de confirmar que sea del "Computer") -- este test simula en
+    concreto el caso de que SÍ se pudo confirmar en su momento pero el
+    mercado cambió justo antes de pujar.
+    """
+    monkeypatch.setattr(config, "ENABLE_BIDS_ON_MANAGER_LISTINGS", True)
     _seed_player("4069", "DEF", price=350_000)
 
     class FakeClient(FutmondoClient):
@@ -209,7 +229,7 @@ def test_run_market_respects_pending_committed_from_local_db(tmp_db):
         def get_market(self):
             # Sin campo "bid" -- el mercado en vivo no aporta compromiso
             # extra aquí, la protección viene solo de la BD local.
-            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 1_000_000}]}
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 1_000_000, "computer": True}]}
 
     captured = []
     with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
@@ -241,7 +261,7 @@ def test_run_market_respects_pending_committed_from_live_market_bid_field(tmp_db
         def get_market(self):
             return {
                 "answer": [
-                    {"id": "4069", "slug": "jugador-4069", "value": 1_000_000},
+                    {"id": "4069", "slug": "jugador-4069", "value": 1_000_000, "computer": True},
                     # Puja pendiente real sobre OTRO jugador que la BD local desconoce.
                     {"id": "9999", "slug": "jugador-9999", "value": 1_000_000, "bid": {"id": "x", "price": 17_500_000}},
                 ]
@@ -278,7 +298,20 @@ def test_run_market_skips_candidate_with_already_open_local_bid(tmp_db):
             return {"answer": {"budget": 20_000_000}}
 
         def get_market(self):
-            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 1_000_000, "bid": {"id": "x", "price": 1_044_999}}]}
+            # "computer": True -- si no, la nueva revisión de pujas sobre
+            # otro manager (TODO.md #15) intentaría cancelarla sin más,
+            # que no es lo que este test quiere ejercitar.
+            return {
+                "answer": [
+                    {
+                        "id": "4069",
+                        "slug": "jugador-4069",
+                        "value": 1_000_000,
+                        "computer": True,
+                        "bid": {"id": "x", "price": 1_044_999},
+                    }
+                ]
+            }
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
             raise AssertionError("no debería intentar pujar de nuevo sobre un candidato ya con puja abierta")
@@ -291,6 +324,179 @@ def test_run_market_skips_candidate_with_already_open_local_bid(tmp_db):
     with get_connection() as conn:
         # Sigue habiendo solo la puja original -- no se insertó una segunda fila.
         assert conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"] == 1
+
+
+# --- Ofertas sobre jugadores de OTRO MANAGER (a petición del usuario, 2026-08-22,
+# TODO.md #15, config.ENABLE_BIDS_ON_MANAGER_LISTINGS) ---
+
+
+def test_run_market_skips_candidate_on_another_managers_listing_by_default(tmp_db):
+    """
+    Mientras no se confirme que ganar una puja de compra a otro manager se
+    resuelve sola (podría requerir que el otro manager acepte, igual que
+    al vender -- ver TODO.md #15), el bot por defecto solo evalúa
+    candidatos puestos en venta por el propio Futmondo ("computer": True).
+    """
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": False}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería pujar por un jugador puesto en venta por otro manager")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "otro manager" in captured[0]
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"] == 0
+
+
+def test_run_market_bids_on_manager_listed_candidate_when_flag_enabled(tmp_db, monkeypatch):
+    """Con config.ENABLE_BIDS_ON_MANAGER_LISTINGS=true, un candidato de otro manager vuelve a evaluarse con normalidad."""
+    monkeypatch.setattr(config, "ENABLE_BIDS_ON_MANAGER_LISTINGS", True)
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": False}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify"):
+        run_market.run()
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT status, player_id FROM bids").fetchone()
+    assert row["status"] == "placed"
+    assert row["player_id"] == "4069"
+
+
+def test_run_market_cancels_open_bid_on_manager_listed_player_by_default(tmp_db):
+    """
+    Regresión: una puja de compra YA ABIERTA sobre un jugador de otro
+    manager se cancela por defecto -- no dejar presupuesto/plaza
+    comprometidos indefinidamente en una oferta que no depende de
+    nosotros. Se ejecuta aunque no haya ningún candidato nuevo que evaluar
+    esta pasada (BD de candidatos vacía a propósito).
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("otro", 1_000_000, "placed", 0.5, NOW),
+        )
+        row_id = cur.lastrowid
+
+    cancel_calls = []
+
+    class FakeClient(FutmondoClient):
+        def get_market(self):
+            return {
+                "answer": [
+                    {
+                        "id": "otro",
+                        "slug": "jugador-otro",
+                        "value": 1_000_000,
+                        "computer": False,
+                        "bid": {"id": "futmondo-bid-otro", "price": 1_000_000},
+                    }
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            cancel_calls.append(bid_id)
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert cancel_calls == ["futmondo-bid-otro"]
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM bids WHERE id = ?", (row_id,)).fetchone()["status"] == "cancelled"
+    assert any("otro manager" in m and "cancelada" in m for m in captured)
+
+
+def test_run_market_does_not_cancel_open_bid_on_computer_listed_player(tmp_db):
+    """Una puja abierta sobre un jugador SÍ puesto en venta por el Computer nunca se toca."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("del_computer", 1_000_000, "placed", 0.5, NOW),
+        )
+
+    class FakeClient(FutmondoClient):
+        def get_market(self):
+            return {
+                "answer": [
+                    {
+                        "id": "del_computer",
+                        "slug": "jugador-del_computer",
+                        "value": 1_000_000,
+                        "computer": True,
+                        "bid": {"id": "futmondo-bid-del_computer", "price": 1_000_000},
+                    }
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            raise AssertionError("no debería cancelar una puja sobre un jugador del Computer")
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify"):
+        run_market.run()
+
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM bids WHERE player_id = 'del_computer'").fetchone()["status"] == "placed"
+
+
+def test_run_market_reports_failed_cancellation_of_manager_listed_bid(tmp_db):
+    """Si cancel_bid() falla al limpiar una puja sobre otro manager, se notifica y la puja local sigue 'placed' (no se marca 'cancelled' a ciegas)."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("otro", 1_000_000, "placed", 0.5, NOW),
+        )
+
+    class FakeClient(FutmondoClient):
+        def get_market(self):
+            return {
+                "answer": [
+                    {
+                        "id": "otro",
+                        "slug": "jugador-otro",
+                        "value": 1_000_000,
+                        "computer": False,
+                        "bid": {"id": "futmondo-bid-otro", "price": 1_000_000},
+                    }
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            raise FutmondoOfferError("api.market.bid_already_resolved")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM bids WHERE player_id = 'otro'").fetchone()["status"] == "placed"
+    assert any("fallida(s) al cancelar" in m for m in captured)
 
 
 def test_run_market_discards_confirmed_injured_candidate_without_bidding(tmp_db):
@@ -310,7 +516,7 @@ def test_run_market_discards_confirmed_injured_candidate_without_bidding(tmp_db)
             return {"answer": {"budget": 20_000_000}}
 
         def get_market(self):
-            return {"answer": [{"id": "lesionado", "slug": "jugador-lesionado", "value": 350_000}]}
+            return {"answer": [{"id": "lesionado", "slug": "jugador-lesionado", "value": 350_000, "computer": True}]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
             raise AssertionError("no debería pujar por un candidato con lesión confirmada")
@@ -342,8 +548,8 @@ def test_run_market_still_bids_on_doubtful_candidate_with_reduced_score(tmp_db):
 
         def get_market(self):
             return {"answer": [
-                {"id": "en_duda", "slug": "jugador-en_duda", "value": 350_000},
-                {"id": "sano", "slug": "jugador-sano", "value": 350_000},
+                {"id": "en_duda", "slug": "jugador-en_duda", "value": 350_000, "computer": True},
+                {"id": "sano", "slug": "jugador-sano", "value": 350_000, "computer": True},
             ]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
@@ -392,8 +598,8 @@ def test_run_market_prioritizes_at_risk_position_over_higher_score(tmp_db):
 
         def get_market(self):
             return {"answer": [
-                {"id": "del1", "slug": "jugador-del1", "value": 1_000_000},
-                {"id": "med1", "slug": "jugador-med1", "value": 1_000_000},
+                {"id": "del1", "slug": "jugador-del1", "value": 1_000_000, "computer": True},
+                {"id": "med1", "slug": "jugador-med1", "value": 1_000_000, "computer": True},
             ]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
@@ -448,8 +654,8 @@ def test_run_market_prioritizes_candidate_that_would_upgrade_lineup(tmp_db):
 
         def get_market(self):
             return {"answer": [
-                {"id": "med_upgrade", "slug": "jugador-med_upgrade", "value": 1_000_000},
-                {"id": "def_normal", "slug": "jugador-def_normal", "value": 1_000_000},
+                {"id": "med_upgrade", "slug": "jugador-med_upgrade", "value": 1_000_000, "computer": True},
+                {"id": "def_normal", "slug": "jugador-def_normal", "value": 1_000_000, "computer": True},
             ]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
@@ -530,15 +736,19 @@ def test_run_market_scores_sacrificable_bids_freshly_not_frozen(tmp_db):
             return {"answer": {"budget": 0}}  # nada entra por la vía normal -- todo queda "blocked"
 
         def get_market(self):
+            # "computer": True en ambos -- si no, la nueva revisión de
+            # pujas sobre otro manager (TODO.md #15) cancelaría "old" sin
+            # más, y "bloqueado" ni siquiera llegaría a evaluarse.
             return {
                 "answer": [
                     {
                         "id": "old",
                         "slug": "jugador-old",
                         "value": 1_000_000,
+                        "computer": True,
                         "bid": {"id": "futmondo-bid-old", "price": 1_044_999},
                     },
-                    {"id": "bloqueado", "slug": "jugador-bloqueado", "value": 1_000_000},
+                    {"id": "bloqueado", "slug": "jugador-bloqueado", "value": 1_000_000, "computer": True},
                 ]
             }
 
@@ -608,7 +818,7 @@ def test_run_market_executes_cancel_swap_end_to_end(tmp_db):
             return {"answer": {"budget": 5_000_000}}
 
         def get_market(self):
-            return {"answer": [{"id": "new", "slug": "jugador-new", "value": 500_000}]}
+            return {"answer": [{"id": "new", "slug": "jugador-new", "value": 500_000, "computer": True}]}
 
         def cancel_bid(self, bid_id):
             cancel_calls.append(bid_id)
@@ -675,7 +885,7 @@ def test_run_market_cancel_swap_aborts_cleanly_when_cancel_bid_fails(tmp_db):
             return {"answer": {"budget": 5_000_000}}
 
         def get_market(self):
-            return {"answer": [{"id": "new", "slug": "jugador-new", "value": 500_000}]}
+            return {"answer": [{"id": "new", "slug": "jugador-new", "value": 500_000, "computer": True}]}
 
         def cancel_bid(self, bid_id):
             raise FutmondoOfferError("api.market.bid_already_resolved")
