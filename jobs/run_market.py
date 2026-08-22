@@ -81,8 +81,12 @@ de evaluar cualquier candidato se compara `len(roster)` contra
 `information.answer.configuration.maxPlayersInRoster` -- si la plantilla
 ya está al máximo que permite la liga, Futmondo rechaza CUALQUIER puja
 nueva con `FutmondoOfferError("api.market.max_number_players_in_roster")`
-sin importar posición ni presupuesto, así que el job corta aquí en vez de
-generar pujas condenadas a fallar.
+sin importar posición ni presupuesto, así que se descartan aquí todos los
+candidatos NUEVOS en vez de generar pujas condenadas a fallar. **Ya NO
+corta la ejecución entera** (cambiado a la vez que se añadió el reajuste a
+la baja, ver más abajo): cancelar+repujar más barato una puja YA abierta
+no pide una plaza nueva, así que esa fase sigue evaluándose igual aunque
+la plantilla esté al máximo.
 
 **Corregido el mismo día, dos veces** (a petición del usuario, tras ver en
 vivo "plantilla completa (15/15)" tratándose en realidad de una liga con
@@ -123,6 +127,31 @@ es atómico, un fallo a medias (cancela pero no llega a pujar la nueva)
 queda auditado en `bids` como `'cancelled'`+`'failed'`, nunca silencioso —
 ver `config.BIDDING_MAX_CANCEL_SWAPS_PER_RUN` (1 por defecto, deliberado
 mientras esta feature no tiene histórico real).
+
+Reajustar a la baja pujas abiertas cuyo VM ha caído (a petición del
+usuario, 2026-08-22, ver engine.bidding_strategy.
+find_reprice_down_candidates): `decide_bid()` ancla el importe al VM del
+jugador EN EL MOMENTO de pujar — una vez colocada, la puja quedaba
+"congelada" para siempre, sin importar cuánto cayera después el VM del
+jugador (Futmondo no tiene endpoint confirmado para editar el importe de
+una oferta abierta — modifybid/modifyrosterbid/modifyprice aparecen solo
+como hallazgo sin implementar, ver clients.futmondo_client — ni pujar otra
+vez la actualiza, ver docstring de arriba). Fase APARTE, después del loop
+normal y del swap de arriba: para cada puja local todavía abierta con
+datos frescos de hoy (mismo candidato evaluado con el VM/score actuales,
+"fresh_already_bid" más abajo) se recalcula lo que decide_bid() pujaría
+HOY por ese MISMO jugador; si el resultado es al menos
+`config.BIDDING_REPRICE_DOWN_MIN_DROP_PCT` más bajo que lo ya pujado, se
+cancela la puja vieja y se coloca una nueva por el importe recalculado.
+Nunca sube una puja, ni cancela sin más una que decide_bid() ya no
+recomendaría en absoluto (eso queda fuera de alcance: solo baja un
+importe, no decide si seguir pujando por ese jugador). Mismas precauciones
+que el swap: nunca toca una puja sin id real de Futmondo confirmado en el
+`get_market()` de esta pasada, ni una a punto de expirar
+(`config.BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY`), ni más de
+`config.BIDDING_MAX_REPRICE_DOWNS_PER_RUN` por ejecución — y un fallo a
+medias (cancela pero no llega a repujar) queda auditado como
+`'cancelled'`+`'failed'`, igual que el swap.
 """
 from datetime import datetime, timezone
 
@@ -149,6 +178,7 @@ from engine.bidding_strategy import (
     decide_bids_for_market,
     dynamic_player_cap,
     find_cancel_swap_candidates,
+    find_reprice_down_candidates,
     is_price_worth_bidding,
 )
 from engine.evaluator import evaluate_players
@@ -229,15 +259,17 @@ def run():
     # importe (ver docstring del módulo / clients.futmondo_client.
     # real_pending_bid_amount()), así que reintentarlo no tiene efecto real
     # y solo ensucia la auditoría con filas duplicadas.
+    # OJO: ninguno de los tres filtros de abajo corta la ejecución si deja
+    # `raw_candidates` vacío (a diferencia de versiones anteriores) -- un
+    # mercado sin NINGÚN candidato nuevo que evaluar puede seguir teniendo
+    # pujas YA ABIERTAS cuyo VM haya caído, y esa revisión (más abajo, ver
+    # docstring del módulo) no depende de que haya nada nuevo que pujar.
+    # Cada lista `skipped_*` se conserva para auditar en el resumen final
+    # (y, `skipped_already_bid`, también como fuente de datos frescos para
+    # el reajuste a la baja).
     already_bid_ids = {b["player_id"] for b in get_open_bids()}
     skipped_already_bid = [p for p in raw_candidates if p["id"] in already_bid_ids]
     raw_candidates = [p for p in raw_candidates if p["id"] not in already_bid_ids]
-    if not raw_candidates:
-        notify(
-            f"run_market: {len(skipped_already_bid)} candidato(s) en mercado, todos con puja local ya "
-            "pendiente -- nada nuevo que evaluar esta ejecución."
-        )
-        return
 
     # Descarta candidatos puestos en venta por OTRO MANAGER mientras
     # config.ENABLE_BIDS_ON_MANAGER_LISTINGS siga en False (ver bloque de
@@ -250,13 +282,6 @@ def run():
             p for p in raw_candidates if not market_by_id.get(p["id"], {}).get("computer", False)
         ]
         raw_candidates = [p for p in raw_candidates if market_by_id.get(p["id"], {}).get("computer", False)]
-        if not raw_candidates:
-            notify(
-                f"run_market: {len(skipped_manager_listed)} candidato(s) en mercado, todos puestos en venta "
-                "por otro manager (config.ENABLE_BIDS_ON_MANAGER_LISTINGS=false) -- nada nuevo que evaluar "
-                "esta ejecución."
-            )
-            return
 
     # Descarta directamente los candidatos con lesión CONFIRMADA (ver
     # docstring del módulo) -- a diferencia de "doubt", que sigue abajo en
@@ -264,12 +289,6 @@ def run():
     # (config.EVALUATOR_WEIGHTS["doubt_penalty"]).
     skipped_injured = [p for p in raw_candidates if is_confirmed_injured_status(p.get("status"))]
     raw_candidates = [p for p in raw_candidates if not is_confirmed_injured_status(p.get("status"))]
-    if not raw_candidates:
-        notify(
-            f"run_market: {len(skipped_injured)} candidato(s) en mercado, todos con lesión confirmada -- "
-            "nada nuevo que evaluar esta ejecución."
-        )
-        return
 
     # Riesgo de plantilla: posiciones sin ningún suplente sano (ver
     # engine/squad_risk.py). Necesita la plantilla propia, no solo el
@@ -296,12 +315,15 @@ def run():
     # la cuenta real.
     information = client.get_information()
     max_roster_size = information.get("answer", {}).get("configuration", {}).get("maxPlayersInRoster")
-    if max_roster_size is not None and len(roster_ids) >= max_roster_size:
-        notify(
-            f"run_market: plantilla completa ({len(roster_ids)}/{max_roster_size}) -- no se puja esta "
-            f"ejecución ({len(raw_candidates)} candidato(s) en mercado descartado(s))."
-        )
-        return
+    roster_full = max_roster_size is not None and len(roster_ids) >= max_roster_size
+    roster_full_discarded = len(raw_candidates) if roster_full else 0
+    if roster_full:
+        # Descarta los candidatos NUEVOS (Futmondo rechazaría cualquier
+        # puja nueva sin importar posición/presupuesto), pero NO corta la
+        # ejecución -- el reajuste a la baja de pujas YA abiertas de más
+        # abajo sigue adelante igual: cancelar+repujar más barato no pide
+        # una plaza nueva, reutiliza la que esa puja ya tenía reservada.
+        raw_candidates = []
 
     # Hueco parcial: si queda sitio pero no para todos los candidatos
     # buenos, hay que pujar solo por los `available_roster_slots` más
@@ -363,10 +385,10 @@ def run():
     # el score que ese candidato tenía congelado en `bids.score` desde el
     # momento en que se pujó (pudo quedar desactualizado si el riesgo de
     # plantilla cambió desde entonces). Ver find_cancel_swap_candidates.
-    fresh_score_by_player_id = {
-        p["id"]: p["score"]
-        for p in apply_position_priority(already_bid_ranked, at_risk_positions, upgrade_thresholds=upgrade_thresholds)
-    }
+    fresh_already_bid = apply_position_priority(
+        already_bid_ranked, at_risk_positions, upgrade_thresholds=upgrade_thresholds
+    )
+    fresh_score_by_player_id = {p["id"]: p["score"] for p in fresh_already_bid}
 
     remaining_budget = information.get("answer", {}).get("budget", 0)
     already_risked = get_bids_risked_today()
@@ -447,12 +469,94 @@ def run():
             blocked_candidates, sacrificable_bids, now=datetime.now(timezone.utc)
         )
 
-    if not decisions and not swap_proposals:
+    # Reajustar a la baja pujas ya abiertas cuyo VM ha caído (ver docstring
+    # del módulo/engine.bidding_strategy.find_reprice_down_candidates). Se
+    # calcula YA aquí (antes del corte de "sin pujas esta ejecución" de
+    # abajo) para que una pasada sin candidatos nuevos que evaluar, pero
+    # con VM caído en pujas ya abiertas, no se quede sin revisar.
+    #
+    # `pending_after_decisions`/`risked_after_decisions` sí incluyen lo que
+    # `decisions` va a pujar en esta misma pasada (aunque todavía no se
+    # haya colocado nada -- se ejecuta más abajo) para no subestimar el
+    # compromiso real, mismo motivo que `pending_after_run`/
+    # `risked_after_run` del swap.
+    pending_after_decisions = pending_committed + sum(d["amount"] for d in decisions)
+    risked_after_decisions = already_risked + sum(d["amount"] for d in decisions)
+
+    # Nunca ofrecer para reajuste una puja que el swap de arriba ya vaya a
+    # sacrificar en esta misma pasada -- ambas fases parten del mismo
+    # `get_open_bids()` de antes de ejecutar nada, así que sin este cruce
+    # una misma puja podría acabar propuesta para las dos cosas a la vez
+    # (la segunda cancelación fallaría sobre una oferta que ya no existe).
+    swap_sacrificed_bid_ids = {p["sacrifice"]["bid_id"] for p in swap_proposals}
+
+    fresh_already_bid_by_id = {p["id"]: p for p in fresh_already_bid}
+    reprice_inputs = []
+    for b in get_open_bids():
+        candidate = fresh_already_bid_by_id.get(b["player_id"])
+        if candidate is None:
+            # Sin datos frescos de hoy (jugador ya no "on_market" en el
+            # último sync_data, o descartado como lesión confirmada/venta
+            # de otro manager más arriba) -- no reajustar sin esa base.
+            continue
+        market_item = market_by_id.get(str(b["player_id"]))
+        bid_info = market_item.get("bid") if market_item else None
+        if not bid_info:
+            # Sin id de oferta CONFIRMADO en este snapshot -- mismo criterio
+            # de precaución que el swap de arriba, nunca cancelar a ciegas.
+            continue
+        if bid_info["id"] in swap_sacrificed_bid_ids:
+            continue
+        expires_at = None
+        raw_expiration = market_item.get("expirationDate")
+        if raw_expiration:
+            try:
+                expires_at = datetime.fromisoformat(raw_expiration.replace("Z", "+00:00"))
+            except ValueError:
+                expires_at = None
+        reprice_inputs.append(
+            {
+                **candidate,
+                "amount": b["amount"],
+                "local_row_id": b["id"],
+                "bid_id": bid_info["id"],
+                "expires_at": expires_at,
+            }
+        )
+
+    reprice_proposals = (
+        find_reprice_down_candidates(
+            reprice_inputs,
+            remaining_budget,
+            risked_after_decisions,
+            now=datetime.now(timezone.utc),
+            pending_committed=pending_after_decisions,
+            player_cap=player_cap,
+        )
+        if reprice_inputs
+        else []
+    )
+
+    if not decisions and not swap_proposals and not reprice_proposals:
+        # Contexto de por qué no hubo candidatos NUEVOS que evaluar (ver
+        # los filtros de arriba, ninguno corta ya la ejecución por sí
+        # solo) -- informativo, no cambia que aquí no hay nada que hacer.
+        skip_context = []
+        if skipped_already_bid:
+            skip_context.append(f"{len(skipped_already_bid)} con puja local ya pendiente")
+        if skipped_manager_listed:
+            skip_context.append(f"{len(skipped_manager_listed)} en venta por otro manager")
+        if skipped_injured:
+            skip_context.append(f"{len(skipped_injured)} con lesión confirmada")
+        if roster_full:
+            skip_context.append(f"plantilla completa ({len(roster_ids)}/{max_roster_size})")
+        skip_note = f" [{'; '.join(skip_context)}]" if skip_context else ""
         notify(
             f"run_market: sin pujas esta ejecución (saldo={format_number(remaining_budget)}, "
             f"comprometido en pujas pendientes={format_number(pending_committed)}, "
             f"ya arriesgado hoy={format_number(already_risked)}, "
             f"candidatos evaluados={len(ranked)}, tope dinámico por jugador={format_number(player_cap)})."
+            f"{skip_note}"
         )
         return
 
@@ -485,15 +589,13 @@ def run():
     # solo por presupuesto/tope. Fase aparte, DESPUÉS del loop normal de
     # arriba -- nunca toca ni recalcula lo ya decidido/pujado ahí.
     #
-    # `pending_after_run`/`risked_after_run` sí incluyen lo pujado en el
-    # loop normal de arriba (no solo el `pending_committed`/`already_risked`
-    # de antes de esta pasada) -- si no, se contaría dos veces el margen que
-    # esas pujas nuevas ya consumieron.
+    # `pending_after_decisions`/`risked_after_decisions` (calculados arriba
+    # para el reajuste a la baja) sí incluyen lo pujado en el loop normal de
+    # arriba (no solo el `pending_committed`/`already_risked` de antes de
+    # esta pasada) -- si no, se contaría dos veces el margen que esas pujas
+    # nuevas ya consumieron.
     swapped, swap_failed = [], []
     if swap_proposals:
-        pending_after_run = pending_committed + sum(d["amount"] for d in decisions)
-        risked_after_run = already_risked + sum(d["amount"] for d in decisions)
-
         with get_connection() as conn:
             for proposal in swap_proposals:
                 candidate, sacrifice = proposal["candidate"], proposal["sacrifice"]
@@ -506,12 +608,12 @@ def run():
                 # Cancelación confirmada -- a partir de aquí ya no hay
                 # vuelta atrás sobre la puja vieja, pase lo que pase abajo.
                 update_bid_status(sacrifice["local_row_id"], "cancelled")
-                pending_after_swap = max(0, pending_after_run - sacrifice["amount"])
+                pending_after_swap = max(0, pending_after_decisions - sacrifice["amount"])
 
                 new_decision = decide_bid(
                     candidate,
                     remaining_budget,
-                    risked_after_run,
+                    risked_after_decisions,
                     pending_committed=pending_after_swap,
                     player_cap=player_cap,
                 )
@@ -537,6 +639,47 @@ def run():
                         (
                             candidate,
                             sacrifice,
+                            f"puja cancelada pero el place_bid posterior falló: {e} -- "
+                            "queda auditado como cancelled+failed",
+                        )
+                    )
+
+    # --- Ejecutar los reajustes a la baja calculados arriba (ver docstring
+    # del módulo/engine.bidding_strategy.find_reprice_down_candidates):
+    # cancelar+repujar más barato una puja abierta cuyo VM ha caído. Fase
+    # APARTE, tras el swap de arriba -- `swap_sacrificed_bid_ids` ya
+    # descarta cualquier solape entre las dos fases.
+    reprice_downs, reprice_down_failed = [], []
+    if reprice_proposals:
+        with get_connection() as conn:
+            for proposal in reprice_proposals:
+                try:
+                    client.cancel_bid(proposal["bid_id"])
+                except (requests.RequestException, FutmondoOfferError) as e:
+                    reprice_down_failed.append((proposal, f"cancelación fallida: {e} -- nada más tocado"))
+                    continue
+
+                # Cancelación confirmada -- a partir de aquí ya no hay
+                # vuelta atrás sobre la puja vieja, pase lo que pase abajo.
+                update_bid_status(proposal["local_row_id"], "cancelled")
+
+                market_player = market_by_id.get(str(proposal["player_id"]))
+                new_decision = proposal["new_decision"]
+                if market_player is None:
+                    reprice_down_failed.append(
+                        (proposal, "puja cancelada pero el jugador ya no está en el mercado -- reajuste a medias")
+                    )
+                    continue
+
+                try:
+                    client.place_bid(proposal["player_id"], market_player["slug"], new_decision["amount"])
+                    _persist_bid(conn, new_decision, "placed", now)
+                    reprice_downs.append(proposal)
+                except (requests.RequestException, FutmondoOfferError) as e:
+                    _persist_bid(conn, new_decision, "failed", now)
+                    reprice_down_failed.append(
+                        (
+                            proposal,
                             f"puja cancelada pero el place_bid posterior falló: {e} -- "
                             "queda auditado como cancelled+failed",
                         )
@@ -573,6 +716,18 @@ def run():
         summary.append(f"⚠️ {len(swap_failed)} swap(s) fallido(s) o a medias:")
         for candidate, sacrifice, err in swap_failed:
             summary.append(f"  - candidato {candidate['id']} / sacrificio {sacrifice['player_id']}: {err}")
+    if reprice_downs:
+        summary.append(f"📉 {len(reprice_downs)} puja(s) reajustada(s) a la baja (VM caído):")
+        for p in reprice_downs:
+            d = p["new_decision"]
+            summary.append(
+                f"  - jugador {p['player_id']}: {format_number(p['old_amount'])} -> {format_number(d['amount'])} "
+                f"(score={d['score']:.3f})"
+            )
+    if reprice_down_failed:
+        summary.append(f"⚠️ {len(reprice_down_failed)} reajuste(s) a la baja fallido(s) o a medias:")
+        for proposal, err in reprice_down_failed:
+            summary.append(f"  - jugador {proposal['player_id']}: {err}")
     if risk_warnings:
         summary.append("⚠️ Riesgo de plantilla detectado (priorizado al pujar):")
         summary.extend(f"  - {w}" for w in risk_warnings)
@@ -586,6 +741,17 @@ def run():
             f"👤 {len(skipped_manager_listed)} candidato(s) descartado(s) por estar en venta por otro manager "
             "(config.ENABLE_BIDS_ON_MANAGER_LISTINGS=false): "
             + ", ".join(str(p["id"]) for p in skipped_manager_listed)
+        )
+    if skipped_already_bid:
+        summary.append(
+            f"🔁 {len(skipped_already_bid)} candidato(s) en mercado con puja local ya pendiente (sin repujar, "
+            "ver reajuste a la baja arriba si el VM cayó lo bastante): "
+            + ", ".join(str(p["id"]) for p in skipped_already_bid)
+        )
+    if roster_full:
+        summary.append(
+            f"🏟️ plantilla completa ({len(roster_ids)}/{max_roster_size}) -- "
+            f"{roster_full_discarded} candidato(s) nuevo(s) descartado(s), no se pujó por ninguno"
         )
     if pending_committed:
         summary.append(

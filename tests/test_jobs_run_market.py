@@ -946,3 +946,152 @@ def test_run_market_cancel_swap_aborts_cleanly_when_cancel_bid_fails(tmp_db):
     assert rows["old"] == "placed"  # sigue igual, nunca se marcó 'cancelled'
     assert "new" not in rows  # nunca se llegó a insertar una fila para el candidato
     assert any("cancelación fallida" in m for m in captured)
+
+
+# --- Reajustar a la baja pujas abiertas cuyo VM ha caído (a petición del
+# usuario, 2026-08-22) ---
+#
+# La lógica pura de cuándo reajustar ya se prueba a fondo en
+# test_bidding_strategy.py (find_reprice_down_candidates) -- aquí solo se
+# comprueba que run_market.py EJECUTA bien una propuesta ya decidida
+# (cancela, audita 'cancelled', puja el importe recalculado más barato) y
+# que esta fase NO depende de que haya candidatos nuevos ni swaps en la
+# misma pasada (mismo mecanismo cancel_bid()+place_bid() que el swap, así
+# que se mockea find_reprice_down_candidates en vez de forzar el score
+# real del evaluator a una caída de VM exacta).
+
+
+def test_run_market_executes_reprice_down_end_to_end(tmp_db):
+    """
+    Sin candidatos nuevos en el mercado (solo el jugador con la puja ya
+    abierta) -- justo el caso que el corte "sin pujas esta ejecución" de
+    antes se habría comido sin llegar a revisar el reajuste a la baja.
+    """
+    _seed_player("old", "DEF", price=700_000, points=10)
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("old", 1_500_000, "placed", 0.50, NOW),
+        )
+        old_row_id = cur.lastrowid
+
+    fake_proposal = [
+        {
+            "player_id": "old",
+            "local_row_id": old_row_id,
+            "bid_id": "futmondo-bid-old",
+            "old_amount": 1_500_000,
+            "new_decision": {"player_id": "old", "amount": 900_000, "score": 0.50, "reason": "test"},
+            "reason": "test",
+        }
+    ]
+
+    cancel_calls, place_calls = [], []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {
+                        "id": "old",
+                        "slug": "jugador-old",
+                        "value": 700_000,
+                        "computer": True,
+                        "bid": {"id": "futmondo-bid-old", "price": 1_500_000},
+                    }
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            cancel_calls.append(bid_id)
+            return {"code": "api.general.ok"}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            place_calls.append((player_id, amount))
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with (
+        patch("jobs.run_market.FutmondoClient", FakeClient),
+        patch("jobs.run_market.find_reprice_down_candidates", return_value=fake_proposal),
+        patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)),
+    ):
+        run_market.run()
+
+    assert cancel_calls == ["futmondo-bid-old"]
+    assert place_calls == [("old", 900_000)]
+
+    with get_connection() as conn:
+        rows = conn.execute("SELECT status, amount FROM bids WHERE player_id = 'old' ORDER BY id").fetchall()
+    assert [r["status"] for r in rows] == ["cancelled", "placed"]
+    assert rows[1]["amount"] == 900_000
+    assert any("reajustada" in m.lower() for m in captured)
+
+
+def test_run_market_reprice_down_aborts_cleanly_when_cancel_bid_fails(tmp_db):
+    """Si cancel_bid() falla, el reajuste se aborta -- la puja vieja sigue 'placed' tal cual."""
+    _seed_player("old", "DEF", price=700_000, points=10)
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("old", 1_500_000, "placed", 0.50, NOW),
+        )
+        old_row_id = cur.lastrowid
+
+    fake_proposal = [
+        {
+            "player_id": "old",
+            "local_row_id": old_row_id,
+            "bid_id": "futmondo-bid-old",
+            "old_amount": 1_500_000,
+            "new_decision": {"player_id": "old", "amount": 900_000, "score": 0.50, "reason": "test"},
+            "reason": "test",
+        }
+    ]
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {
+                        "id": "old",
+                        "slug": "jugador-old",
+                        "value": 700_000,
+                        "computer": True,
+                        "bid": {"id": "futmondo-bid-old", "price": 1_500_000},
+                    }
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            raise FutmondoOfferError("api.market.bid_already_resolved")
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería llegar a pujar si cancel_bid() falló")
+
+    captured = []
+    with (
+        patch("jobs.run_market.FutmondoClient", FakeClient),
+        patch("jobs.run_market.find_reprice_down_candidates", return_value=fake_proposal),
+        patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)),
+    ):
+        run_market.run()  # no debe lanzar
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT status FROM bids WHERE player_id = 'old'").fetchone()
+    assert row["status"] == "placed"  # sigue igual, nunca se marcó 'cancelled'
+    assert any("cancelación fallida" in m for m in captured)

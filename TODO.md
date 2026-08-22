@@ -816,6 +816,75 @@ actualizados para usar `maxPlayersInRoster`. Suite completa: 314 passed.
 
 ---
 
+## 17. ~~Las pujas creadas nunca se revisaban si el jugador perdía VM~~ (implementado, 2026-08-22)
+
+**Qué pasaba**: `decide_bid()` ancla el importe al VM/precio real del
+jugador, pero solo EN EL MOMENTO de decidir la puja. Una vez colocada, la
+puja quedaba "congelada" para siempre — si el VM del jugador caía después
+(mala racha, lesión, etc.), el bot seguía comprometiendo el importe
+original, más alto de lo que hoy pagaría por ese mismo jugador, hasta que
+la oferta se resolvía o se cancelaba por alguna de las otras dos razones ya
+existentes (venta de otro manager, o swap por mejor score) — ninguna
+relacionada con la caída de VM.
+
+**Investigado** (a petición del usuario): Futmondo no tiene endpoint
+confirmado para editar el importe de una oferta ya abierta —
+`modifybid`/`modifyrosterbid`/`modifyprice` aparecen solo como hallazgo sin
+implementar en el bundle `main.dart.js` de la app (ver
+`clients/futmondo_client.py`), y pujar otra vez sobre el mismo jugador no
+la actualiza tampoco (confirmado en vivo, ver `real_pending_bid_amount()`).
+La única forma real de bajar el importe es cancelar la puja vieja y
+colocar una nueva más barata — mismo mecanismo que el swap de TODO.md #13.
+
+**Implementado**: `engine/bidding_strategy.py` — nueva función pura
+`find_reprice_down_candidates()`: para cada puja abierta con datos frescos
+de hoy (mismo VM/score que usaría una puja nueva), recalcula con
+`decide_bid()` lo que se pujaría HOY por ese MISMO jugador; si el resultado
+cae al menos `config.BIDDING_REPRICE_DOWN_MIN_DROP_PCT` (10% por defecto)
+por debajo de lo ya pujado, propone cancelar+repujar más barato. Nunca
+sube una puja ni cancela sin más una que `decide_bid()` ya no
+recomendaría en absoluto (eso queda fuera de alcance del ajuste). Mismas
+precauciones que el swap: nunca toca una puja sin id real de Futmondo
+confirmado en el `get_market()` de esta pasada, ni una a punto de expirar
+(`config.BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY`, 6h por defecto), ni
+más de `config.BIDDING_MAX_REPRICE_DOWNS_PER_RUN` (3) por ejecución.
+
+**Integrado en `jobs/run_market.py`**: fase APARTE, después del loop normal
+y del swap — nunca compite por la misma puja que el swap ya vaya a
+sacrificar en la misma pasada (`swap_sacrificed_bid_ids`). A diferencia del
+swap, esta fase NO depende de que haya candidatos nuevos que evaluar ni de
+que queden plazas de plantilla libres: los tres cortes anteriores ("nada
+nuevo que evaluar", uno por cada filtro de candidatos) y el de "plantilla
+completa" ya NO terminan la ejecución sin más — cancelar+repujar más
+barato no pide una plaza nueva ni depende de que exista ningún candidato
+nuevo, así que ahora todos esos casos siguen adelante hasta esta fase antes
+de decidir si de verdad no hay nada que hacer.
+
+**Sin confirmar todavía**: mismo caso que el swap (TODO.md #13) — los
+valores de caída mínima/horas/máximo de reajustes por ejecución son de
+partida, sin histórico real todavía.
+
+**Verificado con test**: `test_find_reprice_down_candidates_*` (nuevos,
+`tests/test_bidding_strategy.py`, 9 casos) para la lógica pura, y
+`test_run_market_executes_reprice_down_end_to_end`/
+`test_run_market_reprice_down_aborts_cleanly_when_cancel_bid_fails`
+(nuevos, `tests/test_jobs_run_market.py`) para la integración —
+`test_run_market_executes_reprice_down_end_to_end` cubre además el caso
+que motivó quitar los cortes tempranos (sin candidatos nuevos en el
+mercado). Suite completa: 329 passed.
+
+**Afecta a**: `engine/bidding_strategy.py`
+(`find_reprice_down_candidates`), `jobs/run_market.py`, `config.py`,
+`tests/test_bidding_strategy.py`, `tests/test_jobs_run_market.py`.
+
+**Dónde**: `engine/bidding_strategy.py` (`find_reprice_down_candidates`),
+`jobs/run_market.py` (`run`), `config.py`
+(`BIDDING_REPRICE_DOWN_MIN_DROP_PCT`,
+`BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY`,
+`BIDDING_MAX_REPRICE_DOWNS_PER_RUN`).
+
+---
+
 ## Ya resuelto (para referencia, no es un pendiente)
 
 **`build_bench_changes()` repetía un `"from"` ya caducado en un intercambio

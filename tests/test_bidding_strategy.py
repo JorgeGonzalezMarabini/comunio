@@ -6,6 +6,7 @@ from engine.bidding_strategy import (
     decide_bids_for_market,
     dynamic_player_cap,
     find_cancel_swap_candidates,
+    find_reprice_down_candidates,
     is_price_worth_bidding,
     max_biddable_amount,
 )
@@ -405,3 +406,119 @@ def test_find_cancel_swap_candidates_uses_config_defaults(monkeypatch):
     open_bid = _open_bid("old", score=0.40, bid_id="bid-old")
 
     assert find_cancel_swap_candidates([candidate], [open_bid], now=NOW) == []
+
+
+# --- find_reprice_down_candidates (reajustar pujas a la baja si el VM cae) ---
+
+
+def _reprice_bid(player_id, price, score=0.5, amount=1_000_000, bid_id="bid-1", hours_to_expiry=48, **extra):
+    now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    return {
+        "id": player_id,
+        "price": price,
+        "score": score,
+        "amount": amount,
+        "local_row_id": 1,
+        "bid_id": bid_id,
+        "expires_at": None if hours_to_expiry is None else now + timedelta(hours=hours_to_expiry),
+        **extra,
+    }
+
+
+def test_find_reprice_down_candidates_proposes_reajuste_when_vm_dropped_enough():
+    # Se pujó 1.500.000; hoy, con price=1.000.000 y score=0.5, decide_bid()
+    # pujaría 1.100.000 (+10% de prima por defecto) -- cae >26%, por encima
+    # del umbral por defecto (10%).
+    bid = _reprice_bid("1", price=1_000_000, score=0.5, amount=1_500_000)
+
+    proposals = find_reprice_down_candidates(
+        [bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW, min_hours_before_expiry=6
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["player_id"] == "1"
+    assert proposals[0]["bid_id"] == "bid-1"
+    assert proposals[0]["local_row_id"] == 1
+    assert proposals[0]["old_amount"] == 1_500_000
+    assert proposals[0]["new_decision"]["amount"] == 1_100_000
+
+
+def test_find_reprice_down_candidates_respects_min_drop_pct():
+    """Una caída de VM insuficiente (por debajo del umbral) no debe tocar la puja."""
+    # decide_bid() hoy da 1.100.000; caída de solo ~4.3% sobre 1.150.000.
+    bid = _reprice_bid("1", price=1_000_000, score=0.5, amount=1_150_000)
+
+    proposals = find_reprice_down_candidates(
+        [bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW, min_drop_pct=0.10
+    )
+
+    assert proposals == []
+
+
+def test_find_reprice_down_candidates_never_proposes_upward_reajuste():
+    """Si el VM ha subido (o no ha bajado), nunca se reajusta al alza -- se deja la puja tal cual."""
+    bid = _reprice_bid("1", price=2_000_000, score=0.5, amount=1_500_000)  # decide_bid() hoy daría 2.200.000
+
+    proposals = find_reprice_down_candidates(
+        [bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW
+    )
+
+    assert proposals == []
+
+
+def test_find_reprice_down_candidates_skips_when_no_longer_worth_bidding():
+    """Si decide_bid() ya no recomienda pujar en absoluto hoy, se deja la puja tal cual (fuera de alcance)."""
+    bid = _reprice_bid("1", price=1_000_000, score=0.05, amount=1_500_000)  # score bajo umbral mínimo
+
+    proposals = find_reprice_down_candidates(
+        [bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW
+    )
+
+    assert proposals == []
+
+
+def test_find_reprice_down_candidates_excludes_bids_expiring_soon():
+    bid = _reprice_bid("1", price=1_000_000, score=0.5, amount=1_500_000, hours_to_expiry=2)
+
+    proposals = find_reprice_down_candidates(
+        [bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW, min_hours_before_expiry=6
+    )
+
+    assert proposals == []
+
+
+def test_find_reprice_down_candidates_excludes_bids_with_unknown_expiry():
+    """Nunca se reajusta una puja sin fecha de expiración confirmada (mismo criterio que el swap)."""
+    bid = _reprice_bid("1", price=1_000_000, score=0.5, amount=1_500_000, hours_to_expiry=None)
+
+    proposals = find_reprice_down_candidates(
+        [bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW
+    )
+
+    assert proposals == []
+
+
+def test_find_reprice_down_candidates_prioritizes_biggest_gap_first():
+    """Con `max_reprices` cortando antes de llegar a todas, prioriza la puja más alejada del VM actual."""
+    small_gap = _reprice_bid("small", price=1_000_000, score=0.5, amount=1_200_000, bid_id="bid-small")
+    big_gap = _reprice_bid("big", price=1_000_000, score=0.5, amount=3_000_000, bid_id="bid-big")
+
+    proposals = find_reprice_down_candidates(
+        [small_gap, big_gap], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW, max_reprices=1
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["player_id"] == "big"
+
+
+def test_find_reprice_down_candidates_uses_config_defaults(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "BIDDING_REPRICE_DOWN_MIN_DROP_PCT", 0.50)
+    monkeypatch.setattr(config, "BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY", 6)
+    monkeypatch.setattr(config, "BIDDING_MAX_REPRICE_DOWNS_PER_RUN", 1)
+
+    # Caída real ~26.7% (1.500.000 -> 1.100.000), por debajo del 50% configurado.
+    bid = _reprice_bid("1", price=1_000_000, score=0.5, amount=1_500_000)
+
+    assert find_reprice_down_candidates([bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW) == []

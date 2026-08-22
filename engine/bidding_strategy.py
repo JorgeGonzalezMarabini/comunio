@@ -489,3 +489,113 @@ def find_cancel_swap_candidates(
             used_bid_ids.add(sacrifice["bid_id"])
             break
     return proposals
+
+
+def find_reprice_down_candidates(
+    open_bids: list[dict],
+    remaining_budget: int,
+    already_risked_this_matchday: int,
+    now,
+    pending_committed: int = 0,
+    player_cap: int = None,
+    min_drop_pct: float = None,
+    min_hours_before_expiry: float = None,
+    max_reprices: int = None,
+) -> list[dict]:
+    """
+    Decide qué pujas abiertas conviene reajustar A LA BAJA porque el VM del
+    jugador ha caído desde que se pujó (a petición del usuario,
+    2026-08-22). `decide_bid()` ancla el importe al VM/precio real DEL
+    MOMENTO en que se decide -- una vez colocada, la puja queda "congelada"
+    para siempre (Futmondo no tiene endpoint confirmado para editar el
+    importe de una oferta ya abierta: modifybid/modifyrosterbid/modifyprice
+    aparecen solo como hallazgo sin implementar en el bundle de la app, ver
+    clients.futmondo_client; y pujar otra vez sobre el mismo jugador no lo
+    actualiza tampoco, ver real_pending_bid_amount()). La única forma real
+    de bajar el importe es cancelar la puja vieja y colocar una nueva más
+    barata -- mismo mecanismo que find_cancel_swap_candidates() (TODO.md
+    #13), pero aquí el gatillo es comparar lo ya pujado contra lo que
+    decide_bid() pujaría HOY por el MISMO jugador con su VM/score actuales,
+    no una comparación contra otro candidato distinto. Función pura: no
+    llama a Futmondo ni toca la BD -- jobs/run_market.py ejecuta las
+    propuestas.
+
+    `open_bids`: una entrada por puja local abierta, cada una el candidato
+    FRESCO ya evaluado con los datos de HOY (mismo "price"/"score" -- con
+    los boosts de apply_position_priority ya aplicados -- que usaría
+    decide_bid() si se pujara desde cero ahora mismo, ver jobs/
+    run_market.py) fusionado con "amount" (importe ya pujado),
+    "local_row_id" (fila local en `bids`), "bid_id" (id REAL de oferta de
+    Futmondo, confirmado en el `get_market()` de esta misma pasada -- nunca
+    se cancela sin él) y "expires_at" (datetime consciente de zona horaria,
+    o None si no se pudo confirmar -- se trata como NO reajustable por
+    precaución, igual que en find_cancel_swap_candidates).
+
+    `now`: hora actual INYECTADA (no datetime.now() aquí dentro) para que
+    esto siga siendo una función pura y testeable sin reloj real.
+
+    `remaining_budget`/`already_risked_this_matchday`/`pending_committed`/
+    `player_cap`: se pasan tal cual a cada decide_bid() -- mismos límites
+    de seguridad que rigen una puja nueva, ver max_biddable_amount().
+
+    Nunca propone reajustar AL ALZA (si el VM ha subido, o no ha caído lo
+    bastante, se deja la puja tal cual) ni cancelar sin más un candidato
+    que ya no merezca la pena con los datos de hoy (decide_bid() devuelve
+    None: score por debajo del umbral, o el cap de seguridad no llega ni al
+    precio base) -- esto SOLO baja un importe ya pujado, nunca decide si
+    seguir pujando por ese jugador en absoluto.
+
+    Prioriza (si `max_reprices` corta antes de llegar a todas) las pujas
+    más alejadas del VM actual en términos absolutos (`amount - price`),
+    no el orden de `open_bids` recibido.
+
+    Devuelve una lista de propuestas `{"player_id", "local_row_id",
+    "bid_id", "old_amount", "new_decision", "reason"}` en ese mismo orden
+    de prioridad -- jobs/run_market.py decide qué hacer si la cancelación o
+    la puja posterior fallan a medias.
+    """
+    min_drop_pct = config.BIDDING_REPRICE_DOWN_MIN_DROP_PCT if min_drop_pct is None else min_drop_pct
+    min_hours_before_expiry = (
+        config.BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY
+        if min_hours_before_expiry is None
+        else min_hours_before_expiry
+    )
+    max_reprices = config.BIDDING_MAX_REPRICE_DOWNS_PER_RUN if max_reprices is None else max_reprices
+
+    min_remaining = timedelta(hours=min_hours_before_expiry)
+    ordered = sorted(open_bids, key=lambda b: b["amount"] - (b.get("price") or 0), reverse=True)
+
+    proposals = []
+    risked = already_risked_this_matchday
+    for b in ordered:
+        if len(proposals) >= max_reprices:
+            break
+        if b.get("expires_at") is None or (b["expires_at"] - now) < min_remaining:
+            # Sin fecha de expiración confirmada, o a punto de resolverse --
+            # mismo criterio de precaución que find_cancel_swap_candidates.
+            continue
+        new_decision = decide_bid(
+            b, remaining_budget, risked, pending_committed=pending_committed, player_cap=player_cap
+        )
+        if new_decision is None:
+            continue  # ya no merece la pena pujar en absoluto -- fuera de alcance, no se toca
+        if new_decision["amount"] >= b["amount"]:
+            continue  # el VM no ha bajado (lo bastante) -- nunca reajustar al alza ni por ruido
+        drop_pct = (b["amount"] - new_decision["amount"]) / b["amount"]
+        if drop_pct < min_drop_pct:
+            continue
+        proposals.append(
+            {
+                "player_id": b["id"],
+                "local_row_id": b["local_row_id"],
+                "bid_id": b["bid_id"],
+                "old_amount": b["amount"],
+                "new_decision": new_decision,
+                "reason": (
+                    f"VM actual={b.get('price')}; puja vigente={b['amount']} -> recalculada hoy con "
+                    f"decide_bid()={new_decision['amount']} (-{drop_pct:.1%}, umbral={min_drop_pct:.1%})"
+                ),
+            }
+        )
+        risked += new_decision["amount"]
+    return proposals

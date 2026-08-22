@@ -271,6 +271,33 @@ BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY = float(os.getenv("BIDDING_CANCEL_SW
 # colchón antes de expirar (BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY).
 BIDDING_MAX_CANCEL_SWAPS_PER_RUN = int(os.getenv("BIDDING_MAX_CANCEL_SWAPS_PER_RUN", "3"))
 
+# Reajustar a la baja una puja abierta si el VM del jugador ha caído desde
+# que se pujó (a petición del usuario, 2026-08-22, ver engine.
+# bidding_strategy.find_reprice_down_candidates y jobs/run_market.py):
+# Futmondo no tiene endpoint confirmado para "editar" el importe de una
+# oferta ya abierta (modifybid/modifyrosterbid/modifyprice aparecen solo
+# como hallazgo sin implementar en el bundle de la app, ver
+# clients.futmondo_client) ni actualizarlo pujando otra vez sobre el mismo
+# jugador (real_pending_bid_amount()) -- la única forma real es cancelar la
+# puja vieja y colocar una nueva más barata, mismo mecanismo que el swap de
+# arriba (TODO.md #13). Sin histórico real todavía -- valores
+# deliberadamente conservadores, pensados para afinarse con datos reales.
+BIDDING_REPRICE_DOWN_MIN_DROP_PCT = float(os.getenv("BIDDING_REPRICE_DOWN_MIN_DROP_PCT", "0.10"))
+# % mínimo de caída entre lo pujado y lo que decide_bid() pujaría HOY con
+# el VM/score actuales del jugador antes de molestarse en reajustar --
+# evita cancelar+repujar por ruido/fluctuaciones mínimas del VM día a día.
+
+BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY = float(
+    os.getenv("BIDDING_REPRICE_DOWN_MIN_HOURS_BEFORE_EXPIRY", "6")
+)
+# Igual razonamiento que BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY -- si
+# la puja está a punto de resolverse, mejor dejarla terminar (podríamos
+# ganarla barata) que arriesgarse a cancelarla justo antes.
+
+BIDDING_MAX_REPRICE_DOWNS_PER_RUN = int(os.getenv("BIDDING_MAX_REPRICE_DOWNS_PER_RUN", "3"))
+# Máximo de reajustes a la baja por ejecución de run_market -- mismo
+# razonamiento conservador que BIDDING_MAX_CANCEL_SWAPS_PER_RUN.
+
 # --- Venta de jugadores (engine/selling_strategy.py) ---
 # % mínimo de plusvalía (precio actual vs. precio de referencia,
 # "buyPrice" de roster) para considerar vender un jugador. Vender es la
