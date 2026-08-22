@@ -292,6 +292,43 @@ SELLING_INJURY_MAX_LOSS_PCT = float(os.getenv("SELLING_INJURY_MAX_LOSS_PCT", "0.
 # resultados reales.
 SELLING_INJURY_CONCENTRATION_MAX_PCT = float(os.getenv("SELLING_INJURY_CONCENTRATION_MAX_PCT", "0.15"))
 
+# Prima sobre el precio de venta pedido por revalorización rápida sostenida
+# (a petición del usuario, 2026-08-22, ver engine.selling_strategy.
+# compute_revaluation_premium_pct/apply_revaluation_premium): usa el
+# histórico diario de VM de FutmondoClient.get_player_summary() para
+# detectar una subida sostenida reciente y proyectar una FRACCIÓN
+# conservadora de esa subida por encima del VM, en vez de pedir el VM tal
+# cual sin más (comportamiento anterior a este cambio).
+#
+# Apagado por defecto (a diferencia del resto de límites de venta, que ya
+# tenían histórico de decisiones): el formato real de "prices" (fecha,
+# orden, si "price" es de verdad el VM diario) NO está confirmado con una
+# captura real todavía (ver TODO.md) -- activar esto en producción antes
+# de esa confirmación podría aplicar primas basadas en datos mal
+# interpretados. `jobs/run_sales.py` solo llama a get_player_summary() y
+# aplica la prima si este flag está a true.
+ENABLE_SELLING_REVALUATION_PREMIUM = os.getenv("ENABLE_SELLING_REVALUATION_PREMIUM", "false").lower() == "true"
+
+# Ventana de días hacia atrás sobre la que se mide la subida sostenida.
+SELLING_REVALUATION_LOOKBACK_DAYS = float(os.getenv("SELLING_REVALUATION_LOOKBACK_DAYS", "7"))
+
+# Mínimo de puntos de precio dentro de la ventana para considerar que hay
+# base suficiente -- con 1-2 puntos sueltos (típico justo tras un reinicio
+# de BD/liga) no hay tendencia real que proyectar.
+SELLING_REVALUATION_MIN_DATA_POINTS = int(os.getenv("SELLING_REVALUATION_MIN_DATA_POINTS", "3"))
+
+# % mínimo de subida total en la ventana para considerar que la
+# revalorización es "rápida" y no ruido normal del mercado.
+SELLING_REVALUATION_MIN_PCT_TO_PROJECT = float(os.getenv("SELLING_REVALUATION_MIN_PCT_TO_PROJECT", "0.15"))
+
+# Fracción de la subida observada que se proyecta como prima -- nunca la
+# subida completa, para no inventar un precio arbitrariamente optimista
+# solo porque los últimos días fueron buenos.
+SELLING_REVALUATION_PROJECTION_FRACTION = float(os.getenv("SELLING_REVALUATION_PROJECTION_FRACTION", "0.5"))
+
+# Tope duro de la prima aplicable, pase lo que pase con el cálculo de arriba.
+SELLING_REVALUATION_MAX_PREMIUM_PCT = float(os.getenv("SELLING_REVALUATION_MAX_PREMIUM_PCT", "0.15"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real de Futmondo (confirmado por captura, campo "strategy" de
 # /1/userteam/lineup): CON guiones, ej. "4-4-2" — a diferencia de Comunio,

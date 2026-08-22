@@ -14,6 +14,16 @@ Igual que en Comunio, solo se consideran candidatos los jugadores
 no sirve para distinguir origen, ver TODO.md #4/engine/selling_strategy.py),
 se usa el registro LOCAL de pujas ganadas (`db.models.get_won_bid_prices()`)
 como fuente de verdad de qué se compró y a qué precio.
+
+Prima por revalorización rápida (config.ENABLE_SELLING_REVALUATION_PREMIUM,
+apagado por defecto -- ver docstring en config.py y
+engine.selling_strategy.compute_revaluation_premium_pct/
+apply_revaluation_premium): si está activo, por cada candidato ya decidido
+se pide el histórico diario de VM (FutmondoClient.get_player_summary()) y
+se sube `asking_price` por encima del VM cuando hay una subida sostenida
+reciente. Una llamada de red por candidato (no por toda la plantilla), y
+nunca bloquea la venta -- si la llamada falla o no hay histórico, se pide
+el VM tal cual, como si el flag estuviera apagado.
 """
 from datetime import datetime, timezone
 
@@ -22,7 +32,7 @@ import requests
 import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection, get_won_bid_prices
-from engine.selling_strategy import decide_sales
+from engine.selling_strategy import apply_revaluation_premium, decide_sales
 from notifier import notify, track_job_run
 
 
@@ -70,6 +80,22 @@ def run():
     if not decisions:
         notify("run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución.")
         return
+
+    # Prima por revalorización rápida (ver docstring del módulo) -- una
+    # llamada de red por CANDIDATO YA DECIDIDO, no por toda la plantilla.
+    # Cualquier fallo (de red, o de negocio) en una llamada individual deja
+    # esa decisión sin tocar -- se pide el VM tal cual, nunca bloquea la
+    # venta ni tumba el resto del job.
+    if config.ENABLE_SELLING_REVALUATION_PREMIUM:
+        adjusted_decisions = []
+        for decision in decisions:
+            try:
+                summary = client.get_player_summary(str(decision["player_id"]))
+                prices = summary.get("answer", {}).get("prices", [])
+                adjusted_decisions.append(apply_revaluation_premium(decision, prices))
+            except requests.RequestException:
+                adjusted_decisions.append(decision)
+        decisions = adjusted_decisions
 
     now = datetime.now(timezone.utc).isoformat()
     listed, failed = [], []

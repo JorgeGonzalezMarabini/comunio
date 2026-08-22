@@ -69,6 +69,8 @@ anteriores, "doubt" queda fuera — todavía puede llegar a jugar.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
 from engine.squad_risk import assess_squad_depth
@@ -296,3 +298,152 @@ def decide_sales(
             }
         )
     return decisions
+
+
+def _parse_summary_date(value) -> datetime | None:
+    """
+    Parsea la fecha de una entrada de `FutmondoClient.get_player_summary()
+    ["answer"]["prices"]` -- ver TODO.md: el formato real de ese campo NO
+    está confirmado con una captura real (a diferencia de casi todo lo
+    demás en clients/futmondo_client.py), así que se soportan a la vez
+    string ISO-8601 (como `expirationDate`/`creationDate`, SÍ confirmados
+    en otros endpoints) y epoch numérico (segundos o milisegundos) por si
+    acaso. Cualquier valor que no encaje en ninguno de los dos -> None, y
+    quien llama debe tratarlo como "sin dato", nunca reventar por esto.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        seconds = value / 1000 if value > 1e12 else value
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def compute_revaluation_premium_pct(
+    prices: list[dict],
+    lookback_days: float = None,
+    min_data_points: int = None,
+    min_pct_to_project: float = None,
+    projection_fraction: float = None,
+    max_premium_pct: float = None,
+    now: datetime = None,
+) -> tuple[float, str | None]:
+    """
+    A petición del usuario (2026-08-22): además de pedir el VM tal cual
+    (ver docstring de `decide_sales()`), detecta si un jugador lleva
+    SUBIENDO de forma sostenida en los últimos días y, si es así, proyecta
+    una FRACCIÓN conservadora (nunca la subida completa) de esa tendencia
+    como prima sobre el precio pedido -- el VM oficial de Futmondo puede
+    tardar en reflejar del todo una revalorización muy reciente.
+
+    `prices`: histórico tal cual devuelve `FutmondoClient.get_player_summary()
+    ["answer"]["prices"]` (lista de `{"date", "price", ...}`, ver TODO.md:
+    formato NO confirmado con captura real todavía -- por eso esta función
+    es deliberadamente conservadora y nunca revienta con datos inesperados,
+    ver `_parse_summary_date()`). Entradas sin "date"/"price" parseables (o
+    con precio <= 0) se descartan sin más, no cuentan como dato.
+
+    Condiciones, TODAS necesarias para proponer una prima > 0 (si falla
+    cualquiera, devuelve `(0.0, None)` -- ninguna prima, se pide el VM tal
+    cual, igual que hasta ahora):
+      1. Al menos `min_data_points` (config.SELLING_REVALUATION_MIN_DATA_POINTS)
+         puntos dentro de los últimos `lookback_days`
+         (config.SELLING_REVALUATION_LOOKBACK_DAYS) -- justo después de un
+         reinicio de la BD/liga no hay historial suficiente todavía, y no
+         hay base para proyectar nada con 1-2 puntos sueltos.
+      2. La serie dentro de esa ventana es NO DECRECIENTE en cada paso
+         (ningún día baja respecto al anterior) -- un solo día de bajada
+         descarta la prima entera: esto busca una tendencia sostenida, no
+         un pico puntual seguido de una corrección.
+      3. La subida total en la ventana (`pct_change`, del primer al último
+         punto) alcanza `min_pct_to_project`
+         (config.SELLING_REVALUATION_MIN_PCT_TO_PROJECT) -- por debajo de
+         eso no se considera "revalorización rápida", es ruido normal.
+
+    Si las tres se cumplen, la prima propuesta es
+    `min(max_premium_pct, pct_change * projection_fraction)` — se proyecta
+    solo una FRACCIÓN (config.SELLING_REVALUATION_PROJECTION_FRACTION) de
+    la subida observada, nunca toda, y siempre topada por
+    `max_premium_pct` (config.SELLING_REVALUATION_MAX_PREMIUM_PCT):
+    ninguna decisión de este módulo debe poder inventar un precio
+    arbitrariamente alto solo porque unos pocos días de historial subieron
+    mucho.
+
+    Devuelve `(premium_pct, nota_auditable)` -- `nota_auditable` es None si
+    `premium_pct` es 0.0, listo para añadirse al "reason" de la decisión.
+    """
+    lookback_days = config.SELLING_REVALUATION_LOOKBACK_DAYS if lookback_days is None else lookback_days
+    min_data_points = config.SELLING_REVALUATION_MIN_DATA_POINTS if min_data_points is None else min_data_points
+    min_pct_to_project = (
+        config.SELLING_REVALUATION_MIN_PCT_TO_PROJECT if min_pct_to_project is None else min_pct_to_project
+    )
+    projection_fraction = (
+        config.SELLING_REVALUATION_PROJECTION_FRACTION if projection_fraction is None else projection_fraction
+    )
+    max_premium_pct = config.SELLING_REVALUATION_MAX_PREMIUM_PCT if max_premium_pct is None else max_premium_pct
+    now = now or datetime.now(timezone.utc)
+
+    parsed = []
+    for entry in prices or []:
+        date = _parse_summary_date(entry.get("date"))
+        price = entry.get("price")
+        if date is None or not isinstance(price, (int, float)) or price <= 0:
+            continue
+        parsed.append((date, price))
+    parsed.sort(key=lambda t: t[0])
+
+    cutoff = now - timedelta(days=lookback_days)
+    window = [(d, p) for d, p in parsed if d >= cutoff]
+    if len(window) < min_data_points:
+        return 0.0, None
+
+    for (_, prev_price), (_, curr_price) in zip(window, window[1:]):
+        if curr_price < prev_price:
+            return 0.0, None  # al menos un día bajó -- no es una tendencia sostenida
+
+    first_price, last_price = window[0][1], window[-1][1]
+    pct_change = (last_price - first_price) / first_price
+    if pct_change < min_pct_to_project:
+        return 0.0, None
+
+    premium_pct = min(max_premium_pct, pct_change * projection_fraction)
+    note = (
+        f"revalorización sostenida +{pct_change:.1%} en {len(window)} dato(s) de los últimos "
+        f"{lookback_days:.0f} días -> prima proyectada +{premium_pct:.1%} (tope {max_premium_pct:.1%})"
+    )
+    return premium_pct, note
+
+
+def apply_revaluation_premium(decision: dict, prices: list[dict], now: datetime = None) -> dict:
+    """
+    Post-procesa UNA decisión de `decide_sales()` subiendo `asking_price`
+    por encima del VM si `compute_revaluation_premium_pct()` detecta
+    revalorización rápida y sostenida (ver esa función para las
+    condiciones y por qué es conservadora).
+
+    Función pura (no llama a Futmondo): `jobs/run_sales.py` obtiene
+    `prices` (de `FutmondoClient.get_player_summary()`) por cada decisión y
+    decide si llamar a esto -- controlado por
+    `config.ENABLE_SELLING_REVALUATION_PREMIUM` (False por defecto
+    mientras el formato real de `prices` no esté confirmado con una
+    captura real, ver TODO.md).
+
+    Si no hay prima que aplicar, devuelve `decision` TAL CUAL (ni siquiera
+    una copia) -- comportamiento idéntico al de antes de esta feature.
+    """
+    premium_pct, note = compute_revaluation_premium_pct(prices, now=now)
+    if premium_pct <= 0:
+        return decision
+    return {
+        **decision,
+        "asking_price": int(decision["asking_price"] * (1 + premium_pct)),
+        "reason": f"{decision['reason']}; {note}",
+    }

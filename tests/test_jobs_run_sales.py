@@ -128,6 +128,74 @@ def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):
     assert "plantilla vino vacía" in captured[0]
 
 
+def test_run_sales_does_not_call_get_player_summary_when_premium_flag_is_off(tmp_db, monkeypatch):
+    """Por defecto (ENABLE_SELLING_REVALUATION_PREMIUM=False) el comportamiento no cambia: ni se llama a get_player_summary."""
+    monkeypatch.setattr(config, "ENABLE_SELLING_REVALUATION_PREMIUM", False)
+    roster = [dict(p) for p in ROSTER_442_BASE]
+    roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
+    _mark_won(25, 700_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            raise AssertionError("no debería llamarse con el flag apagado")
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()  # no debe lanzar
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT asking_price FROM sales").fetchone()
+    assert row["asking_price"] == 900_000  # VM tal cual, sin prima
+
+
+def test_run_sales_applies_revaluation_premium_when_flag_is_on(tmp_db, monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_SELLING_REVALUATION_PREMIUM", True)
+    monkeypatch.setattr(
+        config,
+        "SELLING_REVALUATION_LOOKBACK_DAYS",
+        30,  # las fechas fijas de abajo (2026-08-*) deben caer dentro de la ventana, sea cual sea "hoy" al correr el test
+    )
+    roster = [dict(p) for p in ROSTER_442_BASE]
+    roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
+    _mark_won(25, 700_000)
+
+    rising_prices = [
+        {"date": "2026-08-18T00:00:00+00:00", "price": 700_000},
+        {"date": "2026-08-19T00:00:00+00:00", "price": 800_000},
+        {"date": "2026-08-20T00:00:00+00:00", "price": 900_000},  # +28.6% sostenido en la ventana
+    ]
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            assert player_id == "25"
+            return {"answer": {"data": {"id": player_id}, "prices": rising_prices}}
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT asking_price, reason FROM sales").fetchone()
+    assert row["asking_price"] > 900_000  # prima aplicada por encima del VM
+    assert "revalorización sostenida" in row["reason"]
+
+
 def test_run_sales_skips_entirely_when_bot_disabled(tmp_db, monkeypatch, capsys):
     """ENABLE_BOT=false -- ni siquiera debe construirse el cliente, no digamos llamar a la red."""
     monkeypatch.setattr(config, "ENABLE_BOT", False)

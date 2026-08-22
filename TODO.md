@@ -545,6 +545,41 @@ medias (cancela pero `place_bid()` posterior falla) queda auditado en
 
 ---
 
+## 14. Formato de `get_player_summary()["answer"]["prices"]` sin confirmar con captura real
+
+**Qué pasa**: a petición del usuario (2026-08-22), se añadió una prima
+opcional sobre el precio de venta pedido cuando un jugador lleva subiendo
+de forma sostenida (`engine.selling_strategy.compute_revaluation_premium_pct`/
+`apply_revaluation_premium`), usando el histórico diario de VM de
+`FutmondoClient.get_player_summary()["answer"]["prices"]`. El shape de esa
+lista (`{"date", "price", "c", "s", ...}`) viene de una respuesta real
+capturada para `data`, pero **`prices` en concreto se vio vacío** en esa
+misma captura — no hay confirmación de qué formato tiene `date` (¿ISO-8601
+como `expirationDate`/`creationDate`? ¿epoch?), en qué orden vienen las
+entradas, ni si `price` es de verdad el VM diario y no otra cosa (`c`/`s`
+tampoco están confirmados, ver docstring de `get_player_summary`).
+
+**Por qué importa**: activar la prima sobre datos mal interpretados podría
+inflar precios de venta sin base real (aunque el impacto es acotado: solo
+sube el precio PEDIDO, nunca gasta dinero, y `_parse_summary_date()` +
+`compute_revaluation_premium_pct()` son deliberadamente defensivos --
+cualquier dato que no encaje se descarta sin más, nunca revienta).
+
+**Afecta a**: `engine/selling_strategy.py` (`_parse_summary_date`,
+`compute_revaluation_premium_pct`, `apply_revaluation_premium`),
+`jobs/run_sales.py`.
+
+**Mitigación actual**: `config.ENABLE_SELLING_REVALUATION_PREMIUM` en
+`false` por defecto -- no se activa en producción hasta confirmar el
+formato real con una captura de `get_player_summary()` sobre un jugador
+que sí tenga histórico de precios.
+
+**Dónde**: `engine/selling_strategy.py:301-...`, `jobs/run_sales.py`,
+`config.py` (`SELLING_REVALUATION_*`), `clients/futmondo_client.py:440-449`
+(`get_player_summary`, docstring con la forma capturada de `prices`).
+
+---
+
 ## Ya resuelto (para referencia, no es un pendiente)
 
 **`build_bench_changes()` repetía un `"from"` ya caducado en un intercambio

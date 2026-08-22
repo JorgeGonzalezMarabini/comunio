@@ -1,4 +1,13 @@
-from engine.selling_strategy import decide_sales
+from datetime import datetime, timedelta, timezone
+
+from engine.selling_strategy import apply_revaluation_premium, compute_revaluation_premium_pct, decide_sales
+
+NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
+
+
+def _price(days_ago, price):
+    date = (NOW - timedelta(days=days_ago)).isoformat()
+    return {"date": date, "price": price}
 
 # _full_442_squad(): índices fijos para que los tests puedan referenciar
 # jugadores concretos sin ambigüedad.
@@ -350,3 +359,77 @@ def test_decide_sales_concentration_rule_ignores_bench_margin_like_any_confirmed
     decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
     assert len(decisions) == 1
     assert decisions[0]["player_id"] == squad[0]["id"]
+
+
+# --- compute_revaluation_premium_pct / apply_revaluation_premium (2026-08-22) ---
+
+
+def test_compute_revaluation_premium_rejects_too_few_data_points():
+    """1-2 puntos sueltos (típico justo tras un reinicio de BD/liga) no bastan para proyectar nada."""
+    prices = [_price(1, 1_100_000), _price(0, 1_200_000)]
+    assert compute_revaluation_premium_pct(prices, min_data_points=3, now=NOW) == (0.0, None)
+
+
+def test_compute_revaluation_premium_rejects_a_single_down_day():
+    """Un solo día que baja respecto al anterior descarta la prima entera -- no es tendencia sostenida."""
+    prices = [_price(3, 1_000_000), _price(2, 1_100_000), _price(1, 1_050_000), _price(0, 1_300_000)]
+    assert compute_revaluation_premium_pct(prices, min_data_points=3, now=NOW) == (0.0, None)
+
+
+def test_compute_revaluation_premium_rejects_change_below_threshold():
+    """Subida sostenida pero pequeña (por debajo de min_pct_to_project) se trata como ruido normal, no como prima."""
+    prices = [_price(2, 1_000_000), _price(1, 1_020_000), _price(0, 1_040_000)]  # +4% total
+    premium, note = compute_revaluation_premium_pct(prices, min_data_points=3, min_pct_to_project=0.15, now=NOW)
+    assert (premium, note) == (0.0, None)
+
+
+def test_compute_revaluation_premium_projects_a_fraction_of_a_sustained_rise():
+    prices = [_price(2, 1_000_000), _price(1, 1_100_000), _price(0, 1_200_000)]  # +20% sostenido
+    premium, note = compute_revaluation_premium_pct(
+        prices, min_data_points=3, min_pct_to_project=0.15, projection_fraction=0.5, max_premium_pct=0.15, now=NOW
+    )
+    assert premium == 0.10  # 20% * 0.5 de fracción, por debajo del tope 15%
+    assert note is not None and "20.0%" in note
+
+
+def test_compute_revaluation_premium_never_exceeds_the_hard_cap():
+    prices = [_price(2, 1_000_000), _price(1, 1_300_000), _price(0, 1_600_000)]  # +60% sostenido
+    premium, _ = compute_revaluation_premium_pct(
+        prices, min_data_points=3, min_pct_to_project=0.15, projection_fraction=0.5, max_premium_pct=0.15, now=NOW
+    )
+    assert premium == 0.15  # 60% * 0.5 = 30%, topado a 0.15
+
+
+def test_compute_revaluation_premium_ignores_entries_outside_the_lookback_window():
+    """Puntos fuera de la ventana de lookback no cuentan ni para el mínimo de datos ni para el % de subida."""
+    prices = [_price(30, 500_000), _price(2, 1_000_000), _price(1, 1_100_000), _price(0, 1_200_000)]
+    premium, _ = compute_revaluation_premium_pct(prices, lookback_days=7, min_data_points=3, now=NOW)
+    assert premium > 0.0  # se calcula sobre los 3 puntos dentro de la ventana, ignorando el de hace 30 días
+
+
+def test_compute_revaluation_premium_ignores_unparseable_or_non_positive_entries():
+    """Entradas sin fecha/precio parseable, o con precio <= 0, se descartan en vez de reventar."""
+    prices = [
+        {"date": None, "price": 1_000_000},
+        {"date": _price(1, 0)["date"], "price": 0},
+        _price(2, 1_000_000),
+        _price(1, 1_100_000),
+        _price(0, 1_200_000),
+    ]
+    premium, _ = compute_revaluation_premium_pct(prices, min_data_points=3, now=NOW)
+    assert premium > 0.0  # las 2 entradas basura se ignoran, quedan los 3 puntos válidos
+
+
+def test_apply_revaluation_premium_leaves_decision_unchanged_when_no_premium_applies():
+    decision = {"player_id": "1", "asking_price": 1_000_000, "reason": "motivo original"}
+    result = apply_revaluation_premium(decision, prices=[], now=NOW)
+    assert result is decision  # ni siquiera se copia el dict
+
+
+def test_apply_revaluation_premium_inflates_asking_price_and_extends_reason():
+    decision = {"player_id": "1", "asking_price": 1_000_000, "reason": "motivo original"}
+    prices = [_price(2, 1_000_000), _price(1, 1_100_000), _price(0, 1_200_000)]  # +20% sostenido
+    result = apply_revaluation_premium(decision, prices, now=NOW)
+    assert result["asking_price"] == 1_100_000  # 1_000_000 * 1.10
+    assert result["reason"].startswith("motivo original; revalorización sostenida")
+    assert decision["asking_price"] == 1_000_000  # el original no se muta
