@@ -66,6 +66,29 @@ CONFIRMADA cuyo valor supera `injury_concentration_max_pct`
 (suma del valor de TODA la plantilla + `budget`) también se pone en
 venta, sin mirar plusvalía/pérdida en absoluto. Como con las dos vías
 anteriores, "doubt" queda fuera — todavía puede llegar a jugar.
+
+Oportunidad de mercado / plaza escasa (a petición del usuario, 2026-08-22,
+tras el límite de plantilla de `jobs/run_market.py`): las tres vías de
+arriba solo miran RENTABILIDAD de la operación o concentración de
+capital — ninguna mira si el jugador en sí es bueno. Con plazas cada vez
+más escasas, un suplente mediocre que ni gana ni pierde puede ocupar un
+hueco valioso indefinidamente, aunque el mercado ofrezca constantemente
+sustitutos mejores para su posición. Por eso, si `own_squad_features`/
+`market_candidates` (features crudas, mismo formato que
+`db.models.get_player_features()`) vienen informados, se calcula el score
+de alineación (`config.LINEUP_EVALUATOR_WEIGHTS`, calidad pura, sin
+precio — igual que `engine.squad_risk.weakest_starter_scores`, mismo
+principio aplicado en sentido contrario) de la plantilla propia y del
+mercado EN LA MISMA llamada a `evaluate_players()` (para que sean
+comparables, ver `engine.evaluator.normalize_pool`). Un jugador (sano, no
+"doubt"/lesionado — su calidad actual no es representativa mientras no
+pueda jugar) se pone en venta igualmente si el MEJOR candidato disponible
+en el mercado en su misma posición supera su score de alineación en
+`upgrade_available_min_margin` (config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN),
+aunque profit_pct no llegue a ningún otro umbral. Ambos parámetros son
+opcionales (`None`/vacíos por defecto): si el llamador no los pasa, esta
+vía queda desactivada sin más, backward-compatible con el resto de usos
+de `decide_sales()`.
 """
 from __future__ import annotations
 
@@ -73,6 +96,7 @@ from datetime import datetime, timedelta, timezone
 
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
+from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth
 
 
@@ -85,6 +109,9 @@ def decide_sales(
     injury_max_loss_pct: float = None,
     budget: int = 0,
     injury_concentration_max_pct: float = None,
+    own_squad_features: list[dict] = None,
+    market_candidates: list[dict] = None,
+    upgrade_available_min_margin: float = None,
 ) -> list[dict]:
     """
     `squad`: items reales de FutmondoClient.get_roster()["answer"] (necesita
@@ -128,8 +155,24 @@ def decide_sales(
     de plusvalía, es de concentración de capital en un jugador que no se
     puede usar). No aplica a "doubt".
 
+    `own_squad_features`/`market_candidates`: features CRUDAS (mismo
+    formato que devuelve `db.models.get_player_features()` — "price",
+    "points", "xg", "position" POR/DEF/MED/DEL ya normalizada, etc., NO
+    los items de `squad`/`get_roster()`) de la plantilla propia y del
+    mercado abierto ahora mismo, respectivamente. Habilitan la 4ª vía de
+    venta (ver docstring del módulo, "Oportunidad de mercado / plaza
+    escasa") -- si CUALQUIERA de los dos viene vacío/None (el valor por
+    defecto), esa vía queda desactivada sin más, ningún candidato se ve
+    afectado por ella.
+
+    `upgrade_available_min_margin`: por defecto
+    config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN — margen mínimo (en score
+    de alineación, `config.LINEUP_EVALUATOR_WEIGHTS`) que el MEJOR
+    candidato de mercado en la misma posición debe superar al score de
+    alineación propio del jugador antes de venderlo solo por esto.
+
     Devuelve una decisión por cada jugador que cumpla CUALQUIERA de estas
-    tres condiciones (Y cuya posición siga teniendo margen de suplentes
+    cuatro condiciones (Y cuya posición siga teniendo margen de suplentes
     sanos después de la venta, salvo que ya esté lesionado/en duda —
     ver más abajo):
       1. Su revalorización (`value` vs. el precio pagado en
@@ -142,6 +185,10 @@ def decide_sales(
          `injury_concentration_max_pct` del capital total — concentración
          de capital, solo para lesión confirmada (no "doubt"), sin mirar
          plusvalía/pérdida.
+      4. No está lesionado/en duda, y el mejor candidato de mercado en su
+         misma posición supera su score de alineación en
+         `upgrade_available_min_margin` — oportunidad de mercado, solo si
+         `own_squad_features`/`market_candidates` vienen informados.
 
     Cada decisión:
         {"player_id", "asking_price", "purchase_price", "profit",
@@ -170,6 +217,11 @@ def decide_sales(
         if injury_concentration_max_pct is None
         else injury_concentration_max_pct
     )
+    upgrade_available_min_margin = (
+        config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN
+        if upgrade_available_min_margin is None
+        else upgrade_available_min_margin
+    )
     bought_by_bot = bought_by_bot or {}
 
     # Capital total del equipo (plantilla + presupuesto disponible) --
@@ -177,6 +229,29 @@ def decide_sales(
     # calcula sobre TODA la plantilla (no solo los candidatos), es el
     # patrimonio real del equipo en este momento.
     total_capital = sum(p.get("value", 0) or 0 for p in squad) + max(0, budget)
+
+    # Oportunidad de mercado (ver docstring): score de alineación de
+    # plantilla propia y mercado EN LA MISMA llamada a evaluate_players()
+    # (normalize_pool normaliza dentro del pool que se le pasa, así que
+    # hace falta la misma llamada para que sean comparables entre sí). Si
+    # falta cualquiera de los dos, esta vía queda desactivada (diccionarios
+    # vacíos -> ningún candidato la activa más abajo).
+    lineup_score_by_id = {}
+    best_market_lineup_score_by_position = {}
+    if own_squad_features and market_candidates:
+        lineup_scored = evaluate_players(
+            list(own_squad_features) + list(market_candidates), weights=config.LINEUP_EVALUATOR_WEIGHTS
+        )
+        own_ids = {str(p["id"]) for p in own_squad_features}
+        for p in lineup_scored:
+            lineup_score_by_id[str(p["id"])] = p["score"]
+            if str(p["id"]) in own_ids:
+                continue  # es plantilla propia, no un candidato de mercado -- no cuenta como "disponible"
+            position_key = p.get("position")
+            if position_key is None:
+                continue
+            if p["score"] > best_market_lineup_score_by_position.get(position_key, float("-inf")):
+                best_market_lineup_score_by_position[position_key] = p["score"]
 
     candidates = []
     for player in squad:
@@ -194,6 +269,7 @@ def decide_sales(
         # usa el umbral genérico max_loss_pct. Se vende aunque no llegue a
         # min_profit_pct, incluso con pérdidas.
         is_confirmed_injured = is_confirmed_injured_status(player.get("status"))
+        is_injured_or_doubtful = is_injury_status(player.get("status"))
         loss_threshold = injury_max_loss_pct if is_confirmed_injured else max_loss_pct
         cutting_losses = profit_pct <= -loss_threshold
 
@@ -203,7 +279,26 @@ def decide_sales(
         concentration_pct = (current_price / total_capital) if total_capital > 0 else 0.0
         overconcentrated = is_confirmed_injured and concentration_pct >= injury_concentration_max_pct
 
-        if profit_pct < min_profit_pct and not cutting_losses and not overconcentrated:
+        # Oportunidad de mercado: nunca para lesionado/en duda (ver
+        # docstring del módulo, misma razón que la concentración de
+        # capital de arriba solo mira lesión confirmada -- la calidad
+        # actual de alguien que no puede jugar no es representativa).
+        position_key = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
+        own_lineup_score = lineup_score_by_id.get(str(player["id"]))
+        best_available_lineup_score = best_market_lineup_score_by_position.get(position_key)
+        market_upgrade_available = (
+            not is_injured_or_doubtful
+            and own_lineup_score is not None
+            and best_available_lineup_score is not None
+            and (best_available_lineup_score - own_lineup_score) >= upgrade_available_min_margin
+        )
+
+        if (
+            profit_pct < min_profit_pct
+            and not cutting_losses
+            and not overconcentrated
+            and not market_upgrade_available
+        ):
             continue
 
         candidates.append(
@@ -217,6 +312,10 @@ def decide_sales(
                 loss_threshold,
                 overconcentrated,
                 concentration_pct,
+                is_injured_or_doubtful,
+                market_upgrade_available,
+                own_lineup_score,
+                best_available_lineup_score,
             )
         )
 
@@ -247,9 +346,12 @@ def decide_sales(
         loss_threshold,
         overconcentrated,
         concentration_pct,
+        is_injured_or_doubtful,
+        market_upgrade_available,
+        own_lineup_score,
+        best_available_lineup_score,
     ) in candidates:
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
-        is_injured_or_doubtful = is_injury_status(player.get("status"))
 
         # Un jugador ya lesionado/sancionado no contaba como "disponible"
         # en assess_squad_depth, así que venderlo no empeora la cobertura
@@ -262,8 +364,8 @@ def decide_sales(
         # Prioridad del motivo mostrado (no son excluyentes entre sí, un
         # candidato puede cumplir varios a la vez): rentabilidad normal
         # primero (el caso más informativo/común), luego corte de
-        # pérdidas, luego concentración de capital (la única vía que ni
-        # siquiera mira profit_pct).
+        # pérdidas, luego concentración de capital, luego oportunidad de
+        # mercado (las dos últimas ni siquiera miran profit_pct).
         if profit_pct >= min_profit_pct:
             reason = (
                 f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
@@ -279,12 +381,19 @@ def decide_sales(
                 f"({profit_pct:+.1%}) -- pérdida >= umbral de corte {loss_threshold:.1%}; se vende aunque no "
                 "llegue al umbral de rentabilidad, para no caer en la falacia del coste hundido"
             )
-        else:
+        elif overconcentrated:
             reason = (
                 f"lesión confirmada, concentración de capital: vale {player.get('value', 0)} "
                 f"({concentration_pct:.1%} del capital total del equipo) >= umbral "
                 f"{injury_concentration_max_pct:.1%}; se vende sin mirar plusvalía/pérdida ({profit_pct:+.1%}), "
                 "para no tener capital inmovilizado en un jugador que no se puede usar"
+            )
+        else:
+            reason = (
+                f"oportunidad de mercado: sin plusvalía suficiente ({profit_pct:+.1%}), pero el mejor candidato "
+                f"de mercado en {position} tiene score de alineación {best_available_lineup_score:.3f} frente a "
+                f"{own_lineup_score:.3f} propio (>= margen {upgrade_available_min_margin}); se libera la plaza "
+                "de cara a esa oportunidad, aunque hoy no compense económicamente"
             )
 
         decisions.append(

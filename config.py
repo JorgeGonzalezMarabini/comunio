@@ -300,6 +300,19 @@ SELLING_INJURY_MAX_LOSS_PCT = float(os.getenv("SELLING_INJURY_MAX_LOSS_PCT", "0.
 # resultados reales.
 SELLING_INJURY_CONCENTRATION_MAX_PCT = float(os.getenv("SELLING_INJURY_CONCENTRATION_MAX_PCT", "0.15"))
 
+# Margen mínimo de score de alineación (config.LINEUP_EVALUATOR_WEIGHTS,
+# calidad pura, sin precio) que el MEJOR candidato de mercado en una
+# posición debe superar al score propio de un suplente antes de venderlo
+# solo por esto -- "oportunidad de mercado / plaza escasa" (a petición del
+# usuario, 2026-08-22, tras el límite de plantilla de jobs/run_market.py,
+# ver docstring de engine/selling_strategy.py). Deliberadamente por ENCIMA
+# de BIDDING_CANCEL_SWAP_MIN_MARGIN (0.25): vender un jugador ya en
+# plantilla sin motivo de rentabilidad es un cambio de comportamiento
+# mayor que cancelar una puja todavía sin resolver, así que pide más
+# margen de diferencia antes de disparar. Sin calibrar todavía con
+# resultados reales.
+SELLING_UPGRADE_AVAILABLE_MIN_MARGIN = float(os.getenv("SELLING_UPGRADE_AVAILABLE_MIN_MARGIN", "0.30"))
+
 # Prima sobre el precio de venta pedido por revalorización rápida sostenida
 # (a petición del usuario, 2026-08-22, ver engine.selling_strategy.
 # compute_revaluation_premium_pct/apply_revaluation_premium): usa el

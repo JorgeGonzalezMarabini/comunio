@@ -67,6 +67,64 @@ def test_run_sales_reports_roster_occupancy_alongside_futmondo_client(tmp_db):
     assert "11/20" in captured[0]
 
 
+def test_run_sales_passes_own_squad_and_market_features_to_decide_sales(tmp_db):
+    """
+    Regresión (2026-08-22, a petición del usuario): run_sales debe pasar a
+    decide_sales() las features de la plantilla propia (jugadores en
+    plantilla, cualquiera que sea su on_market en BD) y del mercado
+    abierto ahora mismo (solo on_market=1) -- ver docstring del módulo,
+    "Oportunidad de mercado / plaza escasa". Si no las pasa, esa vía queda
+    siempre desactivada aunque decide_sales() la soporte.
+    """
+    roster = [dict(p) for p in ROSTER_442_BASE]  # id=20 (Medio0) en plantilla
+    _mark_won(20, 700_000)
+
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)",
+            ("20", "Medio0", "E", "MED", "2026-08-16T18:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots "
+            "(player_id, price, points, last_points, average_points, on_market, status, recorded_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("20", 700_000, 10, 10, 10.0, 0, "", "2026-08-16T18:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)",
+            ("999", "Candidato", "E", "MED", "2026-08-16T18:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots "
+            "(player_id, price, points, last_points, average_points, on_market, status, recorded_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("999", 700_000, 10, 10, 10.0, 1, "", "2026-08-16T18:00:00+00:00"),
+        )
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+    with (
+        patch("jobs.run_sales.FutmondoClient", FakeClient),
+        patch("jobs.run_sales.decide_sales", return_value=[]) as mock_decide,
+        patch("jobs.run_sales.notify"),
+    ):
+        run_sales.run()
+
+    assert mock_decide.called
+    kwargs = mock_decide.call_args.kwargs
+    own_ids = {str(p["id"]) for p in kwargs["own_squad_features"]}
+    market_ids = {str(p["id"]) for p in kwargs["market_candidates"]}
+    assert "20" in own_ids  # en plantilla -- pasa aunque on_market=0
+    assert "999" in market_ids  # en mercado (on_market=1), no en plantilla
+    assert "999" not in own_ids
+    assert "20" not in market_ids  # no está listado en el mercado
+
+
 def test_run_sales_lists_profitable_player_and_persists(tmp_db):
     roster = [dict(p) for p in ROSTER_442_BASE]
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})

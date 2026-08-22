@@ -25,6 +25,21 @@ se sube `asking_price` por encima del VM cuando hay una subida sostenida
 reciente. Una llamada de red por candidato (no por toda la plantilla), y
 nunca bloquea la venta -- si la llamada falla o no hay histórico, se pide
 el VM tal cual, como si el flag estuviera apagado.
+
+Oportunidad de mercado / plaza escasa (a petición del usuario, 2026-08-22,
+tras el límite de plantilla de jobs/run_market.py -- ver docstring de
+engine/selling_strategy.py): además de las tres vías de rentabilidad, este
+job pasa a decide_sales() las features de la plantilla propia y del
+mercado abierto ahora mismo (`db.models.get_player_features()`, mismos
+datos que usa jobs/run_market.py) para que pueda vender también a un
+suplente mediocre -- sin pérdida ni la plusvalía mínima -- si el mercado
+ofrece ahora mismo alguien claramente mejor en su misma posición. Esto NO
+libera el hueco al instante (ver arriba, poner en venta no es venta
+instantánea): es una vía para mantener la plantilla más líquida de cara al
+futuro, no para resolver una oportunidad concreta en la misma pasada --
+por eso NUNCA hay que intentar "vender y pujar ya" en el mismo run: la
+puja nueva fallaría igual por api.market.max_number_players_in_roster
+mientras la venta no se haya resuelto de verdad.
 """
 from datetime import datetime, timezone
 
@@ -32,7 +47,7 @@ import requests
 
 import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
-from db.models import get_connection, get_won_bid_prices
+from db.models import get_connection, get_player_features, get_won_bid_prices
 from engine.selling_strategy import apply_revaluation_premium, decide_sales
 from notifier import notify, track_job_run
 
@@ -78,16 +93,33 @@ def run():
     budget = information.get("answer", {}).get("budget", 0)
 
     # Ocupación de plantilla (mismo campo que jobs/run_market.py usa para
-    # cortar pujas por límite de plazas) -- puramente informativo aquí:
-    # decide_sales() sigue sin usarlo (vende solo por plusvalía/pérdida/
-    # concentración de capital, ver docstring del módulo), pero se incluye
-    # SIEMPRE en la notificación para poder correlacionar a simple vista
-    # "plantilla llena/casi llena + nada que vender" con que run_market
-    # esté bloqueando pujas por falta de plazas.
+    # cortar pujas por límite de plazas) -- se incluye SIEMPRE en la
+    # notificación para poder correlacionar a simple vista "plantilla
+    # llena/casi llena + nada que vender" con que run_market esté
+    # bloqueando pujas por falta de plazas.
     max_roster_size = information.get("answer", {}).get("configuration", {}).get("numberOfPlayers")
     occupancy = f"{len(roster_items)}/{max_roster_size}" if max_roster_size is not None else str(len(roster_items))
 
-    decisions = decide_sales(roster_items, bought_by_bot=get_won_bid_prices(), budget=budget)
+    # Oportunidad de mercado (a petición del usuario, 2026-08-22, ver
+    # docstring de engine/selling_strategy.py) -- features CRUDAS de la
+    # plantilla propia y del mercado abierto AHORA MISMO (mismo formato
+    # que usa jobs/run_market.py), para que decide_sales() pueda comparar
+    # el score de alineación de un suplente contra lo mejor disponible en
+    # el mercado en su misma posición. Si algo falla o viene vacío, esta
+    # vía queda desactivada sin más dentro de decide_sales() -- nunca
+    # bloquea las otras tres vías (rentabilidad/pérdida/concentración).
+    roster_ids = {str(p["id"]) for p in roster_items}
+    all_players = get_player_features(only_on_market=False)
+    own_squad_features = [p for p in all_players if p["id"] in roster_ids]
+    market_candidates = get_player_features(only_on_market=True)
+
+    decisions = decide_sales(
+        roster_items,
+        bought_by_bot=get_won_bid_prices(),
+        budget=budget,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
     if not decisions:
         notify(
             f"run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución "

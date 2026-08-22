@@ -361,6 +361,120 @@ def test_decide_sales_concentration_rule_ignores_bench_margin_like_any_confirmed
     assert decisions[0]["player_id"] == squad[0]["id"]
 
 
+# --- Oportunidad de mercado / plaza escasa (a petición del usuario, 2026-08-22,
+# tras el límite de plantilla de jobs/run_market.py) ---
+
+
+def _feature_row(player_id, position, price=500_000, points=10, xg=0.0, minutes_played=0, team_games=10, status=""):
+    """Fila cruda estilo `db.models.get_player_features()` -- NO el formato de `squad`/`get_roster()`."""
+    return {
+        "id": player_id,
+        "position": position,
+        "price": price,
+        "points": points,
+        "last_points": points,
+        "average_points": points,
+        "status": status,
+        "xg": xg,
+        "minutes_played": minutes_played,
+        "team_games": team_games,
+    }
+
+
+def test_decide_sales_sells_mediocre_bench_player_when_market_offers_clear_upgrade():
+    """
+    Un suplente que ni gana ni pierde (profit_pct=0%, por debajo de
+    min_profit_pct) se pone en venta igualmente si el mercado ofrece ahora
+    mismo alguien mucho mejor (score de alineación, LINEUP_EVALUATOR_WEIGHTS)
+    en su misma posición -- ver docstring del módulo.
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"10": 500_000}  # Defensa0 (id=10): comprado y vale igual ahora -> 0% profit
+
+    own_squad_features = [_feature_row(10, "DEF", xg=0.0, minutes_played=10)]  # apenas juega, sin xG
+    market_candidates = [_feature_row("mercado1", "DEF", xg=5.0, minutes_played=900)]  # titular indiscutible
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 10
+    assert decisions[0]["profit_pct"] == 0.0
+    assert "oportunidad de mercado" in decisions[0]["reason"]
+
+
+def test_decide_sales_market_upgrade_disabled_without_market_data():
+    """Sin `own_squad_features`/`market_candidates`, la vía queda desactivada -- comportamiento idéntico al de antes."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"10": 500_000}
+
+    assert decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot) == []
+
+
+def test_decide_sales_market_upgrade_ignored_when_not_clearly_better():
+    """Mismo score de alineación (nadie es claramente mejor) -> no se vende solo por esto."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"10": 500_000}
+
+    own_squad_features = [_feature_row(10, "DEF", xg=2.0, minutes_played=450)]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=2.0, minutes_played=450)]  # calidad idéntica
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_market_upgrade_respects_bench_margin():
+    """Igual que las otras tres vías: si vender aquí deja la posición sin cobertura, no se vende por muy claro que sea el margen de mercado."""
+    squad = _full_442_squad()  # DEF sin margen de sobra (4 sanos para 4 titulares) -- sin el 5º de más
+    bought_by_bot = {"10": 500_000}
+
+    own_squad_features = [_feature_row(10, "DEF", xg=0.0, minutes_played=10)]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=5.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_market_upgrade_does_not_apply_to_confirmed_injury():
+    """Lesión confirmada: su calidad actual no es representativa mientras no pueda jugar -- nunca se vende solo por esta vía."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    squad[1]["status"] = "injured2"  # Defensa0 (id=10)
+    bought_by_bot = {"10": 500_000}
+
+    own_squad_features = [_feature_row(10, "DEF", xg=0.0, minutes_played=10, status="injured2")]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=5.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+    assert decisions == []
+
+
 # --- compute_revaluation_premium_pct / apply_revaluation_premium (2026-08-22) ---
 
 
