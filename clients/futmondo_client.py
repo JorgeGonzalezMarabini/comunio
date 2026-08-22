@@ -450,9 +450,24 @@ class FutmondoClient:
             {"answer": [{"id", "name", "slug", "role", "role2", "photo",
              "points", "value", "team", "logo", "status",
              "expirationDate", "price" (el pedido, no `value`), "buyPrice",
-             "isClause", "bids": [] (pujas recibidas por CLÁUSULA sobre
-             este listado, no confirmado su shape con una no vacía),
-             "change", "average": {...}}], ...}
+             "isClause", "bids": [...], "change", "average": {...}}], ...}
+
+        `bids`: CORRECCIÓN 2026-08-22 (TODO.md #15) -- la nota anterior
+        decía "pujas recibidas por CLÁUSULA, shape sin confirmar con una no
+        vacía". Confirmado en vivo con una puja real de OTRO manager sobre
+        un listado normal (`isClause: false`, puesto en venta con
+        `list_for_sale()`, no cláusula): el item trae
+        `"bids": [{"id", "price", "userTeam": {"name", "slug"}}]` -- así
+        que este campo SÍ recoge ofertas normales de compra, no solo de
+        cláusula como se pensaba. En ese mismo momento,
+        `/1/market/rosterbids?type=roster` devolvió `"answer": []` para
+        esa misma puja -- confirma que ese otro endpoint es solo para
+        ofertas de CLÁUSULA (ver docstring del módulo), no una fuente
+        general de "ofertas sobre mi plantilla"; para ver ofertas de venta
+        normal hay que releer este listado, no `rosterbids`. Sigue sin
+        confirmarse el endpoint para ACEPTAR una de estas `bids` (la mitad
+        de TODO.md #15 que sigue abierta).
+
         Prácticamente el mismo shape que un item de roster + los campos de
         venta (`expirationDate`, `price`, `isClause`, `bids`) que también
         trae un item de `get_market()`.

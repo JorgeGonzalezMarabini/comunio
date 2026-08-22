@@ -638,6 +638,37 @@ real pendiente que interceptar con Chrome DevTools (mismo método usado
 para confirmar TODO #1/#3/#13). Bloqueado hasta la próxima vez que un
 jugador puesto en venta reciba una oferta real.
 
+**Actualización 2026-08-22 (mismo día, más tarde) -- mitad de la incógnita resuelta**:
+el usuario añadió un segundo manager a la liga de prueba
+(`.env.test`, championshipId `6a8353d63e03eb2e4ec15680`) y ese manager
+pujó de verdad sobre "Fer Niño", un jugador puesto en venta normal
+(`list_for_sale()`, `isClause: false`) por el equipo del bot. Confirmado
+por fetch autenticado real con esas credenciales:
+  - La oferta aparece en `get_my_players_in_market()` (`POST
+    /1/market/myplayers`), dentro del campo `bids` del listado:
+    `{"id": "6a89e111c3257539d2e3abb4", "price": 2700000, "userTeam":
+    {"name": "jorge.gonzalez", "slug": "jorgegonzalez"}}`. Esto CORRIGE la
+    nota anterior del docstring de `get_my_players_in_market()`, que
+    asumía que `bids` era solo para ofertas de CLÁUSULA -- en realidad
+    también lleva ofertas de venta normal.
+  - `POST /1/market/rosterbids` con `type="roster"` devolvió `"answer":
+    []` en el mismo instante para esa misma oferta -- confirma que ese
+    endpoint es una fuente aparte, solo para ofertas de CLÁUSULA, no una
+    fuente general. `get_my_players_in_market()` es la fuente correcta
+    para ofertas de venta normal.
+  - Sigue SIN confirmar el endpoint para ACEPTAR (`bids[].id` parece el
+    candidato obvio a mandar como parámetro, por analogía con `bid` en
+    `cancel_bid()`, pero no se ha probado en vivo -- no se ha intentado
+    ninguna llamada de escritura no confirmada contra la cuenta real
+    para no arriesgar completar la venta con un endpoint adivinado). Se
+    intentó inyectar el token de `.env.test` en `localStorage` de
+    app.futmondo.com para capturar la petición real haciendo clic en
+    "Aceptar" desde la UI, pero la app redirige a la pantalla de login
+    (usuario/contraseña) en vez de recoger la sesión solo desde
+    localStorage -- haría falta que el usuario inicie sesión a mano en su
+    propio navegador para poder capturar esa llamada con DevTools, igual
+    que se hizo con `cancelbid`/`cancelsell`.
+
 **Afecta a**: `jobs/run_sales.py` (necesitará un paso nuevo -- leer
 ofertas recibidas y aceptar la mejor, quizás un job aparte tipo
 `jobs/accept_sale_offers.py`, o ampliarlo dentro del mismo job),
