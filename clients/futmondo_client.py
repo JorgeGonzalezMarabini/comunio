@@ -54,6 +54,10 @@ sesión de Comunio, ver README):
     POST /1/market/cancelsell        -> ESCRITURA: quita un jugador propio del mercado de ventas
                                          (confirmado 2026-08-18, TODO.md #6)
     POST /1/player/summary           -> ficha de un jugador (incluye histórico de precio)
+    POST /1/market/acceptbid         -> ESCRITURA: acepta una oferta de compra recibida sobre un
+                                         jugador propio puesto en venta normal (resuelve TODO.md #15,
+                                         confirmado 2026-08-22 con una venta real completa de principio
+                                         a fin -- ver accept_sale_offer())
 
 Confirmado solo por la referencia comunitaria (vicenteqa/futmondo-utils),
 NO verificado con una captura real propia todavía — se implementan igual
@@ -72,6 +76,33 @@ primera versión, documentados por si hacen falta más adelante):
                                          cada item de /1/market/players, ver real_pending_bid_amount())
     POST /1/league/championshipteams -> equipos/managers de la liga
     POST /5/league/championshipplayers -> plantillas de todos los managers de la liga
+
+Endpoints de escritura del mercado vistos SOLO por nombre (grep de
+`main.dart.js`, 2026-08-22, TODO.md #15 -- ver docstring de
+`accept_sale_offer()` para cómo se obtuvo), ninguno probado en vivo salvo
+`acceptbid` (ya arriba). Documentados aquí para no tener que repetir la
+búsqueda si hacen falta más adelante; el nombre y el shape de la query
+(mismo patrón `{championshipId, userteamId, ...}` que el resto) están
+confirmados por el propio código fuente de la app, pero el comportamiento
+real en runtime NO:
+    POST /1/market/rejectbid          -> rechaza una oferta de venta normal recibida (opuesto de
+                                          acceptbid; misma query: {..., "bid", "player_id"})
+    POST /1/market/acceptrosterbid    -> acepta una oferta de CLÁUSULA (equivalente de acceptbid
+                                          para el tipo "roster" de rosterbids)
+    POST /1/market/rejectrosterbid    -> rechaza una oferta de cláusula
+    POST /1/market/cancelrosterbid    -> cancela una oferta de cláusula propia todavía abierta
+    POST /1/market/rosterbid          -> (sin confirmar qué hace -- ¿pujar por cláusula? ver
+                                          `place_bid(is_clause=True)`, que usa /1/market/bid, no este)
+    POST /1/market/auctionbid, /1/market/playerauctionsummary -> modo "subasta" (no visto en
+                                          `championshipMode`, la liga de prueba usa "social")
+    POST /1/market/directsell          -> (sin confirmar -- ¿venta instantánea sin esperar ofertas?)
+    POST /5/market/modifybid, /5/market/modifyrosterbid, /5/market/modifyprice -> editar una
+                                          puja/listado ya abierto (relevante para el hallazgo de
+                                          real_pending_bid_amount() de que place_bid() no "sube" una
+                                          puja existente -- podría ser el mecanismo correcto para eso,
+                                          sin confirmar)
+    POST /1/market/renewclause, /5/market/recoverclause, /5/market/recalculateclauses,
+        /5/market/putallonmarket, /5/market/cancelloan -> sin explorar
 
 Nombres de campo reales confirmados por fetch autenticado real:
     roster item / market item: {
@@ -616,6 +647,66 @@ class FutmondoClient:
         cancelar un listado que ya no existe (vendido o ya cancelado antes).
         """
         result = self._post("/1/market/cancelsell", {"player_id": player_id})
+        return self._check_ok(result)
+
+    def accept_sale_offer(self, bid_id: str, player_id: str) -> dict:
+        """
+        Acepta una oferta de compra recibida sobre un jugador propio puesto
+        en venta NORMAL (`list_for_sale()`/`putonmarket`, `isClause: false`
+        -- no de cláusula, ver `pay_clause()`/`FUTMONDO_ROSTERBID` más
+        arriba). Resuelve TODO.md #15 -- el paso que faltaba en el ciclo de
+        venta, sin el cual `jobs/run_sales.py` nunca generaba ingresos
+        reales por mucho que un jugador puesto en venta recibiera ofertas.
+
+        **100% confirmado en vivo de principio a fin** (2026-08-22, liga de
+        prueba de `.env.test`): con un segundo manager real pujando 2.700.000€
+        sobre "Fer Niño" (puesto en venta a 2.623.496€), se aceptó la oferta
+        desde la UI real de app.futmondo.com y se verificó el resultado por
+        API antes/después: `get_information().budget` subió exactamente
+        2.700.000€ (106.618.140€ -> 109.318.140€) y el jugador desapareció
+        de `get_my_players_in_market()`. El endpoint y el shape del body se
+        obtuvieron primero viendo `POST /1/market/acceptbid` disparado en
+        `performance.getEntriesByType('resource')` al aceptar (el capturador
+        de red normal, `read_network_requests`, no llegó a registrar esta
+        llamada concreta -- posible limitación con fetches muy rápidos)
+        y CONFIRMANDO el nombre de los parámetros leyendo el propio bundle
+        `main.dart.js` de la app (no minifica literales de string, mismo
+        método que documenta el docstring del módulo para otros hallazgos):
+
+            POST /1/market/acceptbid
+            body.query: {..., "bid": <bid_id>, "player_id": <player_id>}
+            respuesta real: {"answer": {"code": "api.general.ok"}, ...}
+            (la respuesta exacta de ESTA llamada en vivo no se releyó -- se
+            verificó el efecto, no el código de respuesta -- pero se asume
+            el mismo patrón `answer.code` que el resto de escrituras)
+
+        `bid_id`/`player_id`: salen de `get_my_players_in_market()`, del
+        listado propio del jugador (`item["id"]`) y de la oferta dentro de
+        `item["bids"]` (`bid["id"]`) -- ver docstring de esa función.
+
+        Ver también `reject_sale_offer()` (mismo shape de body, endpoint
+        `/1/market/rejectbid`, NO probado en vivo todavía -- solo confirmado
+        por nombre en el bundle, ver docstring del módulo).
+
+        Lanza FutmondoOfferError si `answer.code` no es "api.general.ok".
+        """
+        result = self._post("/1/market/acceptbid", {"bid": bid_id, "player_id": player_id})
+        return self._check_ok(result)
+
+    def reject_sale_offer(self, bid_id: str, player_id: str) -> dict:
+        """
+        Rechaza una oferta de compra recibida sobre un jugador propio
+        puesto en venta normal -- opuesto de `accept_sale_offer()`, mismo
+        shape de body. A diferencia de `accept_sale_offer()`, este endpoint
+        NO se ha probado en vivo todavía: se confirmó solo por nombre y
+        shape de query leyendo `main.dart.js` (ver docstring del módulo),
+        nunca se ha llamado de verdad contra la API. Usar con cautela hasta
+        confirmarlo con una prueba real (ver TODO.md #15).
+
+            POST /1/market/rejectbid
+            body.query: {..., "bid": <bid_id>, "player_id": <player_id>}
+        """
+        result = self._post("/1/market/rejectbid", {"bid": bid_id, "player_id": player_id})
         return self._check_ok(result)
 
     def pay_clause(self, player_id: str, player_slug: str, price: int) -> dict:

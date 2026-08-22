@@ -594,7 +594,7 @@ ya se activó después).
 
 ---
 
-## 15. Venta de jugadores: falta el paso de ACEPTAR una oferta recibida (crítico, sin confirmar en vivo)
+## 15. Venta de jugadores: falta el paso de ACEPTAR una oferta recibida (endpoint confirmado en vivo 2026-08-22; falta integrarlo en `jobs/run_sales.py`)
 
 **Qué pasa**: `jobs/run_sales.py` solo pone al jugador en venta
 (`list_for_sale()` -> `POST /1/market/putonmarket`) y ahí termina su
@@ -656,38 +656,65 @@ por fetch autenticado real con esas credenciales:
     endpoint es una fuente aparte, solo para ofertas de CLÁUSULA, no una
     fuente general. `get_my_players_in_market()` es la fuente correcta
     para ofertas de venta normal.
-  - Sigue SIN confirmar el endpoint para ACEPTAR (`bids[].id` parece el
-    candidato obvio a mandar como parámetro, por analogía con `bid` en
-    `cancel_bid()`, pero no se ha probado en vivo -- no se ha intentado
-    ninguna llamada de escritura no confirmada contra la cuenta real
-    para no arriesgar completar la venta con un endpoint adivinado). Se
-    intentó inyectar el token de `.env.test` en `localStorage` de
-    app.futmondo.com para capturar la petición real haciendo clic en
-    "Aceptar" desde la UI, pero la app redirige a la pantalla de login
-    (usuario/contraseña) en vez de recoger la sesión solo desde
-    localStorage -- haría falta que el usuario inicie sesión a mano en su
-    propio navegador para poder capturar esa llamada con DevTools, igual
-    que se hizo con `cancelbid`/`cancelsell`.
+  - Sigue SIN confirmar el endpoint para ACEPTAR en este momento del día
+    (ver actualización siguiente, resuelta unas horas después).
 
-**Afecta a**: `jobs/run_sales.py` (necesitará un paso nuevo -- leer
-ofertas recibidas y aceptar la mejor, quizás un job aparte tipo
-`jobs/accept_sale_offers.py`, o ampliarlo dentro del mismo job),
-`jobs/sync_data.py` (`_reconcile_sales()`, cuya lógica actual de
-"desapareció de la plantilla = vendido" puede seguir sirviendo como
-confirmación POSTERIOR una vez la venta se complete, pero no sustituye
-la aceptación activa), `clients/futmondo_client.py` (nuevo método tipo
-`get_sale_offers()`/`accept_sale_offer()`, y confirmar si
-`/1/market/rosterbids` sirve para esto).
+**Actualización 2026-08-22 (mismo día, ya resuelto) -- endpoint de aceptar confirmado en vivo de principio a fin**:
+con la misma oferta real de "jorge.gonzalez" todavía abierta, el usuario
+inició sesión con su propia cuenta en Chrome (mismo `userId` que
+`.env.test`, `6a82bc51615956527b38ef41`, token distinto -- confirma que
+el token de `.env.test` había quedado obsoleto/rotado desde la captura
+original) y se aceptó la oferta desde la UI real (Mercado -> Vender ->
+"1 ofertas" -> ✓ -> confirmar "Aceptar"), con permiso explícito para cada
+clic. Hallazgos:
+  - `performance.getEntriesByType('resource')` capturó `POST
+    /1/market/acceptbid` en el momento exacto del clic final --
+    `read_network_requests` (el capturador de red normal de esta sesión)
+    NO llegó a registrar esa llamada concreta, solo sus preflights
+    `OPTIONS`; quedó como nota para la próxima vez que haga falta
+    capturar una escritura así.
+  - El shape exacto de la query (`{championshipId, userteamId, "bid":
+    <bid_id>, "player_id": <player_id>}`) se confirmó leyendo el propio
+    `main.dart.js` de la app (no minifica literales de string, mismo
+    método ya usado para otros hallazgos de este módulo) -- búsqueda que
+    de paso reveló el resto de endpoints de escritura del mercado nunca
+    documentados hasta ahora (`rejectbid`, `acceptrosterbid`,
+    `rejectrosterbid`, `cancelrosterbid`, `auctionbid`, `directsell`,
+    `modifybid`/`modifyrosterbid`/`modifyprice`, etc. -- ver docstring
+    del módulo de `clients/futmondo_client.py` para la lista completa).
+  - Verificado el EFECTO real antes/después con `.env.test` (fetch
+    autenticado, no solo la UI): `get_information().budget` subió
+    exactamente el importe de la oferta (106.618.140€ -> 109.318.140€,
+    +2.700.000€) y "Fer Niño" desapareció de `get_my_players_in_market()`
+    -- la venta se completó de verdad, no solo la UI lo mostró.
+  - Implementado como `FutmondoClient.accept_sale_offer(bid_id,
+    player_id)` (y su opuesto `reject_sale_offer()`, este último SOLO
+    confirmado por nombre en el bundle, nunca llamado de verdad).
 
-**Dónde**: `clients/futmondo_client.py:69` (endpoint visto sin usar),
-`jobs/run_sales.py`, `jobs/sync_data.py:30-44` (`_reconcile_sales`),
-`engine/selling_strategy.py` (sin cambios necesarios en la lógica de
-DECISIÓN, esto es puramente de EJECUCIÓN tras decidir vender).
+**Lo que queda (ya no es "sin confirmar el mecanismo", es "falta
+integrarlo")**: `jobs/run_sales.py` sigue sin llamar a
+`accept_sale_offer()` -- todavía no lee `get_my_players_in_market()` para
+detectar ofertas recibidas ni decide cuál aceptar. Sin ese paso, el
+mecanismo ya confirmado no se usa solo en producción.
 
-**Siguiente paso**: la próxima vez que un jugador puesto en venta por el
-bot (o listado a mano para probar) reciba una oferta real, capturar con
-Chrome DevTools la petición real que dispara la UI de Futmondo al
-aceptarla, igual que se hizo con `cancelbid`/`cancelsell`.
+**Afecta a**: `jobs/run_sales.py` (necesita el paso nuevo -- leer
+`get_my_players_in_market()[].bids`, decidir si aceptar según algún
+criterio -- ¿aceptar siempre la mejor oferta igual o por encima del
+precio pedido?, sin decidir todavía -- y llamar a `accept_sale_offer()`;
+posiblemente un job aparte tipo `jobs/accept_sale_offers.py`, o ampliar
+el mismo job), `jobs/sync_data.py` (`_reconcile_sales()`, cuya lógica
+actual de "desapareció de la plantilla = vendido" sigue sirviendo tal
+cual como confirmación POSTERIOR, no hace falta tocarla).
+
+**Dónde**: `clients/futmondo_client.py` (`accept_sale_offer()`/
+`reject_sale_offer()`, ya implementados), `jobs/run_sales.py` (pendiente
+de integrar la llamada), `jobs/sync_data.py:30-44` (`_reconcile_sales`,
+sin cambios), `engine/selling_strategy.py` (sin cambios necesarios en la
+lógica de DECISIÓN, esto es puramente de EJECUCIÓN tras decidir vender).
+
+**Siguiente paso**: decidir e implementar el criterio de aceptación en
+`jobs/run_sales.py` (con qué margen sobre el precio pedido se acepta una
+oferta automáticamente, si hay alguno) y añadir el paso al cron.
 
 ---
 
