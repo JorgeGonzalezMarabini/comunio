@@ -39,6 +39,34 @@ def test_upsert_player_and_snapshot_market_player_always_on_market_true(tmp_db, 
     assert features[0]["id"] == "2002"
 
 
+def test_upsert_player_and_snapshot_market_player_stores_listing_price_separately_from_value(tmp_db, market_player_factory):
+    """
+    A petición del usuario (2026-08-22): el precio de salida del listado
+    ("price", lo elige quien vende) debe guardarse aparte del VM ("value",
+    siempre lo calcula Futmondo) -- necesario para que
+    engine.bidding_strategy.decide_bid() pueda compararlos.
+    """
+    market_player = market_player_factory(id=3003, value=1_000_000, price=1_800_000, is_clause=True)
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, market_player, NOW, on_market=True)
+
+    features = get_player_features(only_on_market=True)
+    assert features[0]["price"] == 1_000_000          # VM real
+    assert features[0]["listing_price"] == 1_800_000  # precio de salida, distinto del VM
+    assert features[0]["is_clause"] == 1
+
+
+def test_upsert_player_and_snapshot_roster_player_has_no_listing_price(tmp_db, roster_player_factory):
+    """El roster propio no trae "price"/"isClause" (exclusivos de market) -- deben quedar NULL."""
+    roster_player = roster_player_factory(id=1001, name="Jugador Propio", role="defensa")
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, roster_player, NOW)
+
+    features = get_player_features()
+    assert features[0]["listing_price"] is None
+    assert features[0]["is_clause"] is None
+
+
 def test_upsert_player_and_snapshot_parses_dash_as_null(tmp_db, roster_player_factory):
     """Futmondo, igual que Comunio, puede devolver "-" en pretemporada en vez de omitir el campo o dar 0."""
     player = roster_player_factory(id=1, name="J", role="defensa")

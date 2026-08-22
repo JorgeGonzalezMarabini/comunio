@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS futmondo_snapshots (
     average_points  REAL,                   -- "average.average"
     on_market       INTEGER,                 -- 0/1: roster.market (puesto en venta) o 1 fijo si viene del mercado de fichajes
     status          TEXT,                    -- valor real de Futmondo, ver clients.futmondo_client.is_injury_status()
+    listing_price   INTEGER,                 -- "price" del listado (precio de SALIDA que pone quien vende -- otro
+                                              -- manager o el "Computer" -- NO el VM); NULL fuera de mercado (roster)
+    is_clause       INTEGER,                 -- 0/1: "isClause" del listado (solo tiene sentido si listing_price no es NULL)
     recorded_at     TEXT NOT NULL
 );
 
@@ -198,6 +201,8 @@ def init_db():
     with get_connection() as conn:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "external_stats", "team_games", "INTEGER")
+        _ensure_column(conn, "futmondo_snapshots", "listing_price", "INTEGER")
+        _ensure_column(conn, "futmondo_snapshots", "is_clause", "INTEGER")
 
 
 # Última fila de futmondo_snapshots/external_stats por jugador (usa
@@ -214,7 +219,7 @@ latest_external AS (
 SELECT
     p.id, p.name, p.team, p.position,
     s.price, s.buy_price, s.points, s.last_points, s.average_points,
-    s.on_market, s.status,
+    s.on_market, s.status, s.listing_price, s.is_clause,
     e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.non_penalty_goals, e.assists, e.understat_position
 FROM players p
 LEFT JOIN latest_snapshot s ON s.player_id = p.id AND s.rn = 1

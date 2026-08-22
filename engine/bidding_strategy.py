@@ -237,6 +237,18 @@ def decide_bid(
     puja por encima de su VM; uno con score 1.0 se puja hasta el máximo de
     prima configurado.
 
+    `player["listing_price"]` (a petición del usuario, 2026-08-22): a
+    diferencia del VM, que siempre lo calcula Futmondo, el precio de SALIDA
+    de un listado lo elige quien pone al jugador en venta -- otro manager,
+    o el "Computer" (ver db.models/jobs.sync_data) -- así que nada garantiza
+    que se acerque al VM real. Si viene informado (candidato de mercado) y
+    supera el VM en más de
+    config.BIDDING_SAFETY_LIMITS["max_listing_price_over_value_pct"], se
+    descarta el candidato sin más: perseguir un precio de salida inflado no
+    tiene sentido aunque la prima calculada sobre el VM real diera para
+    cubrirlo. Ausente (None, roster propio) o por debajo de ese tope no
+    cambia nada del cálculo de abajo.
+
     Si `player` viene de apply_position_priority() (tiene "position_at_risk"/
     "would_upgrade_lineup" y "base_score"), la razón auditada deja
     constancia de qué boost(s) ya incluye el score — para poder revisar
@@ -263,6 +275,13 @@ def decide_bid(
     if price <= 0:
         # Sin precio de referencia real no hay base segura para calcular
         # una puja — mejor no pujar que inventar un importe a ciegas.
+        return None
+
+    listing_price = player.get("listing_price") or 0
+    if listing_price > price * (1 + config.BIDDING_SAFETY_LIMITS["max_listing_price_over_value_pct"]):
+        # El vendedor (otro manager, o el "Computer") pide muy por encima
+        # del VM real -- no perseguir un precio de salida inflado, ver
+        # docstring de arriba.
         return None
 
     premium_pct = max(0.0, score) * config.BIDDING_SAFETY_LIMITS["max_premium_over_price_pct"]
@@ -305,7 +324,8 @@ def decide_bid(
         "would_upgrade_lineup": bool(player.get("would_upgrade_lineup")),
         "reason": (
             f"{score_note} >= umbral={min_score_threshold}; "
-            f"precio_base={price}, prima={premium_pct:.1%} -> deseado={desired_amount}; "
+            f"precio_base={price}" + (f" (precio_salida={listing_price})" if listing_price else "") + ", "
+            f"prima={premium_pct:.1%} -> deseado={desired_amount}; "
             f"cap_seguro={cap} -> puja_final={amount}"
         ),
     }

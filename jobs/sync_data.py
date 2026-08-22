@@ -97,6 +97,17 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
     de fichajes) no traen ese campo — igual que pasaba con "onMarket" en
     Comunio (ver README, bug real corregido a raíz de esto), se mantiene
     la misma cautela aquí aunque no se haya repetido el bug.
+
+    Guarda también, por separado del VM ("value" -> columna `price`), el
+    precio de SALIDA del listado ("price" del propio `player`, columna
+    `listing_price`) y si es cláusula (`isClause` -> `is_clause`) — a
+    petición del usuario (2026-08-22): a diferencia del VM, que siempre lo
+    calcula Futmondo, el precio de salida lo elige quien pone al jugador en
+    venta (otro manager, o el "Computer"), así que hace falta guardarlo
+    aparte para poder compararlo contra el VM real en
+    engine.bidding_strategy.decide_bid(). Ambos campos son exclusivos de
+    market (ver docstring de clients/futmondo_client.py) -- quedan NULL
+    para jugadores de roster.
     """
     player_id = str(player["id"])
     position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
@@ -119,11 +130,14 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
         (player_id, player.get("name"), player.get("team"), position, now),
     )
 
+    is_clause = player.get("isClause")
+
     conn.execute(
         """
         INSERT INTO futmondo_snapshots
-            (player_id, price, buy_price, points, last_points, average_points, on_market, status, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (player_id, price, buy_price, points, last_points, average_points, on_market, status,
+             listing_price, is_clause, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             player_id,
@@ -134,6 +148,8 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
             _parse_float(average.get("average")),
             1 if (on_market if on_market is not None else player.get("market")) else 0,
             player.get("status") or None,
+            player.get("price"),  # precio de SALIDA del listado, distinto del VM -- ver docstring arriba
+            None if is_clause is None else (1 if is_clause else 0),
             now,
         ),
     )

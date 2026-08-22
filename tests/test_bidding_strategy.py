@@ -82,6 +82,33 @@ def test_decide_bid_without_real_price_returns_none():
     assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0) is None
 
 
+def test_decide_bid_rejects_listing_price_way_above_real_value():
+    """
+    A petición del usuario (2026-08-22): a diferencia del VM (siempre lo
+    calcula Futmondo), el precio de salida de un listado lo elige el
+    manager vendedor -- un listado pedido muy por encima del VM real (aquí
+    +60%, por encima del 50% de config.BIDDING_SAFETY_LIMITS
+    ["max_listing_price_over_value_pct"]) debe descartarse sin más, aunque
+    la prima calculada sobre el VM diera para pujar.
+    """
+    player = {"id": "1", "score": 1.0, "price": 1_000_000, "listing_price": 1_600_000}
+    assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0) is None
+
+
+def test_decide_bid_allows_listing_price_within_margin_over_real_value():
+    """Un precio de salida algo por encima del VM (dentro del margen configurado) no bloquea la puja."""
+    player = {"id": "1", "score": 0.5, "price": 1_000_000, "listing_price": 1_300_000}
+    decision = decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0)
+    assert decision is not None
+    assert decision["amount"] == int(player["price"] * 1.10)  # el cálculo sigue anclado al VM, no al precio de salida
+
+
+def test_decide_bid_ignores_missing_listing_price():
+    """Roster/mercado sin `listing_price` informado (None) no debe activar el rechazo."""
+    player = {"id": "1", "score": 0.5, "price": 1_000_000}
+    assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0) is not None
+
+
 def test_apply_position_priority_boosts_at_risk_position_above_higher_base_score():
     candidates = [
         {"id": "delantero_en_riesgo", "position": "DEL", "score": 0.30},

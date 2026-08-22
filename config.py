@@ -175,6 +175,20 @@ BIDDING_SAFETY_LIMITS = {
     # Componente "presupuesto" del tope dinámico: % del saldo usable que se
     # considera razonable poner en UN solo jugador (ver dynamic_player_cap).
     "max_pct_of_budget_per_player": 0.20,
+    # Cuánto puede superar el PRECIO DE SALIDA de un listado (el importe que
+    # decide quien pone al jugador en venta -- otro manager, o el "Computer"
+    # -- campo "price" de get_market(), no confundir con "value"/VM real) al
+    # VM real del jugador antes de descartar el candidato sin más (a
+    # petición del usuario, 2026-08-22): a diferencia del mercado de
+    # fichajes normal de Comunio, donde el precio siempre lo pone la
+    # plataforma, en Futmondo un manager puede pedir lo que quiera por su
+    # propio jugador -- sin este tope, un listado con precio de salida
+    # inflado muy por encima del VM real podría acabar recibiendo una puja
+    # igualmente inflada (la prima de decide_bid() se calcula sobre el VM,
+    # pero nada impedía hasta ahora comparar ese VM contra lo que el
+    # vendedor pide de verdad). 50% es un punto de partida razonado, sin
+    # calibrar todavía con datos reales.
+    "max_listing_price_over_value_pct": 0.50,
 }
 
 # Pesos del tope dinámico por jugador (engine.bidding_strategy.
