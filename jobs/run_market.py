@@ -153,7 +153,7 @@ from engine.bidding_strategy import (
 )
 from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
-from notifier import notify, track_job_run
+from notifier import notify, track_job_run, format_number
 
 
 def _persist_bid(conn, decision: dict, status: str, now: str) -> None:
@@ -449,9 +449,10 @@ def run():
 
     if not decisions and not swap_proposals:
         notify(
-            f"run_market: sin pujas esta ejecución (saldo={remaining_budget}, "
-            f"comprometido en pujas pendientes={pending_committed}, ya arriesgado hoy={already_risked}, "
-            f"candidatos evaluados={len(ranked)}, tope dinámico por jugador={player_cap})."
+            f"run_market: sin pujas esta ejecución (saldo={format_number(remaining_budget)}, "
+            f"comprometido en pujas pendientes={format_number(pending_committed)}, "
+            f"ya arriesgado hoy={format_number(already_risked)}, "
+            f"candidatos evaluados={len(ranked)}, tope dinámico por jugador={format_number(player_cap)})."
         )
         return
 
@@ -541,7 +542,10 @@ def run():
                         )
                     )
 
-    summary = [f"run_market: {len(placed)} puja(s) realizada(s). (tope dinámico por jugador: {player_cap})"]
+    summary = [
+        f"run_market: {len(placed)} puja(s) realizada(s). "
+        f"(tope dinámico por jugador: {format_number(player_cap)})"
+    ]
     for d in placed:
         tags = []
         if d.get("position_at_risk"):
@@ -549,7 +553,10 @@ def run():
         if d.get("would_upgrade_lineup"):
             tags.append("mejora el once titular")
         priority_tag = f" [{', '.join(tags)}]" if tags else ""
-        summary.append(f"  - jugador {d['player_id']}: {d['amount']} (score={d['score']:.3f}){priority_tag}")
+        summary.append(
+            f"  - jugador {d['player_id']}: {format_number(d['amount'])} "
+            f"(score={d['score']:.3f}){priority_tag}"
+        )
     if failed:
         summary.append(f"{len(failed)} puja(s) fallida(s):")
         for d, err in failed:
@@ -559,7 +566,7 @@ def run():
         for s in swapped:
             d = s["decision"]
             summary.append(
-                f"  - jugador {d['player_id']}: {d['amount']} (score={d['score']:.3f}) "
+                f"  - jugador {d['player_id']}: {format_number(d['amount'])} (score={d['score']:.3f}) "
                 f"en vez de la puja cancelada sobre {s['sacrificed_player_id']}"
             )
     if swap_failed:
@@ -581,7 +588,9 @@ def run():
             + ", ".join(str(p["id"]) for p in skipped_manager_listed)
         )
     if pending_committed:
-        summary.append(f"(comprometido en pujas pendientes sin resolver: {pending_committed})")
+        summary.append(
+            f"(comprometido en pujas pendientes sin resolver: {format_number(pending_committed)})"
+        )
 
     notify("\n".join(summary))
 

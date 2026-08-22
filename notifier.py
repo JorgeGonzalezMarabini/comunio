@@ -3,7 +3,7 @@ Notificaciones vía Telegram Bot API (gratis).
 
 Uso típico al final de cada job:
     from notifier import notify
-    notify("✅ run_market: puja de 3.2M en Jugador X (score 0.81)")
+    notify("✅ run_market: puja de 3.200.000 en Jugador X (score 0.81)")
 """
 import contextlib
 import time
@@ -13,6 +13,29 @@ import requests
 
 import config
 from db.models import record_job_run
+
+
+def format_number(value) -> str:
+    """
+    Formatea una cantidad al estilo español para que se lea de un vistazo
+    en el móvil: punto como separador de miles, coma como separador
+    decimal (p. ej. 1234567 -> "1.234.567", 1234.5 -> "1.234,5"). Sin esto
+    los importes salían en crudo (p. ej. "1234567"), muy difíciles de
+    interpretar a golpe de vista en la notificación de Telegram.
+
+    Los decimales de los `float` se recortan a 2 posiciones y los ceros
+    finales se eliminan (1234.0 -> "1.234", no "1.234,00").
+    """
+    if isinstance(value, float):
+        s = f"{value:,.2f}"
+        integer_part, _, decimal_part = s.partition(".")
+        decimal_part = decimal_part.rstrip("0")
+        s = integer_part if not decimal_part else f"{integer_part}.{decimal_part}"
+    else:
+        s = f"{value:,}"
+    # f"{:,}" usa "," para miles y "." para decimales (estilo EN) -- se
+    # intercambian con un marcador intermedio para no chocar entre sí.
+    return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
 def notify(message: str) -> bool:

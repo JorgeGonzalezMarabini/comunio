@@ -76,7 +76,7 @@ from db.models import (
     record_received_offer,
 )
 from engine.selling_strategy import apply_revaluation_premium, decide_sales
-from notifier import notify, track_job_run
+from notifier import notify, track_job_run, format_number
 
 
 def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
@@ -274,8 +274,8 @@ def run():
     report_lines.append(f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy}).")
     for d in listed:
         report_lines.append(
-            f"  - jugador {d['player_id']}: pide {d['asking_price']} "
-            f"(referencia de compra {d['purchase_price']}, {d['profit_pct']:+.1%})"
+            f"  - jugador {d['player_id']}: pide {format_number(d['asking_price'])} "
+            f"(referencia de compra {format_number(d['purchase_price'])}, {d['profit_pct']:+.1%})"
         )
     if failed:
         report_lines.append(f"{len(failed)} fallido(s):")

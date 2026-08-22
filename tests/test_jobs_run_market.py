@@ -276,7 +276,7 @@ def test_run_market_respects_pending_committed_from_local_db(tmp_db):
         run_market.run()
 
     assert "sin pujas esta ejecución" in captured[0]
-    assert "comprometido en pujas pendientes=17500000" in captured[0]
+    assert "comprometido en pujas pendientes=17.500.000" in captured[0]
     with get_connection() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM bids WHERE status != 'placed' OR player_id != '9999'").fetchone()["n"] == 0
 
@@ -312,7 +312,7 @@ def test_run_market_respects_pending_committed_from_live_market_bid_field(tmp_db
         run_market.run()
 
     assert "sin pujas esta ejecución" in captured[0]
-    assert "comprometido en pujas pendientes=17500000" in captured[0]
+    assert "comprometido en pujas pendientes=17.500.000" in captured[0]
 
 
 def test_run_market_skips_candidate_with_already_open_local_bid(tmp_db):
