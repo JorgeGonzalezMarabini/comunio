@@ -8,14 +8,22 @@ on:
     # puesto en venta tiene su propio temporizador individual (1, 2 o 3
     # días configurable por el admin de la liga, ver también
     # `expirationDate` en clients/futmondo_client.py:get_market()). No hay
-    # "cierre real" al que ajustar este cron: con el listado más corto (1
-    # día), 2 pasadas/día ya da margen de sobra para no perder ningún
-    # candidato entre que sale y que expira.
+    # "cierre real" al que ajustar este cron -- ni siquiera con el listado
+    # más corto (1 día) haría falta más de 2 pasadas/día para no perder
+    # ningún candidato entre que sale y que expira.
+    #
+    # Subido de 2 a 8 pasadas/día (a petición del usuario, 2026-08-22, tras
+    # TODO.md #15 -- ver run_sales.yml): aunque el margen frente a listados
+    # de compra sigue siendo el mismo de siempre, correr más seguido
+    # también deja que run_market reaccione antes al presupuesto y a la
+    # plaza de plantilla que libera una venta aceptada por run_sales (1h
+    # después de cada pasada de éste, mismo patrón de siempre).
+    #
     # Minuto 6 (no en punto), mismo motivo que sync_data.yml: GitHub retrasa
     # los cron programados EN PUNTO por congestión (minuto más solicitado de
     # toda la plataforma). Sin deadline externo real (ver README, "Delay de
     # GitHub Actions y horas críticas"), es seguro mover el minuto.
-    - cron: "6 8,20 * * *"  # dos veces al día -- margen de sobra frente a listados de 1-3 días
+    - cron: "6 8,10,12,14,16,18,20,22 * * *"  # cada 2h en horario activo (antes 2 veces/día)
 
 permissions:
   contents: write

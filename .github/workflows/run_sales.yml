@@ -6,7 +6,15 @@ on:
     # Minuto 6 (no en punto), mismo motivo que sync_data.yml/run_market.yml:
     # GitHub retrasa los cron EN PUNTO por congestión. Se conserva el hueco
     # de 1h frente a run_market.
-    - cron: "6 9,21 * * *"  # dos veces al día, poco después de run_market
+    #
+    # Subido de 2 a 8 pasadas/día (a petición del usuario, 2026-08-22, TODO.md
+    # #15): desde que run_sales acepta solo ofertas recibidas
+    # (`jobs.run_sales._process_received_offers()`, ver docstring del
+    # módulo), una oferta real de otro manager podía quedar sin aceptar
+    # hasta 12h (el hueco de las 2 pasadas/día de antes) -- tiempo de sobra
+    # para que se arrepienta o para simplemente demorar el ingreso real.
+    # Con 8 pasadas/día el margen máximo baja a ~2h.
+    - cron: "6 9,11,13,15,17,19,21,23 * * *"  # cada 2h, 1h después de cada run_market
 
 permissions:
   contents: write

@@ -721,8 +721,15 @@ Criterio de aceptación (a petición del usuario, 2026-08-22, sin más
 margen todavía): `jobs/run_sales.py` acepta SIEMPRE la oferta más alta
 que SUPERE el precio de salida pedido — si ninguna oferta lo supera, el
 listado se deja tal cual esperando una mejor. Este paso corre ANTES de
-decidir nuevos listados en cada ejecución (dos veces al día, ver
-`run_sales.yml`), leyendo `get_my_players_in_market()[].bids`.
+decidir nuevos listados en cada ejecución, leyendo
+`get_my_players_in_market()[].bids`.
+
+Precisamente por este paso, `run_sales.yml` (y `run_market.yml`, para que
+libere presupuesto/plaza igual de rápido tras una venta) pasaron de 2 a 8
+pasadas/día (cada 2h en horario activo, mismo día) — con solo 2 pasadas,
+una oferta real podía quedar sin aceptar hasta 12h; ver "Delay de GitHub
+Actions y horas críticas" más abajo para el detalle completo del cambio
+de cron.
 
 Cada oferta vista (aceptada o no, una sola vez por su id real de
 Futmondo) se registra en `db.models.received_sale_offers` — pensado
@@ -871,7 +878,7 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
 4. Los 5 workflows (`sync_data` cada hora, `run_market` y `run_sales`
-   2x/día, `set_lineup` viernes cada 20 min 15:23-19:43 UTC, `manage_substitutes` cada 20 min
+   cada 2h en horario activo, `set_lineup` viernes cada 20 min 15:23-19:43 UTC, `manage_substitutes` cada 20 min
    de viernes a lunes) ya tienen el `schedule:` activado — correrán solos
    en cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
    vuelta al repo al terminar (si no, cada ejecución perdería lo
@@ -990,9 +997,13 @@ Ranking de criticidad actualizado (de más a menos sensible al delay):
    podrían acercarse a ese límite. Mitigado (no eliminado) con el cambio de
    minuto de este mismo apartado.
 3. **`run_market`** (BAJO, corregido — ver arriba) — sin cierre diario
-   real al que llegar tarde; 2x/día da margen de sobra frente a listados
-   de 1-3 días.
-4. **`run_sales`** (BAJO) — 2x/día, 1h después de `run_market` a
+   real al que llegar tarde; ya daba margen de sobra frente a listados de
+   1-3 días con 2x/día, así que subir a 8x/día (2026-08-22, TODO.md #15 —
+   ver "Venta: aceptar ofertas recibidas") no cambia este análisis, solo
+   reduce la latencia hasta reaccionar al presupuesto/plaza liberados por
+   una venta.
+4. **`run_sales`** (BAJO) — 8x/día (antes 2x/día, mismo motivo que
+   `run_market` de arriba), 1h después de cada pasada de `run_market` a
    propósito. Un delay de ~30 min en cualquiera de los dos no invierte el
    orden porque el hueco entre ambos (1h) es mayor que el delay típico
    observado.

@@ -744,6 +744,16 @@ ignora, no se rechaza explícitamente. Con datos acumulados en
 `received_sale_offers`, revisar si el cálculo de `asking_price` necesita
 ajuste (ver README).
 
+**Actualización 2026-08-22 (misma tarde) -- `run_market`/`run_sales` de 2 a 8 pasadas/día**:
+consecuencia directa de que aceptar una oferta ya no es automático --
+con solo 2 pasadas/día una oferta real podía quedar sin aceptar hasta
+12h. A petición del usuario, ambos crons (`run_sales.yml` y, para que
+`run_market` reaccione igual de rápido al presupuesto/plaza que libera
+una venta, también `run_market.yml`) pasan a cada 2h en horario activo
+(8,10,...,22 UTC / 9,11,...,23 UTC, manteniendo el hueco de 1h entre
+ambos de siempre). Ver "Delay de GitHub Actions y horas críticas" en
+README.md, actualizado con el nuevo ranking de criticidad.
+
 ---
 
 ## 16. ~~`configuration.numberOfPlayers` confundido con el máximo de plantilla~~ (bug real en producción, confirmado y arreglado, 2026-08-22)
