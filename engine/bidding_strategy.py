@@ -409,14 +409,19 @@ def find_cancel_swap_candidates(
 ) -> list[dict]:
     """
     Decide qué pujas abiertas merece la pena cancelar para poder pujar por
-    un candidato mejor bloqueado solo por presupuesto/tope (ver TODO.md
-    #13 y clients.futmondo_client.cancel_bid). Función pura: no llama a
-    Futmondo ni toca la BD -- jobs/run_market.py ejecuta las propuestas.
+    un candidato mejor bloqueado por presupuesto/tope o por plazas de
+    plantilla (ver TODO.md #13 y clients.futmondo_client.cancel_bid).
+    Cancelar+pujar es neutro en plazas (1 puja abierta menos, 1 puja nueva
+    más), así que sirve igual sea cual sea la razón concreta del bloqueo.
+    Función pura: no llama a Futmondo ni toca la BD -- jobs/run_market.py
+    ejecuta las propuestas.
 
     `blocked_candidates`: candidatos ya rankeados (score descendente, mismo
     orden que decide_bids_for_market) que `is_price_worth_bidding()` acepta
     pero que NO están en las decisiones de esta pasada -- bloqueados por
-    límite, no por calidad. Cada uno necesita "id"/"score"/"price".
+    límite (presupuesto, tope dinámico o `max_bids`/plazas de plantilla,
+    ver jobs/run_market.py), no por calidad. Cada uno necesita
+    "id"/"score"/"price".
 
     `sacrificable_bids`: pujas locales abiertas con su id REAL de oferta de
     Futmondo ya resuelto por el llamador (cruzando `db.models.get_open_bids()`
@@ -476,8 +481,8 @@ def find_cancel_swap_candidates(
                     "reason": (
                         f"candidato {candidate.get('id')} score={candidate.get('score', 0):.3f} supera "
                         f"en >= {min_margin} a la puja abierta sobre {sacrifice['player_id']} "
-                        f"(score={sacrifice['score']:.3f}); bloqueado por límite de presupuesto/tope, "
-                        "no por calidad"
+                        f"(score={sacrifice['score']:.3f}); bloqueado por límite de presupuesto/tope o "
+                        "de plazas en plantilla, no por calidad"
                     ),
                 }
             )

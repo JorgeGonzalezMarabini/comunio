@@ -278,10 +278,11 @@ def run():
 
     # Candidatos buenos (no descartados por score/precio, ver
     # is_price_worth_bidding) que decide_bids_for_market NO pujó -- es
-    # decir, bloqueados por presupuesto/tope, no por calidad. Se calculan
-    # SIEMPRE (incluso si `decisions` está vacío) porque el caso más útil
-    # del swap es justo cuando el presupuesto está tan ajustado que nada
-    # nuevo entra por la vía normal -- ver TODO.md #13.
+    # decir, bloqueados por presupuesto/tope O por `max_bids` (plazas de
+    # plantilla, ver available_roster_slots arriba), no por calidad. Se
+    # calculan SIEMPRE (incluso si `decisions` está vacío) porque el caso
+    # más útil del swap es justo cuando presupuesto o plazas están tan
+    # ajustados que nada nuevo entra por la vía normal -- ver TODO.md #13.
     decided_ids = {d["player_id"] for d in decisions}
     blocked_candidates = [c for c in prioritized if c["id"] not in decided_ids and is_price_worth_bidding(c)]
     swap_proposals = []
