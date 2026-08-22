@@ -577,16 +577,41 @@ evaluándose con normalidad, solo que con una penalización de score más
 dura que antes (`config.EVALUATOR_WEIGHTS["doubt_penalty"] = 0.20`, el
 doble del antiguo `injury_penalty`).
 
-Cambio deliberadamente acotado a la decisión de FICHAJE: `engine/
-squad_risk.py` y `engine/lineup_optimizer.py` siguen usando
-`is_injury_status()` sin distinguir gravedad (solo sano/no-sano) — ahí no
-tiene sentido "descartar" a un jugador ya propio de la plantilla, y esos
-módulos ya tenían su propio criterio razonado (sanos primero, margen de
-suplentes, etc., ver secciones de arriba). `config.LINEUP_EVALUATOR_WEIGHTS`
-tampoco cambia: sigue con `injury_penalty = 0.10` sobre
-`is_injured_or_doubtful` (duda Y lesión por igual), igual que siempre.
-`engine/selling_strategy.py` sí distingue gravedad desde el siguiente
-cambio (ver justo abajo).
+Cambio deliberadamente acotado a la decisión de FICHAJE en esta primera
+iteración: `engine/squad_risk.py` y `engine/lineup_optimizer.py` seguían
+usando `is_injury_status()` sin distinguir gravedad (solo sano/no-sano).
+`config.LINEUP_EVALUATOR_WEIGHTS` tampoco cambia: sigue con
+`injury_penalty = 0.10` sobre `is_injured_or_doubtful` (duda Y lesión por
+igual), igual que siempre. `engine/selling_strategy.py` y (más abajo)
+`engine/lineup_optimizer.py` sí distinguen gravedad, en cambios
+posteriores.
+
+## Alineación: duda por delante de lesión confirmada, no en el mismo grupo
+
+A petición del usuario (2026-08-22): `engine/lineup_optimizer.
+_rank_healthy_first()` — usada tanto por `pick_lineup()` (titulares) como
+por `pick_substitutes()` (suplente designado) — agrupaba duda y lesión
+confirmada en un único grupo "no sano", ordenado solo por
+`expected_score` entre sí. Pero un "doubt" todavía puede acabar jugando,
+mientras que una lesión confirmada normalmente es baja segura — no
+debería hacer falta que un lesionado tenga peor score que un "doubt" para
+perder el puesto frente a él.
+
+Ahora `_rank_healthy_first()` ordena en TRES niveles en vez de dos: sano
+> en duda > lesión confirmada, cada uno ordenado por `expected_score`
+entre sí. Si no queda nadie sano en una posición, se prefiere siempre al
+mejor "doubt" disponible antes que a CUALQUIER lesionado confirmado,
+aunque el lesionado tenga mejor score. Solo si tampoco queda nadie en
+duda se recurre a la lesión confirmada — el mismo criterio conservador de
+siempre (mejor cubrir el hueco que dejarlo vacío), solo que ahora en tres
+escalones en vez de dos.
+
+`build_substitution_changes()` (decidir si sustituir a un titular ya
+puesto, cerca de la jornada) NO cambia — sigue tratando duda y lesión
+confirmada igual (`is_injury_status()`, ambas disparan la sustitución):
+esa función responde a una pregunta distinta ("¿este titular está
+confirmado fuera?"), no a una prioridad entre varios candidatos
+disponibles.
 
 ## Venta: corte de pérdidas genérico, más agresivo en lesión confirmada
 

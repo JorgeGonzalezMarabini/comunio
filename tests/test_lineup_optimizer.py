@@ -65,6 +65,30 @@ def test_pick_lineup_falls_back_to_injured_when_no_healthy_left():
     assert set(pid for pid in lineup["starters"] if pid.startswith("del")) == {"del0", "del1"}
 
 
+def test_pick_lineup_prefers_doubtful_over_confirmed_injury_when_no_healthy_left():
+    """
+    A petición del usuario (2026-08-22): sin nadie sano, se prefieren los
+    "doubt" (todavía pueden jugar) sobre lesión CONFIRMADA -- aunque el
+    lesionado tenga mejor expected_score. Antes ambos formaban un único
+    grupo "no sano" sin distinguir entre sí.
+    """
+    squad = [{"id": "por1", "position": "POR", "expected_score": 0.9}]
+    squad += [{"id": f"def{i}", "position": "DEF", "expected_score": 0.5 + i * 0.01} for i in range(4)]
+    squad += [{"id": f"med{i}", "position": "MED", "expected_score": 0.5 + i * 0.01} for i in range(4)]
+    # 2 huecos de DEL, 3 candidatos, ninguno sano -- el lesionado tiene el
+    # mejor score de los tres, pero debe quedar en el banquillo: los dos
+    # de solo duda cubren los huecos primero, sin importar su score.
+    squad += [
+        {"id": "del_lesionado", "position": "DEL", "expected_score": 0.99, "status": "injured2"},
+        {"id": "del_duda1", "position": "DEL", "expected_score": 0.10, "status": "doubt"},
+        {"id": "del_duda2", "position": "DEL", "expected_score": 0.05, "status": "doubt"},
+    ]
+    lineup = pick_lineup(squad, formation="4-4-2")
+    del_starters = [pid for pid in lineup["starters"] if pid.startswith("del")]
+    assert set(del_starters) == {"del_duda1", "del_duda2"}
+    assert "del_lesionado" in lineup["bench"]
+
+
 def test_pick_lineup_raises_when_not_enough_players():
     squad = _squad_442()[:-1]  # falta un delantero
     with pytest.raises(ValueError):
@@ -321,6 +345,20 @@ def test_pick_substitutes_falls_back_to_injured_when_no_healthy_left():
     bench = [{"id": "def_lesionado", "position": "DEF", "expected_score": 0.9, "status": "injured"}]
     substitutes = pick_substitutes(bench)
     assert substitutes["DEF"] == "def_lesionado"
+
+
+def test_pick_substitutes_prefers_doubtful_over_confirmed_injury():
+    """
+    A petición del usuario (2026-08-22): sin ningún sano, el suplente
+    designado prefiere "doubt" (todavía puede jugar) sobre lesión
+    CONFIRMADA -- aunque el lesionado tenga mejor expected_score.
+    """
+    bench = [
+        {"id": "def_lesionado", "position": "DEF", "expected_score": 0.9, "status": "injured2"},
+        {"id": "def_duda", "position": "DEF", "expected_score": 0.1, "status": "doubt"},
+    ]
+    substitutes = pick_substitutes(bench)
+    assert substitutes["DEF"] == "def_duda"
 
 
 def test_build_bench_changes_uses_fixed_slots_and_skips_missing_positions():

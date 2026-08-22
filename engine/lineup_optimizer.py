@@ -9,7 +9,7 @@ apply_fixture_difficulty() (dato real: clients.laliga_stats_client.
 next_match_difficulty(), basado en el forecast de Understat).
 """
 import config
-from clients.futmondo_client import is_injury_status
+from clients.futmondo_client import is_confirmed_injured_status, is_doubtful_status, is_injury_status
 
 # formación -> nº de jugadores por posición (sin contar portero, que es fijo).
 #
@@ -234,8 +234,20 @@ def build_lineup_changes(
 def _rank_healthy_first(candidates: list[dict]) -> list[dict]:
     """
     Ordena `candidates` por `expected_score` descendente, pero SIEMPRE
-    primero los sanos (`is_injury_status(status)` False) y solo después
-    los lesionados/en duda — cada grupo ordenado por score entre sí.
+    agrupados primero por probabilidad de jugar de verdad esta jornada
+    (tres niveles, cada uno ordenado por score entre sí):
+      1. sanos (ni "doubt" ni lesión confirmada)
+      2. en duda ("doubt" — todavía puede llegar a jugar)
+      3. lesión CONFIRMADA (`is_confirmed_injured_status()` — normalmente
+         baja segura, la menos fiable de las tres)
+
+    A petición del usuario (2026-08-22): antes duda y lesión confirmada
+    formaban un único grupo "no sano", sin distinguir entre sí — pero un
+    "doubt" sí puede acabar jugando, mientras que una lesión confirmada
+    normalmente no. Separarlos en dos niveles hace que, a falta de un sano
+    disponible, se prefiera siempre al que tiene más probabilidad real de
+    jugar (ver `is_doubtful_status()`/`is_confirmed_injured_status()` en
+    `clients/futmondo_client.py`).
 
     Por qué hace falta esto además de la penalización de
     `config.EVALUATOR_WEIGHTS["injury_penalty"]`: esa penalización es
@@ -246,14 +258,19 @@ def _rank_healthy_first(candidates: list[dict]) -> list[dict]:
     verdad haga falta sustituir a alguien ahí (ver
     `build_substitution_changes()`, que descarta al suplente asignado si
     también está lesionado, sin sustituir a nadie en ese caso). Un
-    jugador lesionado/en duda solo se elige aquí si no queda NINGÚN sano
+    jugador que no está sano solo se elige aquí si no queda NINGÚN sano
     disponible en esa posición — mejor eso que dejar la posición sin
     cobertura (mismo criterio conservador que `engine/squad_risk.py`).
     """
     healthy = [p for p in candidates if not is_injury_status(p.get("status"))]
-    injured = [p for p in candidates if is_injury_status(p.get("status"))]
+    doubtful = [p for p in candidates if is_doubtful_status(p.get("status"))]
+    confirmed_injured = [p for p in candidates if is_confirmed_injured_status(p.get("status"))]
     by_score = lambda p: p["expected_score"]
-    return sorted(healthy, key=by_score, reverse=True) + sorted(injured, key=by_score, reverse=True)
+    return (
+        sorted(healthy, key=by_score, reverse=True)
+        + sorted(doubtful, key=by_score, reverse=True)
+        + sorted(confirmed_injured, key=by_score, reverse=True)
+    )
 
 
 def pick_lineup(squad: list[dict], formation: str = None) -> dict:
@@ -269,11 +286,12 @@ def pick_lineup(squad: list[dict], formation: str = None) -> dict:
     apply_fixture_difficulty() de este mismo módulo), no aquí — pick_lineup
     solo selecciona dado ese número ya calculado.
 
-    Por posición, se prefiere siempre a los jugadores sanos sobre los
-    lesionados/en duda (ver `_rank_healthy_first()`), y solo dentro de
-    cada grupo se ordena por `expected_score`; un lesionado solo entra de
+    Por posición, se prefiere siempre sano > en duda > lesión confirmada
+    (ver `_rank_healthy_first()`), y solo dentro de cada grupo se ordena
+    por `expected_score`; un jugador que no está sano solo entra de
     titular si no hay suficientes sanos en esa posición para cubrir los
-    huecos de la formación.
+    huecos de la formación, y entre los que no están sanos se prefiere
+    siempre "doubt" (todavía puede jugar) sobre lesión confirmada.
     """
     formation = formation or config.DEFAULT_FORMATION
     slots = FORMATIONS.get(formation)
@@ -334,13 +352,14 @@ def pick_substitutes(bench_players: list[dict]) -> dict:
     de banquillo por posición (ver BENCH_SLOT_BY_POSITION), no una lista
     donde meter a varios.
 
-    Igual que en pick_lineup(), se prefiere siempre a un sano sobre un
-    lesionado/en duda (ver `_rank_healthy_first()`) antes de mirar
+    Igual que en pick_lineup(), se prefiere siempre sano > en duda > lesión
+    confirmada (ver `_rank_healthy_first()`) antes de mirar
     `expected_score` — un suplente designado que está él mismo lesionado
     no sirve de nada el día que haga falta usarlo (ver
     `build_substitution_changes()`, que lo descarta en ese caso sin
-    sustituir a nadie). Solo se elige un lesionado si es el único
-    candidato que queda en esa posición.
+    sustituir a nadie). Solo se elige alguien que no está sano si es el
+    único candidato que queda en esa posición, y entre esos se prefiere
+    "doubt" (todavía puede jugar) sobre lesión confirmada.
 
     Devuelve {"POR": id_o_None, "DEF": ..., "MED": ..., "DEL": ...} — None
     si no queda ningún jugador de esa posición en el banquillo (normal:
