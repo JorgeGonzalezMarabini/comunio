@@ -136,7 +136,11 @@ def test_decide_sales_allows_selling_injured_profitable_player_freely():
 
 
 def test_decide_sales_ignores_small_loss_below_any_threshold():
-    """Una pérdida pequeña (por debajo de CUALQUIER umbral) no fuerza la venta."""
+    """
+    Una pérdida pequeña (por debajo de CUALQUIER umbral de pérdida) no
+    activa el corte de pérdidas -- pero como sigue siendo lesión CONFIRMADA,
+    se vende igualmente por la vía de venta incondicional (ver más abajo).
+    """
     squad = _full_442_squad()
     squad[9]["status"] = "injured2"  # Delantero0, lesión confirmada
     bought_by_bot = {str(squad[9]["id"]): 500_000}
@@ -146,7 +150,9 @@ def test_decide_sales_ignores_small_loss_below_any_threshold():
         squad, formation="4-4-2", bought_by_bot=bought_by_bot,
         min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10,
     )
-    assert decisions == []
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert "se vende siempre" in decisions[0]["reason"]
 
 
 def test_decide_sales_confirmed_injury_cuts_losses_at_lower_threshold_than_generic():
@@ -296,8 +302,13 @@ def test_decide_sales_sells_confirmed_injured_player_overconcentrating_capital()
     assert "concentración de capital" in decisions[0]["reason"]
 
 
-def test_decide_sales_ignores_confirmed_injured_player_below_concentration_threshold():
-    """Un lesionado confirmado que NO concentra suficiente capital (y sin plusvalía/pérdida relevante) no se vende."""
+def test_decide_sales_sells_confirmed_injured_player_below_concentration_threshold_too():
+    """
+    Un lesionado confirmado que NO concentra suficiente capital (y sin
+    plusvalía/pérdida relevante) se vende igualmente -- la vía de
+    concentración ya no es la única que cubre la lesión confirmada, la
+    venta incondicional (ver docstring del módulo) aplica siempre.
+    """
     squad = _full_442_squad()
     squad[9]["status"] = "injured2"
     # Sube un poco de valor, pero no lo bastante para superar el 15% del capital total.
@@ -305,7 +316,10 @@ def test_decide_sales_ignores_confirmed_injured_player_below_concentration_thres
     bought_by_bot = {str(squad[9]["id"]): 580_000}  # +3.4%
 
     decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
-    assert decisions == []
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert "concentración de capital" not in decisions[0]["reason"]  # no llegó a activar esa vía
+    assert "se vende siempre" in decisions[0]["reason"]
 
 
 def test_decide_sales_concentration_rule_does_not_apply_to_doubt_status():
@@ -335,8 +349,10 @@ def test_decide_sales_concentration_rule_does_not_apply_to_healthy_player():
 def test_decide_sales_concentration_counts_budget_as_part_of_total_capital():
     """
     Un presupuesto grande diluye la concentración -- el mismo lesionado que
-    se vendía sin presupuesto (test de arriba) deja de superar el umbral si
-    se añade bastante `budget` al capital total.
+    se vendía por concentración sin presupuesto (test de arriba) deja de
+    superar ESE umbral si se añade bastante `budget` al capital total. Pero
+    sigue siendo lesión CONFIRMADA, así que se vende igual por la vía
+    incondicional (ver más abajo) -- solo cambia el motivo mostrado.
     """
     squad = _full_442_squad()
     squad[9]["status"] = "injured2"
@@ -346,7 +362,10 @@ def test_decide_sales_concentration_counts_budget_as_part_of_total_capital():
     decisions = decide_sales(
         squad, formation="4-4-2", bought_by_bot=bought_by_bot, budget=20_000_000, **_CONCENTRATION_KWARGS
     )
-    assert decisions == []
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert "concentración de capital" not in decisions[0]["reason"]  # diluida por el budget, no fue esta vía
+    assert "se vende siempre" in decisions[0]["reason"]
 
 
 def test_decide_sales_concentration_rule_ignores_bench_margin_like_any_confirmed_injury():
@@ -357,6 +376,66 @@ def test_decide_sales_concentration_rule_ignores_bench_margin_like_any_confirmed
     bought_by_bot = {str(squad[0]["id"]): 1_900_000}
 
     decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought_by_bot, **_CONCENTRATION_KWARGS)
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[0]["id"]
+
+
+# --- Venta SIEMPRE para lesión confirmada (a petición del usuario,
+# 2026-08-22, caso real: Mendy) ---
+#
+# Generalización de las dos vías de lesión de arriba: un lesionado
+# CONFIRMADO se vende sin condiciones, aunque ni pierda valor suficiente
+# para el corte de pérdidas NI concentre suficiente capital -- justo el
+# hueco que dejaban esas dos vías.
+
+
+def test_decide_sales_force_sells_confirmed_injury_with_zero_profit_and_no_concentration():
+    """
+    Caso real (Mendy, 2026-08-22): lesión confirmada, profit_pct=0% (recién
+    backfilleado, sin plusvalía ni pérdida) y sin concentrar capital
+    suficiente -- ninguna de las otras vías se activa, pero se vende
+    igualmente por ser lesión confirmada.
+    """
+    squad = _full_442_squad()
+    squad[9]["status"] = "injured2"  # Delantero0, lesión confirmada
+    bought_by_bot = {str(squad[9]["id"]): 500_000}
+    squad[9]["value"] = 500_000  # 0% -- ni rentable, ni pérdida, ni concentración
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10, injury_concentration_max_pct=0.15,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert decisions[0]["profit_pct"] == 0.0
+    assert "se vende siempre" in decisions[0]["reason"]
+
+
+def test_decide_sales_does_not_force_sell_doubt_status():
+    """"doubt" (no confirmada) queda fuera de la venta incondicional -- todavía puede llegar a jugar."""
+    squad = _full_442_squad()
+    squad[9]["status"] = "doubt"
+    bought_by_bot = {str(squad[9]["id"]): 500_000}
+    squad[9]["value"] = 500_000  # 0%, mismo caso que el test anterior pero solo "doubt"
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10, injury_concentration_max_pct=0.15,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_force_injury_sale_ignores_bench_margin_even_as_only_player_in_position():
+    """La venta incondicional por lesión confirmada tampoco respeta margen de banquillo -- puede ser el único de su posición."""
+    squad = _full_442_squad()
+    squad[0]["status"] = "injured2"  # Portero, único de su posición
+    bought_by_bot = {str(squad[0]["id"]): 500_000}
+    squad[0]["value"] = 500_000  # 0%
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10, max_loss_pct=0.20, injury_max_loss_pct=0.10, injury_concentration_max_pct=0.15,
+    )
     assert len(decisions) == 1
     assert decisions[0]["player_id"] == squad[0]["id"]
 
@@ -456,7 +535,13 @@ def test_decide_sales_market_upgrade_respects_bench_margin():
 
 
 def test_decide_sales_market_upgrade_does_not_apply_to_confirmed_injury():
-    """Lesión confirmada: su calidad actual no es representativa mientras no pueda jugar -- nunca se vende solo por esta vía."""
+    """
+    Lesión confirmada: su calidad actual no es representativa mientras no
+    pueda jugar -- la vía de oportunidad de mercado nunca es el motivo para
+    él. Pero al ser lesión CONFIRMADA sí se vende, por la vía incondicional
+    (ver docstring del módulo) -- con un reason que lo deja claro, no el de
+    oportunidad de mercado.
+    """
     squad = _full_442_squad()
     squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
     squad[1]["status"] = "injured2"  # Defensa0 (id=10)
@@ -472,7 +557,10 @@ def test_decide_sales_market_upgrade_does_not_apply_to_confirmed_injury():
         own_squad_features=own_squad_features,
         market_candidates=market_candidates,
     )
-    assert decisions == []
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 10
+    assert "oportunidad de mercado" not in decisions[0]["reason"]
+    assert "se vende siempre" in decisions[0]["reason"]
 
 
 # --- compute_revaluation_premium_pct / apply_revaluation_premium (2026-08-22) ---

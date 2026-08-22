@@ -67,6 +67,21 @@ CONFIRMADA cuyo valor supera `injury_concentration_max_pct`
 venta, sin mirar plusvalía/pérdida en absoluto. Como con las dos vías
 anteriores, "doubt" queda fuera — todavía puede llegar a jugar.
 
+Venta SIEMPRE para lesión CONFIRMADA (a petición del usuario, 2026-08-22,
+generalización de la vía anterior -- caso real detectado: Mendy, lesión
+confirmada, sin pérdida ni concentración de capital suficiente para
+activar ninguna de las dos vías de arriba, se quedaba sin vender
+indefinidamente): un jugador con lesión CONFIRMADA es sencillamente
+INSERVIBLE mientras dure -- no puede jugar ni puntuar -- y ocupa una plaza
+de plantilla que podría usarse para fichar a otro que sí sume. Las dos
+vías anteriores (corte de pérdidas agravado, concentración de capital) ya
+apuntaban a este mismo problema pero solo lo resolvían en los casos donde
+además cruzaba un umbral de pérdida o de tamaño; esta vía es la
+generalización sin condiciones: se vende siempre, sin mirar
+rentabilidad/pérdida/concentración en absoluto. Como con las dos vías de
+lesión anteriores, "doubt" queda fuera — todavía puede llegar a jugar, así
+que su valor actual sigue siendo información útil y no se le fuerza nada.
+
 Oportunidad de mercado / plaza escasa (a petición del usuario, 2026-08-22,
 tras el límite de plantilla de `jobs/run_market.py`): las tres vías de
 arriba solo miran RENTABILIDAD de la operación o concentración de
@@ -172,7 +187,7 @@ def decide_sales(
     alineación propio del jugador antes de venderlo solo por esto.
 
     Devuelve una decisión por cada jugador que cumpla CUALQUIERA de estas
-    cuatro condiciones (Y cuya posición siga teniendo margen de suplentes
+    cinco condiciones (Y cuya posición siga teniendo margen de suplentes
     sanos después de la venta, salvo que ya esté lesionado/en duda —
     ver más abajo):
       1. Su revalorización (`value` vs. el precio pagado en
@@ -185,7 +200,14 @@ def decide_sales(
          `injury_concentration_max_pct` del capital total — concentración
          de capital, solo para lesión confirmada (no "doubt"), sin mirar
          plusvalía/pérdida.
-      4. No está lesionado/en duda, y el mejor candidato de mercado en su
+      4. Tiene lesión CONFIRMADA (no "doubt") — se vende SIEMPRE, sin
+         mirar rentabilidad/pérdida/concentración en absoluto: es
+         inservible mientras dure y ocupa una plaza que podría liberarse
+         para fichar a otro (ver docstring del módulo). Esta vía por sí
+         sola ya cubre a cualquier lesionado confirmado; las vías 2 y 3
+         siguen aquí porque dan un motivo más específico en el `reason`
+         cuando también aplican.
+      5. No está lesionado/en duda, y el mejor candidato de mercado en su
          misma posición supera su score de alineación en
          `upgrade_available_min_margin` — oportunidad de mercado, solo si
          `own_squad_features`/`market_candidates` vienen informados.
@@ -279,6 +301,12 @@ def decide_sales(
         concentration_pct = (current_price / total_capital) if total_capital > 0 else 0.0
         overconcentrated = is_confirmed_injured and concentration_pct >= injury_concentration_max_pct
 
+        # Venta SIEMPRE para lesión CONFIRMADA (ver docstring del módulo):
+        # inservible mientras dure, ocupa una plaza -- se vende sin mirar
+        # rentabilidad/pérdida/concentración. "doubt" queda fuera, igual
+        # que en las dos vías de lesión de arriba.
+        force_sell_confirmed_injury = is_confirmed_injured
+
         # Oportunidad de mercado: nunca para lesionado/en duda (ver
         # docstring del módulo, misma razón que la concentración de
         # capital de arriba solo mira lesión confirmada -- la calidad
@@ -297,6 +325,7 @@ def decide_sales(
             profit_pct < min_profit_pct
             and not cutting_losses
             and not overconcentrated
+            and not force_sell_confirmed_injury
             and not market_upgrade_available
         ):
             continue
@@ -316,6 +345,7 @@ def decide_sales(
                 market_upgrade_available,
                 own_lineup_score,
                 best_available_lineup_score,
+                force_sell_confirmed_injury,
             )
         )
 
@@ -350,6 +380,7 @@ def decide_sales(
         market_upgrade_available,
         own_lineup_score,
         best_available_lineup_score,
+        force_sell_confirmed_injury,
     ) in candidates:
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
 
@@ -387,6 +418,13 @@ def decide_sales(
                 f"({concentration_pct:.1%} del capital total del equipo) >= umbral "
                 f"{injury_concentration_max_pct:.1%}; se vende sin mirar plusvalía/pérdida ({profit_pct:+.1%}), "
                 "para no tener capital inmovilizado en un jugador que no se puede usar"
+            )
+        elif force_sell_confirmed_injury:
+            reason = (
+                f"lesión confirmada: jugador inservible mientras no pueda jugar ni puntuar (vale "
+                f"{player.get('value', 0)}, {profit_pct:+.1%} respecto al precio de referencia {purchase_price}); "
+                "se vende siempre, sin mirar rentabilidad/pérdida/concentración, para liberar la plaza y poder "
+                "fichar a otro en su lugar"
             )
         else:
             reason = (
