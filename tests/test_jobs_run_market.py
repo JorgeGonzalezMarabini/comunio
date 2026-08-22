@@ -104,7 +104,7 @@ def test_run_market_business_rejection_is_audited_as_failed_without_crashing(tmp
 def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
     """
     Regresión (2026-08-22, 11 pujas fallidas en vivo): si la plantilla ya
-    tiene `configuration.playersInRoster` jugadores (el máximo REAL de la
+    tiene `configuration.maxPlayersInRoster` jugadores (el máximo REAL de la
     liga -- NO `configuration.numberOfPlayers`, que es el número de
     jugadores INICIALES, ver docstring de clients/futmondo_client.py),
     Futmondo rechaza CUALQUIER puja con
@@ -119,7 +119,7 @@ def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
             return {"answer": [{"id": str(i)} for i in range(15)]}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000, "configuration": {"playersInRoster": 15}}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 15}}}
 
         def get_market(self):
             return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
@@ -145,7 +145,7 @@ def test_run_market_ignores_numberOfPlayers_field_for_roster_limit(tmp_db):
     ver docstring de clients/futmondo_client.py.get_information()), NO el
     máximo real -- este job nunca debe leerlo para decidir si la plantilla
     está llena. Plantilla de 15 (== numberOfPlayers) pero SIN
-    `playersInRoster` informado -> no hay máximo confirmado, no se corta.
+    `maxPlayersInRoster` informado -> no hay máximo confirmado, no se corta.
     """
     _seed_player("4069", "DEF", price=350_000)
 
@@ -190,7 +190,7 @@ def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
             return {"answer": [{"id": "999"}]}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000, "configuration": {"playersInRoster": 2}}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 2}}}
 
         def get_market(self):
             return {

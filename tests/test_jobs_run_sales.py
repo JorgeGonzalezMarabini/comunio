@@ -48,7 +48,7 @@ def test_run_sales_reports_roster_occupancy_alongside_futmondo_client(tmp_db):
     """
     Regresión (2026-08-22, a petición del usuario): la notificación debe
     incluir siempre la ocupación de plantilla (mismo campo
-    `configuration.playersInRoster` que usa jobs/run_market.py -- NO
+    `configuration.maxPlayersInRoster` que usa jobs/run_market.py -- NO
     `configuration.numberOfPlayers`, que es el número de jugadores
     INICIALES de la liga, ver docstring de clients/futmondo_client.py) --
     para poder correlacionar a simple vista "plantilla llena/casi llena +
@@ -60,7 +60,7 @@ def test_run_sales_reports_roster_occupancy_alongside_futmondo_client(tmp_db):
             return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # 11 jugadores
 
         def get_information(self):
-            return {"answer": {"budget": 0, "configuration": {"playersInRoster": 20}}}
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 20}}}
 
     captured = []
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):

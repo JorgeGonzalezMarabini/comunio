@@ -78,25 +78,25 @@ de métricas, y aquí eso sería justo el error que se quiere evitar.
 
 Plantilla completa (a raíz de 11 pujas fallidas en vivo, 2026-08-22): antes
 de evaluar cualquier candidato se compara `len(roster)` contra
-`information.answer.configuration.playersInRoster` -- si la plantilla ya
-está al máximo que permite la liga, Futmondo rechaza CUALQUIER puja nueva
-con `FutmondoOfferError("api.market.max_number_players_in_roster")` sin
-importar posición ni presupuesto, así que el job corta aquí en vez de
+`information.answer.configuration.maxPlayersInRoster` -- si la plantilla
+ya está al máximo que permite la liga, Futmondo rechaza CUALQUIER puja
+nueva con `FutmondoOfferError("api.market.max_number_players_in_roster")`
+sin importar posición ni presupuesto, así que el job corta aquí en vez de
 generar pujas condenadas a fallar.
 
-**Corregido el mismo día** (a petición del usuario, tras ver en vivo
-"plantilla completa (15/15)" tratándose en realidad de una liga con tope
-18): el campo leído originalmente era `configuration.numberOfPlayers`,
+**Corregido el mismo día, dos veces** (a petición del usuario, tras ver en
+vivo "plantilla completa (15/15)" tratándose en realidad de una liga con
+tope 18): el campo leído originalmente era `configuration.numberOfPlayers`,
 que en realidad es el **número de jugadores INICIALES** de la liga (15),
-no el máximo -- confirmado inspeccionando el bundle `main.dart.js` de la
-propia app (dart2js no minifica los literales de string): ese mismo campo
-se inicializa a `15` como valor por defecto en el formulario de creación
-de liga, y `configuration.playersInRoster` (con una validación
-`r>=11` en el propio código de la app) es el campo real que corresponde a
-"Máximo número de jugadores en plantilla" en la pantalla de info de la
-liga. Confirmado también contra la cuenta real: la liga en cuestión
-mostraba 18 en esa pantalla, no 15. Si solo hay hueco PARCIAL (menos
-plazas libres que candidatos buenos, contando también las pujas abiertas
+no el máximo. Un primer intento de arreglo, inspeccionando el bundle
+`main.dart.js` de la propia app (dart2js no minifica los literales de
+string), encontró `configuration.playersInRoster` como candidato -- esa
+clave sí existe (validada con `r>=11` en el propio código de la app), pero
+resultó ser el nombre usado en el payload de ESCRITURA al guardar la
+configuración de liga, no el campo real que devuelve `get_information()`.
+**Confirmado con prueba manual real** (2026-08-22): el campo correcto en
+la respuesta es `configuration.maxPlayersInRoster`. Si solo hay hueco
+PARCIAL (menos plazas libres que candidatos buenos, contando también las pujas abiertas
 sobre otros jugadores como plaza reservada), se limita
 `decide_bids_for_market(max_bids=...)` a esas plazas -- como
 `apply_position_priority` ya deja `prioritized` ordenado por
@@ -287,14 +287,15 @@ def run():
     # solo se usaba para `budget`) para cortar ANTES de evaluar candidatos
     # y así no generar pujas que van a fallar seguro.
     #
-    # `playersInRoster`, NO `numberOfPlayers` (corregido el mismo día, ver
-    # docstring del módulo): ese otro campo es el número de jugadores
-    # INICIALES de la liga, confirmado inspeccionando el bundle JS de la
-    # propia app -- usarlo aquí cortaba las pujas de golpe en cuanto la
-    # plantilla llegaba a ese número inicial, muy por debajo del máximo
-    # real que permite la liga.
+    # `maxPlayersInRoster`, NO `numberOfPlayers` ni `playersInRoster`
+    # (corregido el mismo día dos veces, ver docstring del módulo):
+    # `numberOfPlayers` es el número de jugadores INICIALES de la liga;
+    # `playersInRoster` resultó ser el nombre del payload de ESCRITURA al
+    # guardar la configuración, no el campo real de esta respuesta.
+    # `maxPlayersInRoster` es el confirmado con prueba manual real contra
+    # la cuenta real.
     information = client.get_information()
-    max_roster_size = information.get("answer", {}).get("configuration", {}).get("playersInRoster")
+    max_roster_size = information.get("answer", {}).get("configuration", {}).get("maxPlayersInRoster")
     if max_roster_size is not None and len(roster_ids) >= max_roster_size:
         notify(
             f"run_market: plantilla completa ({len(roster_ids)}/{max_roster_size}) -- no se puja esta "

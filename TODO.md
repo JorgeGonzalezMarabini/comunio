@@ -673,38 +673,46 @@ liga ("Máximo número de jugadores en plantilla"), era **18**, no 15 —
 el bot se quedó bloqueado sin poder pujar por nada, muy por debajo del
 límite real.
 
-**Investigado** (2026-08-22, a petición del usuario): sin ninguna oferta
-de mercado real que interceptar en el momento, se inspeccionó
-directamente el bundle `main.dart.js` de la propia app web de Futmondo
+**Investigado, en dos pasos** (2026-08-22, a petición del usuario): sin
+ninguna oferta de mercado real que interceptar en el momento, primero se
+inspeccionó el bundle `main.dart.js` de la propia app web de Futmondo
 (dart2js no minifica los literales de string, así que los nombres de
 campo — e incluso la lógica de validación de formularios — quedan
 legibles tal cual en el JS compilado; técnica nueva para este proyecto,
-sin necesitar generar tráfico de red real). Se encontraron DOS campos
-DISTINTOS dentro de `configuration`:
-  - `numberOfPlayers`: se inicializa a `15` por defecto en el código del
-    formulario de CREACIÓN de liga — es el número de jugadores INICIALES
-    con el que arranca cada equipo, no un máximo.
-  - `playersInRoster`: se valida con `if(r>0&&r<=11)r=11` (nunca por
-    debajo de 11) antes de guardarse — es el máximo real de jugadores en
-    plantilla, y corresponde a "Máximo número de jugadores en plantilla"
-    en la pantalla de info de la liga.
+sin necesitar generar tráfico de red real). Se encontraron dos campos
+dentro de `configuration`: `numberOfPlayers` (se inicializa a `15` por
+defecto en el código del formulario de CREACIÓN de liga — número de
+jugadores INICIALES, no un máximo) y `playersInRoster` (validado con
+`if(r>0&&r<=11)r=11` antes de guardarse). Se asumió que `playersInRoster`
+era el campo de la respuesta de `get_information()` y se corrigió el
+código en ese sentido.
+
+**Esa primera corrección resultó incompleta**: el usuario hizo una prueba
+manual real contra la cuenta y confirmó que el campo que de verdad trae
+`get_information()` es **`maxPlayersInRoster`**, no `playersInRoster` —
+este último es el nombre usado en el payload de ESCRITURA al guardar la
+configuración de la liga (una llamada distinta), no el campo de esta
+respuesta de lectura. Lección: el bundle JS sirve para encontrar nombres
+de campo candidatos y su semántica, pero solo una prueba real contra la
+cuenta (o una captura de red real) confirma cuál usa cada endpoint en
+concreto.
 
 Confirmado cruzando con la cuenta real: la liga en cuestión tenía
-`numberOfPlayers=15` pero `playersInRoster=18` en su pantalla de info,
+`numberOfPlayers=15` pero `maxPlayersInRoster=18` en su pantalla de info,
 coincidiendo exactamente con el bug observado (bloqueo en 15, no en 18).
 
 **Arreglado**: `jobs/run_market.py` y `jobs/run_sales.py` ahora leen
-`configuration.playersInRoster` en vez de `configuration.numberOfPlayers`
-para el límite de plantilla y la ocupación reportada. Documentado en el
-docstring de `clients/futmondo_client.py.get_information()` para que no
-se repita la confusión.
+`configuration.maxPlayersInRoster` (NO `numberOfPlayers` ni
+`playersInRoster`) para el límite de plantilla y la ocupación reportada.
+Documentado en el docstring de `clients/futmondo_client.py.get_information()`
+para que no se repita ninguna de las dos confusiones.
 
 **Verificado con test**:
 `test_run_market_ignores_numberOfPlayers_field_for_roster_limit` (nuevo,
 `tests/test_jobs_run_market.py`) — plantilla de 15 con
-`numberOfPlayers=15` pero sin `playersInRoster` informado no debe cortar
-las pujas. Resto de tests de plantilla llena/hueco parcial actualizados
-para usar `playersInRoster`. Suite completa: 314 passed.
+`numberOfPlayers=15` pero sin `maxPlayersInRoster` informado no debe
+cortar las pujas. Resto de tests de plantilla llena/hueco parcial
+actualizados para usar `maxPlayersInRoster`. Suite completa: 314 passed.
 
 **Afecta a**: `jobs/run_market.py`, `jobs/run_sales.py`,
 `clients/futmondo_client.py` (`get_information()`),
