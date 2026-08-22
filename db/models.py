@@ -102,6 +102,39 @@ CREATE TABLE IF NOT EXISTS bids (
     created_at      TEXT NOT NULL
 );
 
+-- Registro de OFERTAS DE COMPRA recibidas de otros managers sobre
+-- jugadores propios puestos en venta NORMAL (`isClause: false` --
+-- clause.rosterbid tiene su propio mecanismo, no pasa por aquí; ver
+-- clients.futmondo_client.get_my_players_in_market()/accept_sale_offer(),
+-- TODO.md #15). Pensada puramente para ANÁLISIS de las dinámicas de
+-- precio del mercado -- si el `asking_price` que calcula
+-- engine/selling_strategy.py es realista frente a lo que otros managers
+-- realmente ofrecen (¿nos quedamos cortos y vendemos por debajo de lo que
+-- se podría haber pedido? ¿pedimos demasiado y nunca llega una oferta?) --
+-- NO es la fuente de verdad operativa (para eso está `sales`, que ya
+-- registra el precio pedido al listar, y `bids`, que son las pujas de
+-- COMPRA que hace el propio bot, no las que recibe).
+--
+-- Una fila por oferta real de Futmondo (`futmondo_bid_id` UNIQUE, ver
+-- record_received_offer() -- INSERT OR IGNORE): una oferta todavía
+-- abierta que jobs/run_sales.py vuelve a ver en la siguiente pasada (dos
+-- veces al día) sin haberse resuelto genera una sola fila, con el precio
+-- de cuando se vio POR PRIMERA VEZ -- si Futmondo permitiera modificar el
+-- importe de una oferta ya abierta (sin confirmar, ver
+-- /5/market/modifybid en el docstring de clients/futmondo_client.py) esta
+-- tabla no lo reflejaría.
+CREATE TABLE IF NOT EXISTS received_sale_offers (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id          TEXT NOT NULL REFERENCES players(id),
+    futmondo_bid_id    TEXT NOT NULL UNIQUE,   -- "bids[].id" de get_my_players_in_market()
+    listing_price      INTEGER NOT NULL,        -- nuestro precio pedido en ese momento ("price" del listado, no el VM)
+    offer_price        INTEGER NOT NULL,        -- "bids[].price"
+    bidder_name        TEXT,                    -- "bids[].userTeam.name"
+    bidder_slug        TEXT,                    -- "bids[].userTeam.slug"
+    accepted           INTEGER NOT NULL DEFAULT 0,  -- 0/1, ver mark_offer_accepted()
+    seen_at            TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sales (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
@@ -384,6 +417,56 @@ def update_sale_status(sale_id: int, status: str) -> None:
     """Actualiza el status de una venta ya persistida (ver get_open_sales/reconciliación)."""
     with get_connection() as conn:
         conn.execute("UPDATE sales SET status = ? WHERE id = ?", (status, sale_id))
+
+
+def record_received_offer(
+    player_id,
+    futmondo_bid_id,
+    listing_price: int,
+    offer_price: int,
+    bidder_name: str | None,
+    bidder_slug: str | None,
+    seen_at: str,
+) -> bool:
+    """
+    Registra una oferta de compra recibida sobre un jugador propio puesto
+    en venta (ver docstring de `received_sale_offers` arriba y
+    `jobs.run_sales._process_received_offers()`, TODO.md #15) -- pensado
+    para llamarse sobre CADA oferta vista en cada pasada, aceptada o no.
+
+    `accepted` se guarda siempre en 0 aquí -- usar `mark_offer_accepted()`
+    aparte, DESPUÉS de que `FutmondoClient.accept_sale_offer()` confirme
+    éxito, para no marcar una oferta como aceptada si la llamada real
+    falla (ver ese job para el porqué de separarlo en dos pasos).
+
+    Devuelve True si la oferta era nueva (se insertó), False si ya estaba
+    registrada de una pasada anterior (INSERT OR IGNORE por
+    `futmondo_bid_id`, UNIQUE) -- pensado para poder distinguir en la
+    notificación cuántas ofertas son nuevas desde la última ejecución.
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO received_sale_offers
+                (player_id, futmondo_bid_id, listing_price, offer_price, bidder_name, bidder_slug, accepted, seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (str(player_id), str(futmondo_bid_id), listing_price, offer_price, bidder_name, bidder_slug, seen_at),
+        )
+        return cur.rowcount > 0
+
+
+def mark_offer_accepted(futmondo_bid_id) -> None:
+    """
+    Marca como aceptada una oferta ya registrada con `record_received_offer()`
+    -- llamar solo tras confirmar éxito real de
+    `FutmondoClient.accept_sale_offer()` (ver jobs/run_sales.py).
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE received_sale_offers SET accepted = 1 WHERE futmondo_bid_id = ?",
+            (str(futmondo_bid_id),),
+        )
 
 
 def get_real_lineup_check(team: str, match_date: str) -> dict | None:

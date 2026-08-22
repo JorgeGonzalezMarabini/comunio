@@ -17,6 +17,21 @@ ROSTER_442_BASE = (
 )
 
 
+class _BaseFakeClient(FutmondoClient):
+    """
+    Base común de los `FakeClient` de este módulo: `_process_received_offers()`
+    (TODO.md #15) llama a `get_my_players_in_market()` ANTES que a
+    `get_roster()` en cada `run()` -- sin este override por defecto (sin
+    ofertas pendientes), cada test que no le interese este paso heredaría
+    la implementación real y lanzaría FutmondoAuthError contra credenciales
+    None (ver `no_real_futmondo_network` en conftest.py). Los tests que sí
+    quieren ejercitar ofertas recibidas sobrescriben este método aparte.
+    """
+
+    def get_my_players_in_market(self):
+        return {"answer": []}
+
+
 def _mark_won(player_id, amount):
     """Registra una puja ya ganada por el bot (ver db.models.get_won_bid_prices) -- la
     fuente que ahora usa run_sales/decide_sales en vez de `buyPrice` de Futmondo."""
@@ -28,7 +43,7 @@ def _mark_won(player_id, amount):
 
 
 def test_run_sales_no_profitable_candidates_notifies_and_returns(tmp_db):
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # nadie comprado por el bot -> nada que vender
 
@@ -55,7 +70,7 @@ def test_run_sales_reports_roster_occupancy_alongside_futmondo_client(tmp_db):
     nada que vender aquí" con que run_market esté bloqueando pujas por
     falta de plazas.
     """
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # 11 jugadores
 
@@ -103,7 +118,7 @@ def test_run_sales_passes_own_squad_and_market_features_to_decide_sales(tmp_db):
             ("999", 700_000, 10, 10, 10.0, 1, "", "2026-08-16T18:00:00+00:00"),
         )
 
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": roster}
 
@@ -132,7 +147,7 @@ def test_run_sales_lists_profitable_player_and_persists(tmp_db):
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
     _mark_won(25, 700_000)
 
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": roster}
 
@@ -162,7 +177,7 @@ def test_run_sales_never_lists_player_that_would_leave_position_uncovered(tmp_db
     roster = [dict(p) for p in ROSTER_442_BASE]
     _mark_won(1, 300_000)  # portero, +66% de plusvalía
 
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": roster}
 
@@ -183,7 +198,7 @@ def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
     _mark_won(25, 700_000)
 
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": roster}
 
@@ -206,7 +221,7 @@ def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_
 
 
 def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": []}
 
@@ -217,6 +232,129 @@ def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):
     assert "plantilla vino vacía" in captured[0]
 
 
+def _offer_listing(player_id=25, name="Fer Niño", listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000, is_clause=False):
+    """Item de get_my_players_in_market()["answer"] con una única oferta -- ver TODO.md #15."""
+    return {
+        "id": player_id,
+        "name": name,
+        "price": listing_price,
+        "isClause": is_clause,
+        "bids": [{"id": bid_id, "price": offer_price, "userTeam": {"name": "jorge.gonzalez", "slug": "jorgegonzalez"}}],
+    }
+
+
+def test_run_sales_accepts_highest_offer_above_asking_price(tmp_db):
+    """Criterio del usuario (2026-08-22, TODO.md #15): aceptar SIEMPRE la oferta que SUPERE el precio pedido."""
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_roster(self):
+            return {"answer": []}  # corta pronto tras procesar ofertas -- no es lo que este test comprueba
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid1", "25")]
+    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+    assert "2700000" in captured[0]
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM received_sale_offers WHERE futmondo_bid_id = 'bid1'").fetchone()
+    assert row["accepted"] == 1
+    assert row["listing_price"] == 2_623_496
+    assert row["offer_price"] == 2_700_000
+    assert row["bidder_name"] == "jorge.gonzalez"
+
+
+def test_run_sales_does_not_accept_offer_at_or_below_asking_price(tmp_db):
+    """Una oferta que SOLO IGUALA el precio pedido (no lo supera) no se acepta -- ver docstring de _process_received_offers."""
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid2", offer_price=1_000_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            raise AssertionError("no debería intentar aceptar una oferta que no supera el precio pedido")
+
+        def get_roster(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert "ACEPTADA" not in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid2'").fetchone()
+    assert row["accepted"] == 0
+
+
+def test_run_sales_ignores_clause_listings_when_processing_offers(tmp_db):
+    """isClause=true queda fuera de accept_sale_offer() (ver su docstring) -- ni se registra ni se intenta aceptar."""
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid3", offer_price=5_000_000, is_clause=True)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            raise AssertionError("no debería tocar un listado de cláusula")
+
+        def get_roster(self):
+            return {"answer": []}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM received_sale_offers WHERE futmondo_bid_id = 'bid3'").fetchone()
+    assert row["n"] == 0
+
+
+def test_run_sales_offer_acceptance_failure_is_audited_without_crashing(tmp_db):
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid4", offer_price=1_200_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            raise FutmondoOfferError("ya no existe esa oferta")
+
+        def get_roster(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()  # no debe lanzar
+
+    assert "fallida(s) al aceptar" in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid4'").fetchone()
+    assert row["accepted"] == 0  # se registró, pero NO se marca aceptada -- la llamada real falló
+
+
+def test_run_sales_does_not_duplicate_offer_seen_across_two_runs(tmp_db):
+    """Una oferta todavía abierta (no aceptada, por debajo del precio pedido) vista en dos pasadas solo genera una fila."""
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid5", offer_price=900_000)]}
+
+        def get_roster(self):
+            return {"answer": []}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+        run_sales.run()
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM received_sale_offers WHERE futmondo_bid_id = 'bid5'").fetchone()
+    assert row["n"] == 1
+
+
 def test_run_sales_does_not_call_get_player_summary_when_premium_flag_is_off(tmp_db, monkeypatch):
     """Por defecto (ENABLE_SELLING_REVALUATION_PREMIUM=False) el comportamiento no cambia: ni se llama a get_player_summary."""
     monkeypatch.setattr(config, "ENABLE_SELLING_REVALUATION_PREMIUM", False)
@@ -224,7 +362,7 @@ def test_run_sales_does_not_call_get_player_summary_when_premium_flag_is_off(tmp
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
     _mark_won(25, 700_000)
 
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": roster}
 
@@ -262,7 +400,7 @@ def test_run_sales_applies_revaluation_premium_when_flag_is_on(tmp_db, monkeypat
         {"date": "2026-08-20T00:00:00+00:00", "price": 900_000},  # +28.6% sostenido en la ventana
     ]
 
-    class FakeClient(FutmondoClient):
+    class FakeClient(_BaseFakeClient):
         def get_roster(self):
             return {"answer": roster}
 

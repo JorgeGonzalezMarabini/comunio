@@ -594,7 +594,7 @@ ya se activó después).
 
 ---
 
-## 15. Venta de jugadores: falta el paso de ACEPTAR una oferta recibida (endpoint confirmado en vivo 2026-08-22; falta integrarlo en `jobs/run_sales.py`)
+## 15. ~~Venta de jugadores: falta el paso de ACEPTAR una oferta recibida~~ (resuelto e integrado, 2026-08-22)
 
 **Qué pasa**: `jobs/run_sales.py` solo pone al jugador en venta
 (`list_for_sale()` -> `POST /1/market/putonmarket`) y ahí termina su
@@ -704,30 +704,45 @@ Con esto, `accept_sale_offer()` queda confirmado de forma independiente
 de la UI -- ya no depende de que el usuario inicie sesión a mano para
 que el bot pueda usarlo en el cron real.
 
-**Lo que queda (ya no es "sin confirmar el mecanismo", es "falta
-integrarlo")**: `jobs/run_sales.py` sigue sin llamar a
-`accept_sale_offer()` -- todavía no lee `get_my_players_in_market()` para
-detectar ofertas recibidas ni decide cuál aceptar. Sin ese paso, el
-mecanismo ya confirmado no se usa solo en producción.
+**Actualización 2026-08-22 (misma tarde) -- integrado en `jobs/run_sales.py`**:
+criterio del usuario, sin más margen todavía: aceptar SIEMPRE la oferta
+más alta que SUPERE el precio de salida pedido; si ninguna lo supera, el
+listado se deja tal cual. `_process_received_offers()` corre ANTES de
+decidir nuevos listados en cada ejecución (dos veces al día), lee
+`get_my_players_in_market()[].bids` y llama a `accept_sale_offer()`.
 
-**Afecta a**: `jobs/run_sales.py` (necesita el paso nuevo -- leer
-`get_my_players_in_market()[].bids`, decidir si aceptar según algún
-criterio -- ¿aceptar siempre la mejor oferta igual o por encima del
-precio pedido?, sin decidir todavía -- y llamar a `accept_sale_offer()`;
-posiblemente un job aparte tipo `jobs/accept_sale_offers.py`, o ampliar
-el mismo job), `jobs/sync_data.py` (`_reconcile_sales()`, cuya lógica
-actual de "desapareció de la plantilla = vendido" sigue sirviendo tal
-cual como confirmación POSTERIOR, no hace falta tocarla).
+De paso, se añadió `db.models.received_sale_offers` -- registro de TODA
+oferta recibida (aceptada o no, una fila por id real de Futmondo) pensado
+para analizar más adelante, con datos reales acumulados, si el
+`asking_price` calculado por `engine/selling_strategy.py` es realista
+frente a lo que el mercado realmente ofrece, y ajustar el cálculo si hace
+falta (petición del usuario, misma conversación). Ver docstring de esa
+tabla en `db/models.py` y de `_process_received_offers()` en
+`jobs/run_sales.py`.
 
-**Dónde**: `clients/futmondo_client.py` (`accept_sale_offer()`/
-`reject_sale_offer()`, ya implementados), `jobs/run_sales.py` (pendiente
-de integrar la llamada), `jobs/sync_data.py:30-44` (`_reconcile_sales`,
-sin cambios), `engine/selling_strategy.py` (sin cambios necesarios en la
-lógica de DECISIÓN, esto es puramente de EJECUCIÓN tras decidir vender).
+Cobertura de tests: `tests/test_jobs_run_sales.py` (acepta oferta por
+encima del precio pedido, no acepta si solo iguala, ignora listados de
+cláusula, audita sin crashear si `accept_sale_offer()` falla, no duplica
+una oferta todavía abierta vista en dos pasadas seguidas).
 
-**Siguiente paso**: decidir e implementar el criterio de aceptación en
-`jobs/run_sales.py` (con qué margen sobre el precio pedido se acepta una
-oferta automáticamente, si hay alguno) y añadir el paso al cron.
+**Afecta a**: `jobs/run_sales.py` (`_process_received_offers()`, ya
+integrado), `db/models.py` (tabla nueva `received_sale_offers` +
+`record_received_offer()`/`mark_offer_accepted()`), `clients/
+futmondo_client.py` (`accept_sale_offer()`/`reject_sale_offer()`, ya
+implementados), `jobs/sync_data.py` (`_reconcile_sales()`, sin cambios --
+sigue sirviendo tal cual como confirmación POSTERIOR de que el jugador
+salió de la plantilla).
+
+**Dónde**: `jobs/run_sales.py`, `db/models.py`, `clients/futmondo_client.py`,
+`tests/test_jobs_run_sales.py`, `README.md` ("Venta: aceptar ofertas
+recibidas").
+
+**Pendiente, no crítico**: `reject_sale_offer()` sigue sin probarse en
+vivo (solo confirmado por nombre en el bundle) y sin usar por ningún job
+-- de momento una oferta que no supera el precio pedido simplemente se
+ignora, no se rechaza explícitamente. Con datos acumulados en
+`received_sale_offers`, revisar si el cálculo de `asking_price` necesita
+ajuste (ver README).
 
 ---
 

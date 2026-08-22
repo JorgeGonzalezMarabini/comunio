@@ -9,16 +9,26 @@ poner en venta solo deja al jugador listado, visible para que otro manager
 (o el "Computer") lo compre. jobs/sync_data.py reconcilia después si la
 venta se completó (comparando la plantilla en cada sync).
 
-**CRÍTICO, sin confirmar (TODO.md #15, a petición del usuario,
-2026-08-22)**: según información del usuario, Futmondo NO vende
-automáticamente al mejor postor -- otros managers hacen OFERTAS sobre el
-jugador listado, y hace falta ACEPTAR una explícitamente para completar
-la venta. Ese paso de aceptación NO está implementado en ningún sitio de
-este código (ni aquí ni en jobs/sync_data.py) -- si se confirma, un
-jugador puesto en venta por este job podría quedarse listado
-indefinidamente sin venderse nunca, por muchas ofertas que reciba. Sin
-confirmar todavía con captura real (ver TODO.md #15 para el endpoint
-visto pero sin usar y el motivo por el que no se pudo capturar aún).
+Aceptar ofertas recibidas (TODO.md #15, resuelto en vivo 2026-08-22):
+Futmondo NO vende automáticamente al mejor postor -- otros managers hacen
+OFERTAS sobre el jugador listado, y hace falta ACEPTAR una explícitamente
+para completar la venta (confirmado en vivo, dos veces, con
+`FutmondoClient.accept_sale_offer()` -- ver su docstring). Por eso, ANTES
+de decidir nuevos listados, este job llama a `_process_received_offers()`:
+lee `get_my_players_in_market()[].bids` y acepta SIEMPRE la oferta más
+alta que SUPERE el precio de salida pedido (criterio del usuario,
+2026-08-22 -- ningún otro margen todavía, simple "la mejor si es mejor
+que lo pedido"). Si ninguna oferta supera el precio pedido, el listado se
+deja tal cual esperando una mejor -- Futmondo no vende solo al precio
+pedido, hace falta que alguien iguale o supere esa cifra.
+
+Cada oferta vista (aceptada o no) se registra en `db.models.
+received_sale_offers` -- pensado para analizar más adelante, con datos
+reales acumulados, si el `asking_price` que calcula
+`engine/selling_strategy.py` es realista frente a lo que el mercado
+realmente ofrece (¿nos quedamos cortos? ¿pedimos de más y nunca llega
+oferta?), y ajustar el cálculo si hace falta. Ver docstring de esa tabla
+en `db/models.py`.
 
 Igual que en Comunio, solo se consideran candidatos los jugadores
 "comprados por el bot" — aquí, en vez de un campo de Futmondo (`buyPrice`
@@ -58,7 +68,13 @@ import requests
 
 import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
-from db.models import get_connection, get_player_features, get_won_bid_prices
+from db.models import (
+    get_connection,
+    get_player_features,
+    get_won_bid_prices,
+    mark_offer_accepted,
+    record_received_offer,
+)
 from engine.selling_strategy import apply_revaluation_premium, decide_sales
 from notifier import notify, track_job_run
 
@@ -82,17 +98,101 @@ def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
     )
 
 
+def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """
+    Lee las ofertas de compra recibidas sobre jugadores propios puestos en
+    venta NORMAL (`client.get_my_players_in_market()[].bids`) y acepta
+    SIEMPRE la oferta más alta que SUPERE el precio de salida pedido (ver
+    docstring del módulo, TODO.md #15). Si la mejor oferta no supera el
+    precio pedido, el listado se deja tal cual.
+
+    Ignora listados de CLÁUSULA (`isClause: true`) -- fuera del alcance
+    confirmado de `accept_sale_offer()` (ver su docstring): esos usan un
+    mecanismo de compra distinto (`pay_clause()`), sin oferta que aceptar.
+
+    Registra TODAS las ofertas vistas (aceptadas o no) en
+    `db.models.received_sale_offers`, una sola vez cada una por su id real
+    de Futmondo -- ver `record_received_offer()`. Solo se marca `accepted`
+    tras confirmar éxito real de `accept_sale_offer()`, nunca antes (si la
+    llamada falla, la oferta queda registrada pero sin marcar).
+
+    Devuelve (aceptadas, fallidas) para el resumen de notificación de
+    `run()`. Un fallo al aceptar una oferta concreta (red o rechazo de
+    negocio) no aborta el resto -- se audita en `fallidas` y se sigue con
+    el resto de listados.
+    """
+    listings = client.get_my_players_in_market().get("answer", [])
+    accepted, failed = [], []
+
+    for item in listings:
+        if item.get("isClause"):
+            continue
+        bids = item.get("bids") or []
+        if not bids:
+            continue
+
+        listing_price = item["price"]
+        best = max(bids, key=lambda b: b["price"])
+
+        for bid in bids:
+            record_received_offer(
+                player_id=item["id"],
+                futmondo_bid_id=bid["id"],
+                listing_price=listing_price,
+                offer_price=bid["price"],
+                bidder_name=(bid.get("userTeam") or {}).get("name"),
+                bidder_slug=(bid.get("userTeam") or {}).get("slug"),
+                seen_at=seen_at,
+            )
+
+        if best["price"] <= listing_price:
+            continue  # ninguna oferta supera lo pedido -- se deja listado tal cual
+
+        try:
+            client.accept_sale_offer(str(best["id"]), str(item["id"]))
+            mark_offer_accepted(best["id"])
+            accepted.append(
+                {
+                    "player_id": item["id"],
+                    "name": item.get("name"),
+                    "listing_price": listing_price,
+                    "offer_price": best["price"],
+                    "bidder": (best.get("userTeam") or {}).get("name"),
+                }
+            )
+        except (requests.RequestException, FutmondoOfferError) as e:
+            failed.append((item, str(e)))
+
+    return accepted, failed
+
+
 def run():
     if not config.ENABLE_BOT:
         print("run_sales: ENABLE_BOT=false, no se ejecuta.")
         return
 
     client = FutmondoClient()
+    now = datetime.now(timezone.utc).isoformat()
+    report_lines = []
+
+    offers_accepted, offers_failed = _process_received_offers(client, now)
+    if offers_accepted:
+        report_lines.append(f"{len(offers_accepted)} oferta(s) recibida(s) ACEPTADA(S):")
+        for o in offers_accepted:
+            report_lines.append(
+                f"  - jugador {o['player_id']} ({o.get('name')}): oferta {o['offer_price']} de "
+                f"{o.get('bidder')} (pedíamos {o['listing_price']})"
+            )
+    if offers_failed:
+        report_lines.append(f"{len(offers_failed)} oferta(s) recibida(s) fallida(s) al aceptar:")
+        for item, err in offers_failed:
+            report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')}): {err}")
 
     roster = client.get_roster()
     roster_items = roster.get("answer", [])
     if not roster_items:
-        notify("run_sales: la plantilla vino vacía, nada que evaluar.")
+        report_lines.append("run_sales: la plantilla vino vacía, nada más que evaluar.")
+        notify("\n".join(report_lines))
         return
 
     # `budget` se pasa a decide_sales() para calcular el capital TOTAL del
@@ -136,10 +236,11 @@ def run():
         market_candidates=market_candidates,
     )
     if not decisions:
-        notify(
+        report_lines.append(
             f"run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución "
             f"(plantilla {occupancy})."
         )
+        notify("\n".join(report_lines))
         return
 
     # Prima por revalorización rápida (ver docstring del módulo) -- una
@@ -158,7 +259,6 @@ def run():
                 adjusted_decisions.append(decision)
         decisions = adjusted_decisions
 
-    now = datetime.now(timezone.utc).isoformat()
     listed, failed = [], []
 
     with get_connection() as conn:
@@ -171,18 +271,18 @@ def run():
                 _persist_sale(conn, decision, "failed", now)
                 failed.append((decision, str(e)))
 
-    summary = [f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy})."]
+    report_lines.append(f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy}).")
     for d in listed:
-        summary.append(
+        report_lines.append(
             f"  - jugador {d['player_id']}: pide {d['asking_price']} "
             f"(referencia de compra {d['purchase_price']}, {d['profit_pct']:+.1%})"
         )
     if failed:
-        summary.append(f"{len(failed)} fallido(s):")
+        report_lines.append(f"{len(failed)} fallido(s):")
         for d, err in failed:
-            summary.append(f"  - jugador {d['player_id']}: {err}")
+            report_lines.append(f"  - jugador {d['player_id']}: {err}")
 
-    notify("\n".join(summary))
+    notify("\n".join(report_lines))
 
 
 if __name__ == "__main__":

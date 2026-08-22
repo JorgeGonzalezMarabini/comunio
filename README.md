@@ -704,6 +704,35 @@ venta. Controlado por `config.ENABLE_SELLING_REVALUATION_PREMIUM`
 impacto acotado en cualquier caso: solo sube el precio PEDIDO, nunca gasta
 dinero.
 
+## Venta: aceptar ofertas recibidas (TODO.md #15, resuelto)
+
+Poner un jugador en venta (`list_for_sale()`) no lo vende solo: otros
+managers hacen OFERTAS sobre el listado, y hace falta ACEPTAR una
+explícitamente para completar la venta — confirmado en vivo dos veces
+(2026-08-22, liga de prueba): una oferta real aceptada desde la UI de
+app.futmondo.com, y otra aceptada llamando directamente por API sin tocar
+la UI, ambas verificando el efecto real (`budget` sube exactamente el
+importe de la oferta, el jugador sale de la plantilla). Ver docstring de
+`clients.futmondo_client.FutmondoClient.accept_sale_offer()` para el
+detalle completo de cómo se confirmó el endpoint (`POST
+/1/market/acceptbid`).
+
+Criterio de aceptación (a petición del usuario, 2026-08-22, sin más
+margen todavía): `jobs/run_sales.py` acepta SIEMPRE la oferta más alta
+que SUPERE el precio de salida pedido — si ninguna oferta lo supera, el
+listado se deja tal cual esperando una mejor. Este paso corre ANTES de
+decidir nuevos listados en cada ejecución (dos veces al día, ver
+`run_sales.yml`), leyendo `get_my_players_in_market()[].bids`.
+
+Cada oferta vista (aceptada o no, una sola vez por su id real de
+Futmondo) se registra en `db.models.received_sale_offers` — pensado
+puramente para ANÁLISIS: con datos reales acumulados, ver si el
+`asking_price` que calcula `engine/selling_strategy.py` es realista
+frente a lo que el mercado realmente ofrece (¿se acepta casi siempre al
+precio pedido justo, o muy por encima/por debajo?) y ajustar el cálculo
+si hace falta más adelante. No es la fuente de verdad operativa de nada
+(para eso siguen estando `sales` y `bids`).
+
 ## La posición sí importa al puntuar: xG se normaliza por posición
 
 Arreglado 2026-08-17 (ya estaba señalado como TODO desde el principio,
