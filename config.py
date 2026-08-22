@@ -241,6 +241,22 @@ BIDDING_MAX_CANCEL_SWAPS_PER_RUN = int(os.getenv("BIDDING_MAX_CANCEL_SWAPS_PER_R
 # con resultados reales.
 SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
 
+# Umbral de PÉRDIDA (positivo, ej. 0.15 = -15%) a partir del cual un
+# jugador con lesión CONFIRMADA (no "doubt" -- ver clients.futmondo_client.
+# is_confirmed_injured_status()) se pone en venta aunque no llegue a
+# SELLING_MIN_PROFIT_PCT, incluso con pérdidas (a petición del usuario,
+# 2026-08-22, ver docstring de engine/selling_strategy.py). El valor de un
+# jugador lesionado tiende a seguir bajando cuanto más tiempo pasa sin
+# jugar -- esperar a que "recupere" plusvalía para venderlo es la falacia
+# del coste hundido. "doubt" queda deliberadamente FUERA de esta regla:
+# todavía puede llegar a jugar, sigue necesitando SELLING_MIN_PROFIT_PCT
+# como cualquier sano. 15% es un punto de partida razonado (algo más
+# permisivo que el 10% de rentabilidad exigida para vender con ganancia,
+# a propósito: cortar una pérdida "cuesta" psicológicamente más que dejar
+# de ganar, así que el umbral no debería ser más laxo que el de
+# rentabilidad), sin calibrar todavía con resultados reales.
+SELLING_INJURY_MAX_LOSS_PCT = float(os.getenv("SELLING_INJURY_MAX_LOSS_PCT", "0.15"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real de Futmondo (confirmado por captura, campo "strategy" de
 # /1/userteam/lineup): CON guiones, ej. "4-4-2" — a diferencia de Comunio,

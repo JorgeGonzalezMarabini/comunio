@@ -578,14 +578,39 @@ dura que antes (`config.EVALUATOR_WEIGHTS["doubt_penalty"] = 0.20`, el
 doble del antiguo `injury_penalty`).
 
 Cambio deliberadamente acotado a la decisión de FICHAJE: `engine/
-squad_risk.py`, `engine/lineup_optimizer.py` y `engine/selling_strategy.py`
-siguen usando `is_injury_status()` sin distinguir gravedad (solo
-sano/no-sano) — ahí no tiene sentido "descartar" a un jugador ya propio
-de la plantilla, y esos módulos ya tenían su propio criterio razonado
-(sanos primero, margen de suplentes, etc., ver secciones de arriba).
-`config.LINEUP_EVALUATOR_WEIGHTS` tampoco cambia: sigue con
-`injury_penalty = 0.10` sobre `is_injured_or_doubtful` (duda Y lesión por
-igual), igual que siempre.
+squad_risk.py` y `engine/lineup_optimizer.py` siguen usando
+`is_injury_status()` sin distinguir gravedad (solo sano/no-sano) — ahí no
+tiene sentido "descartar" a un jugador ya propio de la plantilla, y esos
+módulos ya tenían su propio criterio razonado (sanos primero, margen de
+suplentes, etc., ver secciones de arriba). `config.LINEUP_EVALUATOR_WEIGHTS`
+tampoco cambia: sigue con `injury_penalty = 0.10` sobre
+`is_injured_or_doubtful` (duda Y lesión por igual), igual que siempre.
+`engine/selling_strategy.py` sí distingue gravedad desde el siguiente
+cambio (ver justo abajo).
+
+## Venta: corte de pérdidas en lesión confirmada, no en duda
+
+A petición del usuario (2026-08-22): hasta este cambio, un jugador solo
+era candidato a venta si su revalorización superaba
+`config.SELLING_MIN_PROFIT_PCT` (10% por defecto) — sano, en duda o
+lesionado, sin distinción, y sin ninguna otra vía posible. Para un
+lesionado eso es un problema real: su valor tiende a seguir bajando
+cuanto más tiempo pasa sin jugar, así que esperar a que "recupere"
+plusvalía antes de poder venderlo es la falacia del coste hundido
+(aferrarse a cuánto se pagó en el pasado en vez de valorar el jugador por
+lo que es AHORA — un activo con pinta de seguir devaluándose).
+
+Ahora (`engine/selling_strategy.py:decide_sales()` +
+`config.SELLING_INJURY_MAX_LOSS_PCT`, 15% por defecto): un jugador con
+lesión CONFIRMADA (`clients.futmondo_client.is_confirmed_injured_status()`
+— NO "doubt") que ya haya perdido más de ese umbral se pone en venta
+igualmente, aunque sea con pérdidas y sin llegar al umbral normal de
+rentabilidad. "doubt" queda deliberadamente FUERA de esta segunda vía —
+todavía puede llegar a jugar, sigue necesitando el mismo
+`SELLING_MIN_PROFIT_PCT` que un jugador sano, sin cambios respecto a
+antes. El corte de pérdidas tampoco compite por margen de banquillo (un
+lesionado nunca contó como "disponible" en `assess_squad_depth`, ver
+arriba) — puede vender incluso si es el único jugador de su posición.
 
 ## La posición sí importa al puntuar: xG se normaliza por posición
 

@@ -29,16 +29,38 @@ esa posición sin margen de suplentes sanos (bench <= 0 tras la venta),
 por muy rentable que sea la operación — a diferencia de la prioridad de
 puja (un empujón blando), esto es un bloqueo duro: no hay ninguna
 plusvalía que compense quedarte con una posición vacía.
+
+Corte de pérdidas en lesión CONFIRMADA (a petición del usuario,
+2026-08-22): hasta ahora un jugador solo era candidato a venta si
+superaba `min_profit_pct`, sea sano, en duda o lesionado — sin ninguna
+otra vía. Para un lesionado eso es un problema real: su valor tiende a
+seguir bajando cuanto más tiempo pasa sin jugar (no puntúa, el mercado lo
+penaliza más), así que esperar a que "recupere" plusvalía para poder
+venderlo es la falacia del coste hundido — aferrarse a cuánto se pagó en
+el pasado en vez de valorar el jugador por lo que es AHORA, un activo con
+pinta de seguir devaluándose. Por eso, además de la vía normal
+(`min_profit_pct`), un jugador con lesión CONFIRMADA (no "doubt" —
+ver `clients.futmondo_client.is_confirmed_injured_status()`) que ya haya
+perdido más de `injury_max_loss_pct` (config.SELLING_INJURY_MAX_LOSS_PCT)
+se pone en venta igualmente, aunque sea con pérdidas. "doubt" queda
+DELIBERADAMENTE fuera de esta segunda vía (a diferencia de lesión
+confirmada, todavía puede llegar a jugar — no hay la misma base para
+asumir que solo va a perder valor) — sigue necesitando `min_profit_pct`
+como cualquier sano, sin cambios.
 """
 from __future__ import annotations
 
 import config
-from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_injury_status
+from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
 from engine.squad_risk import assess_squad_depth
 
 
 def decide_sales(
-    squad: list[dict], min_profit_pct: float = None, formation: str = None, bought_by_bot: dict[str, int] = None
+    squad: list[dict],
+    min_profit_pct: float = None,
+    formation: str = None,
+    bought_by_bot: dict[str, int] = None,
+    injury_max_loss_pct: float = None,
 ) -> list[dict]:
     """
     `squad`: items reales de FutmondoClient.get_roster()["answer"] (necesita
@@ -54,10 +76,25 @@ def decide_sales(
     vacío/None), no hay ningún candidato — nunca se recurre a `buyPrice`
     como fallback silencioso, para no reintroducir la ambigüedad original.
 
-    Devuelve una decisión por jugador cuya revalorización (`value` vs. el
-    precio pagado en `bought_by_bot`) supera `min_profit_pct` (por defecto
-    config.SELLING_MIN_PROFIT_PCT) Y cuya posición sigue teniendo margen de
-    suplentes sanos después de la venta:
+    `injury_max_loss_pct`: por defecto config.SELLING_INJURY_MAX_LOSS_PCT
+    — umbral de PÉRDIDA (positivo, ej. 0.15 = -15%) a partir del cual un
+    jugador con lesión CONFIRMADA se pone en venta aunque no llegue a
+    `min_profit_pct`, incluso con pérdidas (ver docstring del módulo:
+    corte de pérdidas para no caer en la falacia del coste hundido con un
+    jugador que tiende a seguir perdiendo valor). No aplica a "doubt".
+
+    Devuelve una decisión por cada jugador que cumpla CUALQUIERA de estas
+    dos condiciones (Y cuya posición siga teniendo margen de suplentes
+    sanos después de la venta, salvo que ya esté lesionado/en duda —
+    ver más abajo):
+      1. Su revalorización (`value` vs. el precio pagado en
+         `bought_by_bot`) supera `min_profit_pct` (por defecto
+         config.SELLING_MIN_PROFIT_PCT) — vía normal, para todos.
+      2. Tiene lesión CONFIRMADA y ya ha perdido más de
+         `injury_max_loss_pct` — corte de pérdidas, solo para lesión
+         confirmada (no "doubt").
+
+    Cada decisión:
         {"player_id", "asking_price", "purchase_price", "profit",
          "profit_pct", "reason"}
     listo para persistir en la tabla `sales` (auditoría) y pasar a
@@ -75,6 +112,9 @@ def decide_sales(
     parecido, pero no hay motivo para pedir un precio distinto al VM).
     """
     min_profit_pct = config.SELLING_MIN_PROFIT_PCT if min_profit_pct is None else min_profit_pct
+    injury_max_loss_pct = (
+        config.SELLING_INJURY_MAX_LOSS_PCT if injury_max_loss_pct is None else injury_max_loss_pct
+    )
     bought_by_bot = bought_by_bot or {}
 
     candidates = []
@@ -86,14 +126,23 @@ def decide_sales(
 
         profit = current_price - purchase_price
         profit_pct = profit / purchase_price
-        if profit_pct < min_profit_pct:
+
+        # Corte de pérdidas: solo lesión CONFIRMADA (no "doubt", ver
+        # docstring del módulo) y solo si ya ha perdido más del umbral --
+        # se vende aunque no llegue a min_profit_pct, incluso con pérdidas.
+        cutting_losses = is_confirmed_injured_status(player.get("status")) and profit_pct <= -injury_max_loss_pct
+
+        if profit_pct < min_profit_pct and not cutting_losses:
             continue
 
-        candidates.append((player, purchase_price, profit, profit_pct))
+        candidates.append((player, purchase_price, profit, profit_pct, cutting_losses))
 
     # Más rentables primero: si el margen de plantilla en una posición no
     # alcanza para vender a todos los candidatos de esa posición, se
-    # prioriza el de mayor plusvalía.
+    # prioriza el de mayor plusvalía. Los cortes de pérdidas (profit_pct
+    # muy negativo) quedan naturalmente al final de este orden, pero no
+    # compiten por margen de banquillo de todos modos (ver más abajo: un
+    # lesionado nunca contó como "disponible", así que no descuenta bench).
     candidates.sort(key=lambda c: c[3], reverse=True)
 
     # Margen de suplentes sanos por posición ANTES de vender nada (ver
@@ -105,7 +154,7 @@ def decide_sales(
     bench_remaining = {position: info["bench"] for position, info in depth.items()}
 
     decisions = []
-    for player, purchase_price, profit, profit_pct in candidates:
+    for player, purchase_price, profit, profit_pct, cutting_losses in candidates:
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
         is_injured_or_doubtful = is_injury_status(player.get("status"))
 
@@ -117,6 +166,19 @@ def decide_sales(
                 continue  # vender aquí dejaría la posición sin cubrir -- no se vende, por rentable que sea
             bench_remaining[position] -= 1
 
+        if cutting_losses:
+            reason = (
+                f"lesión confirmada: pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
+                f"({profit_pct:+.1%}) -- pérdida >= umbral de corte {injury_max_loss_pct:.1%}; se vende "
+                "aunque no llegue al umbral de rentabilidad, para no aferrarse a un jugador que tiende a "
+                "seguir perdiendo valor (falacia del coste hundido)"
+            )
+        else:
+            reason = (
+                f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
+                f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
+            )
+
         decisions.append(
             {
                 "player_id": player["id"],
@@ -124,10 +186,7 @@ def decide_sales(
                 "purchase_price": purchase_price,
                 "profit": profit,
                 "profit_pct": profit_pct,
-                "reason": (
-                    f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
-                    f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
-                ),
+                "reason": reason,
             }
         )
     return decisions
