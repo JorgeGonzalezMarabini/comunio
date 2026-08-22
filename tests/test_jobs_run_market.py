@@ -123,6 +123,45 @@ def test_run_market_skips_bidding_when_roster_is_full(tmp_db):
     assert count == 0
 
 
+def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
+    """
+    Regresión: con hueco PARCIAL en la plantilla (queda sitio, pero para
+    menos candidatos de los que pasarían el resto de filtros), run_market
+    debe pujar solo por los más importantes hasta llenar el hueco -- no
+    por todos los que pasen score/precio/presupuesto.
+    """
+    _seed_player("mejor", "MED", price=350_000, points=20)
+    _seed_player("peor", "DEF", price=350_000, points=5)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            # 1 jugador en plantilla, máximo de la liga 2 -- solo 1 plaza libre.
+            return {"answer": [{"id": "999"}]}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"numberOfPlayers": 2}}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {"id": "mejor", "slug": "jugador-mejor", "value": 350_000},
+                    {"id": "peor", "slug": "jugador-peor", "value": 350_000},
+                ]
+            }
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    with get_connection() as conn:
+        rows = {r["player_id"] for r in conn.execute("SELECT player_id FROM bids")}
+    # Solo el mejor candidato -- "peor" quedó bloqueado por la única plaza libre, no por score/precio.
+    assert rows == {"mejor"}
+
+
 def test_run_market_player_no_longer_in_market_is_audited_as_failed(tmp_db):
     """El mercado cambió entre evaluar y pujar -- el candidato ya no aparece en get_market()."""
     _seed_player("4069", "DEF", price=350_000)

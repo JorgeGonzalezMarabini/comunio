@@ -70,7 +70,14 @@ de evaluar cualquier candidato se compara `len(roster)` contra
 está al máximo que permite la liga, Futmondo rechaza CUALQUIER puja nueva
 con `FutmondoOfferError("api.market.max_number_players_in_roster")` sin
 importar posición ni presupuesto, así que el job corta aquí en vez de
-generar pujas condenadas a fallar.
+generar pujas condenadas a fallar. Si solo hay hueco PARCIAL (menos
+plazas libres que candidatos buenos, contando también las pujas abiertas
+sobre otros jugadores como plaza reservada), se limita
+`decide_bids_for_market(max_bids=...)` a esas plazas -- como
+`apply_position_priority` ya deja `prioritized` ordenado por
+score+boosts de mayor a menor, ese corte sigue pujando primero por los
+candidatos más importantes (posición en riesgo / mejora del once), no
+por los primeros que se evalúen.
 
 Cancelar+pujar mejor (TODO.md #13, `engine.bidding_strategy.
 find_cancel_swap_candidates`): fase APARTE, después del loop normal de
@@ -198,6 +205,20 @@ def run():
         )
         return
 
+    # Hueco parcial: si queda sitio pero no para todos los candidatos
+    # buenos, hay que pujar solo por los `available_roster_slots` más
+    # importantes -- no por todos los que pasen los demás filtros. Cuenta
+    # también `already_bid_ids` (pujas abiertas sobre OTROS jugadores, ya
+    # excluidas de `raw_candidates` arriba) como plaza reservada: si
+    # ganan, también ocuparán un hueco de la plantilla, aunque Futmondo
+    # solo compruebe `len(roster)` en el momento de pujar, no las pujas
+    # pendientes. `decide_bids_for_market` recorre `prioritized` (ver
+    # abajo) ya ordenado por score+boosts de mayor a menor -- pasarle
+    # `max_bids` respeta ese mismo orden de importancia.
+    available_roster_slots = None
+    if max_roster_size is not None:
+        available_roster_slots = max(0, max_roster_size - len(roster_ids) - len(already_bid_ids))
+
     at_risk_positions = set()
     upgrade_thresholds = {}
     lineup_score_by_id = {}
@@ -247,7 +268,12 @@ def run():
     player_cap = dynamic_player_cap(remaining_budget, squad_raw, ranked)
 
     decisions = decide_bids_for_market(
-        prioritized, remaining_budget, already_risked, pending_committed=pending_committed, player_cap=player_cap
+        prioritized,
+        remaining_budget,
+        already_risked,
+        max_bids=available_roster_slots,
+        pending_committed=pending_committed,
+        player_cap=player_cap,
     )
 
     # Candidatos buenos (no descartados por score/precio, ver
