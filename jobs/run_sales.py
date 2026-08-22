@@ -77,9 +77,22 @@ def run():
     information = client.get_information()
     budget = information.get("answer", {}).get("budget", 0)
 
+    # Ocupación de plantilla (mismo campo que jobs/run_market.py usa para
+    # cortar pujas por límite de plazas) -- puramente informativo aquí:
+    # decide_sales() sigue sin usarlo (vende solo por plusvalía/pérdida/
+    # concentración de capital, ver docstring del módulo), pero se incluye
+    # SIEMPRE en la notificación para poder correlacionar a simple vista
+    # "plantilla llena/casi llena + nada que vender" con que run_market
+    # esté bloqueando pujas por falta de plazas.
+    max_roster_size = information.get("answer", {}).get("configuration", {}).get("numberOfPlayers")
+    occupancy = f"{len(roster_items)}/{max_roster_size}" if max_roster_size is not None else str(len(roster_items))
+
     decisions = decide_sales(roster_items, bought_by_bot=get_won_bid_prices(), budget=budget)
     if not decisions:
-        notify("run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución.")
+        notify(
+            f"run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución "
+            f"(plantilla {occupancy})."
+        )
         return
 
     # Prima por revalorización rápida (ver docstring del módulo) -- una
@@ -111,7 +124,7 @@ def run():
                 _persist_sale(conn, decision, "failed", now)
                 failed.append((decision, str(e)))
 
-    summary = [f"run_sales: {len(listed)} jugador(es) puesto(s) en venta."]
+    summary = [f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy})."]
     for d in listed:
         summary.append(
             f"  - jugador {d['player_id']}: pide {d['asking_price']} "

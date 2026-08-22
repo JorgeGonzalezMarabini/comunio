@@ -44,6 +44,29 @@ def test_run_sales_no_profitable_candidates_notifies_and_returns(tmp_db):
         assert conn.execute("SELECT COUNT(*) AS n FROM sales").fetchone()["n"] == 0
 
 
+def test_run_sales_reports_roster_occupancy_alongside_futmondo_client(tmp_db):
+    """
+    Regresión (2026-08-22, a petición del usuario): la notificación debe
+    incluir siempre la ocupación de plantilla (mismo campo
+    `configuration.numberOfPlayers` que usa jobs/run_market.py) -- para
+    poder correlacionar a simple vista "plantilla llena/casi llena + nada
+    que vender aquí" con que run_market esté bloqueando pujas por falta de
+    plazas.
+    """
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [dict(p) for p in ROSTER_442_BASE]}  # 11 jugadores
+
+        def get_information(self):
+            return {"answer": {"budget": 0, "configuration": {"numberOfPlayers": 20}}}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert "11/20" in captured[0]
+
+
 def test_run_sales_lists_profitable_player_and_persists(tmp_db):
     roster = [dict(p) for p in ROSTER_442_BASE]
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
