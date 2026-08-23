@@ -541,6 +541,284 @@ def test_decide_sales_market_upgrade_does_not_apply_to_confirmed_injury():
     assert "se vende siempre" in decisions[0]["reason"]
 
 
+# --- Refinamientos de "oportunidad de mercado" (2026-08-23) ---
+# Caso real que los motivó: el mismo día se vendieron a la vez Raba+Brugué
+# por DEL y Camavinga+Dieng por MED, cada pareja justificada por un ÚNICO
+# mejor candidato de mercado en su posición -- de ese candidato solo se
+# puede fichar uno.
+
+WEEKDAY_NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)  # miércoles
+SATURDAY_NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)  # sábado
+
+
+def test_decide_sales_market_upgrade_caps_at_one_sale_per_position_by_default():
+    """
+    Dos suplentes DEF cualifican por oportunidad de mercado contra el
+    MISMO mejor candidato -- de ese candidato solo se puede fichar uno, así
+    que solo se vende el de mayor margen (peor suplente relativo, id=15),
+    no los dos (config.SELLING_UPGRADE_MAX_SALES_PER_POSITION=1 por
+    defecto).
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra1", "role": "defensa", "status": "", "value": 500_000})
+    squad.append({"id": 16, "name": "Defensa Extra2", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000, "16": 500_000}
+
+    own_squad_features = [
+        _feature_row(15, "DEF", xg=0.0, minutes_played=0),  # peor suplente -> mayor margen
+        _feature_row(16, "DEF", xg=3.0, minutes_played=600),  # algo mejor -> margen más pequeño
+    ]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 15
+
+
+def test_decide_sales_market_upgrade_blocks_expensive_candidate_with_poor_price_efficiency():
+    """
+    "No podemos comparar la calidad de un jugador de 4 millones con uno de
+    50": aunque el margen de score bruto (0.70) supere de sobra
+    `upgrade_available_min_margin`, si el candidato objetivo cuesta 49.5M
+    más que el propio jugador, el margen de score por millón extra
+    (0.014) no llega a `SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION`
+    (0.03 por defecto) -- no se vende.
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000}
+
+    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
+    market_candidates = [_feature_row("mercado1", "DEF", price=50_000_000, xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        budget=100_000_000,  # de sobra para pagarlo -- aísla el filtro de eficiencia del de asequibilidad
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_market_upgrade_allows_pricier_candidate_with_good_efficiency():
+    """Mismo margen que el test anterior, pero el candidato solo cuesta 1.5M más -- eficiencia 0.47, sí compensa."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000}
+
+    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
+    market_candidates = [_feature_row("mercado1", "DEF", price=2_000_000, xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        budget=2_000_000,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 15
+    assert "precio objetivo 2000000" in decisions[0]["reason"]
+
+
+def test_decide_sales_market_upgrade_blocked_when_not_affordable_even_with_sale_proceeds():
+    """El candidato objetivo (2M) no cabe ni sumando lo que liberaría la venta (0.5M) al presupuesto (0) -- no se vende."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000}
+
+    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
+    market_candidates = [_feature_row("mercado1", "DEF", price=2_000_000, xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        budget=0,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_market_upgrade_shares_budget_across_positions_prioritizing_larger_margin():
+    """
+    DEF (margen 0.70) y MED (margen 0.35) cualifican a la vez, cada uno
+    contra un candidato de 2M, pero el presupuesto compartido (2M) más lo
+    que libera cada venta (0.5M) solo llega para UNO de los dos -- gana el
+    de mayor margen (DEF), MED se descarta esta vez (a petición del
+    usuario: "llevar la cuenta del presupuesto sacrificado").
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    squad.append({"id": 25, "name": "Medio Extra", "role": "centrocampista", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000, "25": 500_000}
+
+    own_squad_features = [
+        _feature_row(15, "DEF", xg=0.0, minutes_played=0),  # margen 0.70 frente al mejor DEF
+        _feature_row(25, "MED", xg=5.0, minutes_played=450),  # margen 0.35 frente al mejor MED
+    ]
+    market_candidates = [
+        _feature_row("def_best", "DEF", price=2_000_000, xg=10.0, minutes_played=900),
+        _feature_row("med_best", "MED", price=2_000_000, xg=10.0, minutes_played=900),
+        # candidato MED flojo, solo para dar rango de normalización al grupo MED (no es el "mejor")
+        _feature_row("med_floor", "MED", price=500_000, xg=0.0, minutes_played=0),
+    ]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        budget=2_000_000,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 15  # DEF, mayor margen, se queda el presupuesto compartido
+
+
+def test_decide_sales_market_upgrade_blocks_when_target_listing_expires_too_soon():
+    """
+    Al candidato objetivo solo le quedan 2h de mercado -- menos de las 24h
+    que se asume que tardará en resolverse nuestra propia venta
+    (config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS) -- no tiene sentido
+    vender para intentar comprarlo, no se vende.
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000}
+
+    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+        market_listing_expirations={"mercado1": "2026-08-26T14:00:00+00:00"},  # +2h
+        now=WEEKDAY_NOW,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_market_upgrade_allows_when_target_listing_has_enough_time():
+    """Mismo caso, pero al candidato le quedan 72h -- de sobra para resolver nuestra venta antes -- sí se vende."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000}
+
+    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+        market_listing_expirations={"mercado1": "2026-08-29T12:00:00+00:00"},  # +72h
+        now=WEEKDAY_NOW,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 15
+
+
+def test_decide_sales_market_upgrade_ignores_timing_filter_without_expiration_data():
+    """Sin `market_listing_expirations` (o sin entrada para ese candidato), el filtro de tiempo queda desactivado."""
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    bought_by_bot = {"15": 500_000}
+
+    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+        now=WEEKDAY_NOW,
+    )
+    assert len(decisions) == 1
+
+
+def test_decide_sales_weekend_guard_blocks_any_reason_for_a_starter():
+    """
+    Bloqueo defensivo (config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD): en fin
+    de semana, un titular guardado no se vende NI SIQUIERA por lesión
+    confirmada (la vía incondicional) -- ninguna vía queda exenta.
+    """
+    squad = _full_442_squad()
+    squad[1]["status"] = "injured2"  # Defensa0 (id=10)
+    bought_by_bot = {"10": 500_000}
+
+    decisions = decide_sales(
+        squad,
+        bought_by_bot=bought_by_bot,
+        own_lineup_player_ids={"10"},
+        now=SATURDAY_NOW,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_weekend_guard_does_not_apply_on_a_weekday():
+    """Mismo caso que el anterior, pero en día de partido normal (miércoles) -- sí se vende."""
+    squad = _full_442_squad()
+    squad[1]["status"] = "injured2"
+    bought_by_bot = {"10": 500_000}
+
+    decisions = decide_sales(
+        squad,
+        bought_by_bot=bought_by_bot,
+        own_lineup_player_ids={"10"},
+        now=WEEKDAY_NOW,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 10
+
+
+def test_decide_sales_weekend_guard_disabled_without_own_lineup_data():
+    """Sin `own_lineup_player_ids`, el bloqueo de fin de semana queda desactivado -- comportamiento idéntico al de antes."""
+    squad = _full_442_squad()
+    squad[1]["status"] = "injured2"
+    bought_by_bot = {"10": 500_000}
+
+    decisions = decide_sales(squad, bought_by_bot=bought_by_bot, now=SATURDAY_NOW)
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 10
+
+
+def test_decide_sales_weekend_guard_can_be_disabled_explicitly():
+    """`enable_weekend_lineup_guard=False` desactiva el bloqueo aunque haya `own_lineup_player_ids` y sea fin de semana."""
+    squad = _full_442_squad()
+    squad[1]["status"] = "injured2"
+    bought_by_bot = {"10": 500_000}
+
+    decisions = decide_sales(
+        squad,
+        bought_by_bot=bought_by_bot,
+        own_lineup_player_ids={"10"},
+        now=SATURDAY_NOW,
+        enable_weekend_lineup_guard=False,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == 10
+
+
 # --- compute_revaluation_premium_pct / apply_revaluation_premium (2026-08-22) ---
 
 

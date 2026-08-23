@@ -107,6 +107,74 @@ aunque profit_pct no llegue a ningún otro umbral. Ambos parámetros son
 opcionales (`None`/vacíos por defecto): si el llamador no los pasa, esta
 vía queda desactivada sin más, backward-compatible con el resto de usos
 de `decide_sales()`.
+
+Refinamientos de "oportunidad de mercado" (a petición del usuario,
+2026-08-23, caso real: el mismo día se vendieron a la vez Raba+Brugué por
+DEL y Camavinga+Dieng por MED, cada pareja justificada por un ÚNICO mejor
+candidato de mercado en su posición -- de ese candidato solo se puede
+fichar uno, así que vender a los dos no tenía sentido). Los cuatro se
+aplican SOLO a un candidato que cualifica ÚNICAMENTE por esta vía (si
+también cualifica por plusvalía/pérdida/lesión, esas vías mandan y estos
+filtros no aplican -- ver `reason` más abajo):
+
+  a) Como mucho `max_upgrade_sales_per_position`
+     (config.SELLING_UPGRADE_MAX_SALES_PER_POSITION, por defecto 1) venta
+     por posición y ejecución vía esta vía -- si varios candidatos propios
+     de la misma posición cualifican, se prioriza el de mayor margen de
+     score (peor suplente relativo); el resto se descarta esta vez, igual
+     que ya ocurre con el margen de banquillo.
+
+  b) Eficiencia marginal de precio
+     (`upgrade_min_score_per_extra_million`, config.
+     SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION): si el candidato
+     objetivo es más caro que el propio jugador, el margen de score por
+     MILLÓN EXTRA de precio debe superar este umbral -- evita comparar
+     directamente la calidad de un jugador de 4M con uno de 50M solo
+     porque el margen de score bruto ya superaba
+     `upgrade_available_min_margin` (a petición del usuario: "no podemos
+     comparar la calidad de un jugador de 4 millones con uno de 50"). Si
+     el candidato es igual o más barato, no se exige nada extra aquí.
+
+  c) Asequibilidad, con presupuesto COMPARTIDO entre posiciones: los
+     candidatos que sobreviven (a) y (b) se procesan en orden de mayor
+     margen de score primero (a petición del usuario, para que la
+     oportunidad más clara se quede el presupuesto si varias compiten a
+     la vez), acumulando cuánto se iría "gastando" (precio del candidato
+     objetivo) sobre `budget` + lo que liberaría cada venta ya aprobada en
+     esta misma pasada. Si no alcanza para el precio del candidato
+     objetivo, esa posición se descarta esta vez (no compite más por el
+     presupuesto restante) -- evita autorizar dos ventas cuyos objetivos
+     juntos no se podrían pagar en la misma jornada, aunque cada una por
+     separado sí pareciera asequible.
+
+  d) Ventana de tiempo del listado objetivo
+     (`assumed_sale_resolution_hours`, config.
+     SELLING_ASSUMED_SALE_RESOLUTION_HOURS, y `market_listing_expirations`
+     con el `expirationDate` real del candidato, de
+     `FutmondoClient.get_market()`): si al candidato objetivo le queda
+     menos tiempo en el mercado del que se asume que tardará en resolverse
+     nuestra propia venta, no tiene sentido vender con ese objetivo
+     concreto -- para cuando tengamos el dinero, el candidato ya no estará
+     listado. Sin `expirationDate` del candidato (dato no disponible o
+     candidato sin listado real detrás), este filtro queda desactivado
+     para ese candidato, no bloquea por defecto.
+
+Los cuatro son opcionales/con default de config -- si el llamador no pasa
+`market_listing_expirations`, (d) simplemente no bloquea a nadie; (a),
+(b) y (c) siempre están activos (tienen default de config, no se pueden
+desactivar por completo, a diferencia de la vía entera que sí depende de
+`own_squad_features`/`market_candidates`).
+
+Bloqueo de alineado en fin de semana (config.
+ENABLE_SELLING_WEEKEND_LINEUP_GUARD, activado por defecto, a petición del
+usuario 2026-08-23): si `own_lineup_player_ids` viene informado (ids de
+`FutmondoClient.get_lineup()["answer"]["players"]`, los TITULARES
+guardados, no el banquillo) y hoy es sábado/domingo, ningún jugador de esa
+lista se pone en venta esta pasada, sea cual sea el motivo (ninguna de las
+cinco vías queda exenta) -- no está confirmado si Futmondo penaliza vender
+a un titular con la jornada en juego, así que es puramente preventivo.
+Sin `own_lineup_player_ids`, este bloqueo queda desactivado (no se puede
+aplicar sin saber quién está alineado).
 """
 from __future__ import annotations
 
@@ -129,6 +197,13 @@ def decide_sales(
     own_squad_features: list[dict] = None,
     market_candidates: list[dict] = None,
     upgrade_available_min_margin: float = None,
+    max_upgrade_sales_per_position: int = None,
+    upgrade_min_score_per_extra_million: float = None,
+    market_listing_expirations: dict[str, str] = None,
+    assumed_sale_resolution_hours: float = None,
+    own_lineup_player_ids=None,
+    enable_weekend_lineup_guard: bool = None,
+    now: datetime = None,
 ) -> list[dict]:
     """
     `squad`: items reales de FutmondoClient.get_roster()["answer"] (necesita
@@ -188,6 +263,30 @@ def decide_sales(
     candidato de mercado en la misma posición debe superar al score de
     alineación propio del jugador antes de venderlo solo por esto.
 
+    `max_upgrade_sales_per_position`, `upgrade_min_score_per_extra_million`,
+    `market_listing_expirations`, `assumed_sale_resolution_hours`: los
+    cuatro refinamientos de la vía 5 (ver docstring del módulo,
+    "Refinamientos de oportunidad de mercado") — límite por posición,
+    eficiencia marginal de precio, ventana de tiempo del listado objetivo
+    y asequibilidad con presupuesto compartido entre posiciones. Todos por
+    defecto de config salvo `market_listing_expirations` ({} si se omite,
+    desactiva solo el filtro de tiempo).
+
+    `own_lineup_player_ids`: ids (cualquier tipo, se normalizan a string)
+    de los TITULARES guardados ahora mismo (`FutmondoClient.get_lineup()
+    ["answer"]["players"]`, no el banquillo). Si se omite, el bloqueo de
+    fin de semana (ver abajo) queda desactivado sin más.
+
+    `enable_weekend_lineup_guard`: por defecto
+    config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD — si está activo Y hoy es
+    sábado/domingo (`now`), ningún jugador presente en
+    `own_lineup_player_ids` se pone en venta esta pasada, sea cual sea el
+    motivo (ver docstring del módulo).
+
+    `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
+    tests deterministas (afecta al bloqueo de fin de semana y a la
+    comparación de tiempo del listado objetivo).
+
     Devuelve una decisión por cada jugador que cumpla CUALQUIERA de estas
     cinco condiciones (Y cuya posición siga teniendo margen de suplentes
     sanos después de la venta, salvo que ya esté lesionado/en duda —
@@ -211,7 +310,14 @@ def decide_sales(
       5. No está lesionado/en duda, y el mejor candidato de mercado en su
          misma posición supera su score de alineación en
          `upgrade_available_min_margin` — oportunidad de mercado, solo si
-         `own_squad_features`/`market_candidates` vienen informados.
+         `own_squad_features`/`market_candidates` vienen informados. Si
+         esta es la ÚNICA vía que aplica, además tiene que sobrevivir los
+         cuatro refinamientos de arriba (tope por posición, eficiencia de
+         precio, ventana de tiempo, asequibilidad compartida).
+
+    Ningún jugador presente en `own_lineup_player_ids` se vende en fin de
+    semana, sea cual sea la vía (ver `enable_weekend_lineup_guard`) — esto
+    se comprueba ANTES de evaluar las cinco vías de arriba.
 
     Cada decisión:
         {"player_id", "asking_price", "purchase_price", "profit",
@@ -242,6 +348,32 @@ def decide_sales(
         if upgrade_available_min_margin is None
         else upgrade_available_min_margin
     )
+    max_upgrade_sales_per_position = (
+        config.SELLING_UPGRADE_MAX_SALES_PER_POSITION
+        if max_upgrade_sales_per_position is None
+        else max_upgrade_sales_per_position
+    )
+    upgrade_min_score_per_extra_million = (
+        config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION
+        if upgrade_min_score_per_extra_million is None
+        else upgrade_min_score_per_extra_million
+    )
+    assumed_sale_resolution_hours = (
+        config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS
+        if assumed_sale_resolution_hours is None
+        else assumed_sale_resolution_hours
+    )
+    enable_weekend_lineup_guard = (
+        config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
+        if enable_weekend_lineup_guard is None
+        else enable_weekend_lineup_guard
+    )
+    now = now or datetime.now(timezone.utc)
+    market_listing_expirations = market_listing_expirations or {}
+    own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
+    # Aproximación por día de la semana (sábado=5, domingo=6) -- no
+    # distingue la hora exacta de los partidos, ver docstring del módulo.
+    is_weekend_now = now.weekday() >= 5
     bought_by_bot = bought_by_bot or {}
 
     # Capital total del equipo (plantilla + presupuesto disponible) --
@@ -257,7 +389,12 @@ def decide_sales(
     # falta cualquiera de los dos, esta vía queda desactivada (diccionarios
     # vacíos -> ningún candidato la activa más abajo).
     lineup_score_by_id = {}
-    best_market_lineup_score_by_position = {}
+    # Antes solo se guardaba el score float del mejor candidato por
+    # posición; ahora se guarda el candidato completo (id/score/price) --
+    # hace falta su precio real y su id para los refinamientos de la vía 5
+    # (eficiencia de precio, asequibilidad, tiempo del listado, ver
+    # docstring del módulo).
+    best_market_candidate_by_position = {}
     if own_squad_features and market_candidates:
         lineup_scored = evaluate_players(
             list(own_squad_features) + list(market_candidates), weights=config.LINEUP_EVALUATOR_WEIGHTS
@@ -270,8 +407,13 @@ def decide_sales(
             position_key = p.get("position")
             if position_key is None:
                 continue
-            if p["score"] > best_market_lineup_score_by_position.get(position_key, float("-inf")):
-                best_market_lineup_score_by_position[position_key] = p["score"]
+            existing = best_market_candidate_by_position.get(position_key)
+            if existing is None or p["score"] > existing["score"]:
+                best_market_candidate_by_position[position_key] = {
+                    "id": str(p["id"]),
+                    "score": p["score"],
+                    "price": p.get("price") or 0,
+                }
 
     candidates = []
     for player in squad:
@@ -290,6 +432,13 @@ def decide_sales(
             # candidato y `FutmondoClient.list_for_sale()` fallaba con
             # `api.error.not_found` al reintentar un listado que ya existe
             # (confirmado en vivo 2026-08-22, jugador Dieng).
+            continue
+
+        if enable_weekend_lineup_guard and is_weekend_now and str(player["id"]) in own_lineup_ids:
+            # Bloqueo defensivo (ver docstring del módulo): titular
+            # guardado y hoy es fin de semana -- no se vende, sea cual sea
+            # el motivo, por si acaso el juego penaliza o complica vender
+            # a alguien alineado con la jornada en juego (sin confirmar).
             continue
 
         profit = current_price - purchase_price
@@ -323,7 +472,8 @@ def decide_sales(
         # actual de alguien que no puede jugar no es representativa).
         position_key = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
         own_lineup_score = lineup_score_by_id.get(str(player["id"]))
-        best_available_lineup_score = best_market_lineup_score_by_position.get(position_key)
+        best_market_candidate = best_market_candidate_by_position.get(position_key)
+        best_available_lineup_score = best_market_candidate["score"] if best_market_candidate else None
         market_upgrade_available = (
             not is_injured_or_doubtful
             and own_lineup_score is not None
@@ -339,6 +489,19 @@ def decide_sales(
             and not market_upgrade_available
         ):
             continue
+
+        # True si "oportunidad de mercado" es la ÚNICA vía que aplica --
+        # solo estos candidatos pasan por los cuatro refinamientos
+        # adicionales de la vía 5 (ver docstring del módulo); el resto
+        # (rentabilidad/pérdida/concentración/lesión) no mira precio del
+        # objetivo en absoluto, esas vías se venden igual.
+        only_market_reason = (
+            market_upgrade_available
+            and profit_pct < min_profit_pct
+            and not cutting_losses
+            and not overconcentrated
+            and not force_sell_confirmed_injury
+        )
 
         candidates.append(
             (
@@ -356,6 +519,8 @@ def decide_sales(
                 own_lineup_score,
                 best_available_lineup_score,
                 force_sell_confirmed_injury,
+                only_market_reason,
+                best_market_candidate,
             )
         )
 
@@ -366,6 +531,55 @@ def decide_sales(
     # compiten por margen de banquillo de todos modos (ver más abajo: un
     # lesionado nunca contó como "disponible", así que no descuenta bench).
     candidates.sort(key=lambda c: c[3], reverse=True)
+
+    # Refinamientos de la vía 5 (ver docstring del módulo) -- SOLO para
+    # candidatos donde "oportunidad de mercado" es la ÚNICA vía que
+    # aplica. Se resuelven en un pre-paso propio, independiente del orden
+    # por plusvalía de arriba (aquí manda el margen de score, a petición
+    # del usuario): a) como mucho `max_upgrade_sales_per_position` por
+    # posición (el de mayor margen se queda la plaza), luego b)+c)+d) en
+    # ese mismo orden de mayor margen, para que la oportunidad más clara
+    # se quede el presupuesto compartido si varias compiten a la vez.
+    market_only_entries = [
+        (c[12] - c[11], FUTMONDO_POSITION_MAP.get(c[0].get("role"), c[0].get("role")), c[0], c[15])
+        for c in candidates
+        if c[14]  # only_market_reason
+    ]
+    market_only_entries.sort(key=lambda t: t[0], reverse=True)
+
+    count_by_position = {}
+    shortlisted = []
+    for margin, position_key, player, best_candidate in market_only_entries:
+        if count_by_position.get(position_key, 0) >= max_upgrade_sales_per_position:
+            continue  # ya se autorizó el máximo para esta posición esta vez (a)
+        count_by_position[position_key] = count_by_position.get(position_key, 0) + 1
+        shortlisted.append((margin, position_key, player, best_candidate))
+
+    approved_market_only_ids = set()
+    available_budget = max(0, budget)
+    for margin, position_key, player, best_candidate in shortlisted:
+        best_candidate = best_candidate or {}
+        target_price = best_candidate.get("price") or 0
+        own_price = player.get("value", 0)
+
+        extra_cost = target_price - own_price
+        if extra_cost > 0:
+            efficiency = margin / (extra_cost / 1_000_000)
+            if efficiency < upgrade_min_score_per_extra_million:
+                continue  # (b) el margen de score no compensa lo mucho más caro que es el objetivo
+
+        target_expiration = _parse_iso_datetime(market_listing_expirations.get(best_candidate.get("id")))
+        if target_expiration is not None:
+            time_left = target_expiration - now
+            if time_left < timedelta(hours=assumed_sale_resolution_hours):
+                continue  # (d) el listado objetivo cerraría antes de que nuestra venta se resuelva
+
+        prospective_budget = available_budget + own_price
+        if target_price > prospective_budget:
+            continue  # (c) no llegaríamos a cubrir el precio del candidato objetivo con lo disponible
+
+        available_budget = prospective_budget - target_price  # (c) se "reserva" para el resto de esta pasada
+        approved_market_only_ids.add(str(player["id"]))
 
     # Margen de suplentes sanos por posición ANTES de vender nada (ver
     # engine.squad_risk.assess_squad_depth) — se va descontando según se
@@ -391,7 +605,12 @@ def decide_sales(
         own_lineup_score,
         best_available_lineup_score,
         force_sell_confirmed_injury,
+        only_market_reason,
+        best_market_candidate,
     ) in candidates:
+        if only_market_reason and str(player["id"]) not in approved_market_only_ids:
+            continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
+
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
 
         # Un jugador ya lesionado/sancionado no contaba como "disponible"
@@ -435,11 +654,19 @@ def decide_sales(
                 "fichar a otro en su lugar"
             )
         else:
+            target_price = (best_market_candidate or {}).get("price") or 0
+            extra_cost = target_price - player.get("value", 0)
+            precio_nota = (
+                f", precio objetivo {target_price} (+{extra_cost} sobre el propio, ya comprobado eficiencia "
+                "de precio/asequibilidad/tiempo de listado)"
+                if extra_cost > 0
+                else f", precio objetivo {target_price} (no más caro que el propio)"
+            )
             reason = (
                 f"oportunidad de mercado: sin plusvalía suficiente ({profit_pct:+.1%}), pero el mejor candidato "
                 f"de mercado en {position} tiene score de alineación {best_available_lineup_score:.3f} frente a "
-                f"{own_lineup_score:.3f} propio (>= margen {upgrade_available_min_margin}); se libera la plaza "
-                "de cara a esa oportunidad, aunque hoy no compense económicamente"
+                f"{own_lineup_score:.3f} propio (>= margen {upgrade_available_min_margin}){precio_nota}; se "
+                "libera la plaza de cara a esa oportunidad, aunque hoy no compense económicamente"
             )
 
         decisions.append(
@@ -455,12 +682,15 @@ def decide_sales(
     return decisions
 
 
-def _parse_summary_date(value) -> datetime | None:
+def _parse_iso_datetime(value) -> datetime | None:
     """
-    Parsea la fecha de una entrada de `FutmondoClient.get_player_summary()
-    ["answer"]["prices"]` -- string ISO-8601 con milisegundos y `Z`,
-    CONFIRMADO en vivo 2026-08-22 (ver TODO.md #14 y docstring de
-    `get_player_summary()`), igual que `expirationDate`/`creationDate`. Se
+    Parsea una fecha ISO-8601 con milisegundos y `Z` -- formato CONFIRMADO
+    en vivo tanto para `FutmondoClient.get_player_summary()["answer"]
+    ["prices"][].date` (2026-08-22, ver TODO.md #14) como para
+    `expirationDate`/`creationDate` de listados de mercado (ver
+    `clients/futmondo_client.py`) -- de ahí que esta función, pese al
+    nombre histórico, sirva para ambos usos dentro de este módulo (ver
+    `decide_sales()`, ventana de tiempo del candidato objetivo). Se
     soporta también epoch numérico (segundos o milisegundos) como
     fallback defensivo, nunca visto en la práctica pero sin coste
     mantenerlo. Cualquier valor que no encaje en ninguno de los dos ->
@@ -506,7 +736,7 @@ def compute_revaluation_premium_pct(
     `get_player_summary()` -- `date` ISO-8601, `price` es el VM diario
     real). Esta función se mantiene igualmente defensiva más allá de esa
     confirmación (nunca revienta con datos inesperados, ver
-    `_parse_summary_date()`): entradas sin "date"/"price" parseables (o con
+    `_parse_iso_datetime()`): entradas sin "date"/"price" parseables (o con
     precio <= 0) se descartan sin más, no cuentan como dato.
 
     Condiciones, TODAS necesarias para proponer una prima > 0 (si falla
@@ -551,7 +781,7 @@ def compute_revaluation_premium_pct(
 
     parsed = []
     for entry in prices or []:
-        date = _parse_summary_date(entry.get("date"))
+        date = _parse_iso_datetime(entry.get("date"))
         price = entry.get("price")
         if date is None or not isinstance(price, (int, float)) or price <= 0:
             continue

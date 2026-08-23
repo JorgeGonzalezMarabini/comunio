@@ -26,10 +26,23 @@ class _BaseFakeClient(FutmondoClient):
     la implementación real y lanzaría FutmondoAuthError contra credenciales
     None (ver `no_real_futmondo_network` en conftest.py). Los tests que sí
     quieren ejercitar ofertas recibidas sobrescriben este método aparte.
+
+    Mismo motivo para `get_market()`/`get_lineup()` (añadidas 2026-08-23,
+    ver docstring del módulo de jobs/run_sales.py -- expirationDate de
+    mercado y alineación titular para los refinamientos de la vía 5 de
+    engine/selling_strategy.py): por defecto, sin mercado ni alineación,
+    para que los tests que no ejercitan esos refinamientos no necesiten
+    sobrescribirlas una por una.
     """
 
     def get_my_players_in_market(self):
         return {"answer": []}
+
+    def get_market(self):
+        return {"answer": []}
+
+    def get_lineup(self):
+        return {"answer": {"players": []}}
 
 
 def _mark_won(player_id, amount):

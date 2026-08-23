@@ -358,6 +358,56 @@ SELLING_INJURY_CONCENTRATION_MAX_PCT = float(os.getenv("SELLING_INJURY_CONCENTRA
 # resultados reales.
 SELLING_UPGRADE_AVAILABLE_MIN_MARGIN = float(os.getenv("SELLING_UPGRADE_AVAILABLE_MIN_MARGIN", "0.30"))
 
+# Máximo de ventas por POSICIÓN y ejecución que puede autorizar la vía
+# "oportunidad de mercado" (a petición del usuario, 2026-08-23, caso real:
+# el mismo mejor candidato de DEL justificó vender a Raba Y Brugué a la
+# vez, y el de MED a Camavinga Y Dieng -- pero de ese candidato solo se
+# puede fichar UNO). Si varios jugadores propios de la misma posición
+# cualifican, se prioriza el de mayor margen de score (peor suplente
+# relativo, ver engine/selling_strategy.py); el resto se descarta esta
+# vez, no se difiere ni se fuerza -- igual que ocurre ya con el margen de
+# banquillo.
+SELLING_UPGRADE_MAX_SALES_PER_POSITION = int(os.getenv("SELLING_UPGRADE_MAX_SALES_PER_POSITION", "1"))
+
+# Eficiencia marginal mínima exigida (score de alineación por MILLÓN
+# EXTRA de precio) cuando el mejor candidato de mercado es más caro que el
+# propio jugador que se plantea vender -- a petición del usuario,
+# 2026-08-23: "no podemos comparar la calidad de un jugador de 4 millones
+# con uno de 50". SELLING_UPGRADE_AVAILABLE_MIN_MARGIN por sí solo no
+# distingue esto (un margen de score de 0.35 es igual de "suficiente" si
+# el candidato cuesta 2M más o 55M más que el propio jugador) -- este
+# umbral exige que el margen de score sea proporcional al sobrecoste real:
+# margen_score / (precio_candidato - precio_propio en millones) debe
+# superar este valor. Solo se aplica cuando el candidato es MÁS caro (si
+# es igual o más barato, el margen de score por sí solo ya basta, es
+# upgrade "gratis" o barato). Sin calibrar todavía con resultados reales.
+SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION = float(os.getenv("SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION", "0.03"))
+
+# Horas asumidas que tarda en RESOLVERSE nuestra propia venta una vez
+# listada -- a petición del usuario, 2026-08-23 ("el plazo es de 24 horas
+# desde el inicio de la oferta"): Futmondo no da un `expirationDate` fijo
+# para un listado nuestro antes de crearlo (lo decide el juego al listar,
+# ver `FutmondoClient.list_for_sale()`), así que esto es una APROXIMACIÓN
+# deliberadamente conservadora del "caso peor" (nadie puja hasta el final
+# de esa ventana), usada solo para comparar contra el tiempo que le queda
+# al listado del candidato objetivo (`expirationDate` real, ese sí
+# confirmado, ver clients/futmondo_client.py) antes de vender "para poder
+# comprar a X" -- si a X le queda menos tiempo en el mercado del que
+# asumimos que tardará nuestra venta en resolverse, no tiene sentido
+# vender con ese objetivo concreto (para cuando tengamos el dinero, X ya
+# no estará). Sin dato exacto por puja individual todavía (ver TODO.md).
+SELLING_ASSUMED_SALE_RESOLUTION_HOURS = float(os.getenv("SELLING_ASSUMED_SALE_RESOLUTION_HOURS", "24"))
+
+# Bloqueo defensivo (a petición del usuario, 2026-08-23): en fin de semana
+# (sábado/domingo, aproximación por día de la semana -- no distingue hora
+# exacta de los partidos), NUNCA se pone en venta a un jugador que esté en
+# la alineación TITULAR guardada del bot (`FutmondoClient.get_lineup()`),
+# sea cual sea el motivo (ninguna de las cinco vías queda exenta) -- no
+# está confirmado si Futmondo bloquea o penaliza vender a un titular
+# mientras la jornada está en juego, así que este bloqueo es puramente
+# preventivo, para no arriesgar los puntos de la jornada en curso.
+ENABLE_SELLING_WEEKEND_LINEUP_GUARD = os.getenv("ENABLE_SELLING_WEEKEND_LINEUP_GUARD", "true").lower() == "true"
+
 # Prima sobre el precio de venta pedido por revalorización rápida sostenida
 # (a petición del usuario, 2026-08-22, ver engine.selling_strategy.
 # compute_revaluation_premium_pct/apply_revaluation_premium): usa el

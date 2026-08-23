@@ -61,6 +61,25 @@ futuro, no para resolver una oportunidad concreta en la misma pasada --
 por eso NUNCA hay que intentar "vender y pujar ya" en el mismo run: la
 puja nueva fallaría igual por api.market.max_number_players_in_roster
 mientras la venta no se haya resuelto de verdad.
+
+Refinamientos de esa misma vía (a petición del usuario, 2026-08-23, caso
+real: el mismo día se vendieron a la vez Raba+Brugué por DEL y
+Camavinga+Dieng por MED, cada pareja justificada por un ÚNICO mejor
+candidato de mercado en su posición -- de ese candidato solo se puede
+fichar uno, ver docstring de engine/selling_strategy.py para el detalle
+completo de los cuatro filtros): límite de una venta por posición y
+ejecución por esta vía, eficiencia marginal de precio/score (no comparar
+un jugador de 4M con uno de 50M solo por diferencia de score bruto),
+presupuesto compartido entre posiciones si varias compiten a la vez, y
+ventana de tiempo del listado objetivo. Este job pasa además dos datos
+EN VIVO nuevos, ninguno disponible en el snapshot local de
+`get_player_features()`: `expirationDate` real de cada listado de
+mercado (de `FutmondoClient.get_market()`, para el filtro de tiempo) y la
+alineación TITULAR guardada ahora mismo (de `FutmondoClient.get_lineup()`,
+para el bloqueo de fin de semana). Un fallo de red en cualquiera de las
+dos NO bloquea el resto del job -- ese refinamiento concreto queda
+desactivado dentro de `decide_sales()`, igual que el resto de datos
+opcionales de este módulo.
 """
 from datetime import datetime, timezone
 
@@ -228,12 +247,40 @@ def run():
     own_squad_features = [p for p in all_players if p["id"] in roster_ids]
     market_candidates = get_player_features(only_on_market=True)
 
+    # Tiempo restante de cada listado de mercado (para el refinamiento
+    # "ventana de tiempo" de la vía 5, ver docstring de
+    # engine/selling_strategy.py) -- llamada en vivo aparte de
+    # get_player_features(): ese snapshot local (futmondo_snapshots) NO
+    # guarda `expirationDate`, solo la llamada real a get_market() lo
+    # trae. Un fallo de red aquí no bloquea nada -- decide_sales() trata
+    # un player_id sin entrada aquí como "sin dato", ese refinamiento
+    # simplemente queda desactivado para ese candidato.
+    try:
+        market_listing_expirations = {
+            str(p["id"]): p.get("expirationDate") for p in client.get_market().get("answer", [])
+        }
+    except requests.RequestException:
+        market_listing_expirations = {}
+
+    # Alineación TITULAR guardada ahora mismo (para el bloqueo de fin de
+    # semana de decide_sales(), ver su docstring) -- un fallo de red aquí
+    # tampoco bloquea nada, ese bloqueo simplemente queda desactivado sin
+    # `own_lineup_player_ids`.
+    try:
+        own_lineup_player_ids = {
+            str(p["id"]) for p in client.get_lineup().get("answer", {}).get("players", [])
+        }
+    except requests.RequestException:
+        own_lineup_player_ids = set()
+
     decisions = decide_sales(
         roster_items,
         bought_by_bot=get_won_bid_prices(),
         budget=budget,
         own_squad_features=own_squad_features,
         market_candidates=market_candidates,
+        market_listing_expirations=market_listing_expirations,
+        own_lineup_player_ids=own_lineup_player_ids,
     )
     if not decisions:
         report_lines.append(
