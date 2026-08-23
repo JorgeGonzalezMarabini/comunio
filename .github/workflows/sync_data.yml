@@ -9,7 +9,16 @@ on:
     # job, con cron ":00", entraba sistemáticamente ~30 min tarde. Sin
     # deadline externo (a diferencia de set_lineup/run_market), no importa
     # el minuto exacto -- solo evitar el pico de las horas en punto.
-    - cron: "6 8-23 * * *"  # cada hora, 08:06-23:06 UTC (sin madrugada: ningún consumidor corre 00:00-08:00)
+    #
+    # Ampliado a las 24h (2026-08-23, antes 08:06-23:06 UTC "sin
+    # madrugada"): el hueco nocturno se dejó en su día porque ningún
+    # consumidor (run_market/run_sales) corría entonces fuera de horario
+    # diurno -- ahora que esos dos pasan también a 24h (ver run_market.yml,
+    # el mercado no tiene cierre diario real, solo temporizadores por
+    # jugador contra Futmondo, no una ventana de actividad humana), ya no
+    # hay motivo para que sync_data deje de alimentarlos de datos frescos
+    # durante la madrugada.
+    - cron: "6 * * * *"  # cada hora, las 24h
 
 permissions:
   contents: write

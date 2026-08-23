@@ -26,16 +26,37 @@ on:
     # notifica en las pasadas sin novedad (ver docstring de
     # jobs/set_lineup.py).
     #
-    # Rango 15:23-19:43 UTC: arranca con el mismo margen de antes frente al
-    # horario más temprano documentado y sigue cubriendo hasta después del
-    # más tardío. Minutos :03/:23/:43 (no en punto) por el mismo motivo que
+    # Rango en UTC AMPLIADO a propósito (2026-08-23) para no depender del
+    # cambio de hora: la ventana real que importa es en hora LOCAL de
+    # Madrid, 17:23-21:43 (ver LOCAL_WINDOW_START/END en jobs/set_lineup.py
+    # y scheduling.py), pero GitHub Actions cron no soporta zona horaria,
+    # solo UTC -- y esa ventana local cae en un rango distinto de UTC según
+    # haya o no cambio de hora:
+    #   - CEST (verano, UTC+2, el caso de cuando se fijó el 15:23-19:43
+    #     original): 17:23-21:43 local = 15:23-19:43 UTC.
+    #   - CET (invierno, UTC+1): 17:23-21:43 local = 16:23-20:43 UTC -- con
+    #     el cron antiguo fijo en 15:23-19:43 UTC, en invierno la ventana
+    #     LOCAL real habría sido 16:23-20:43, un margen distinto al
+    #     pensado (podía cerrarse 1h antes de lo esperado frente al partido
+    #     más tardío).
+    # El cron cubre la UNIÓN de ambos rangos UTC (15:23-20:43) y
+    # jobs/set_lineup.py filtra en cada ejecución si cae dentro de la
+    # ventana LOCAL real vía `scheduling.is_within_local_window()` (usa
+    # `zoneinfo`, que conoce las fechas exactas del cambio de hora cada
+    # año) -- así no hace falta retocar este cron a mano dos veces al año.
+    # Algunas pasadas en el extremo opuesto a la estación actual (p. ej.
+    # las de 15:xx UTC en invierno) se disparan pero salen enseguida sin
+    # tocar la red ni la BD (ver el filtro en el bloque `__main__`).
+    #
+    # Minutos :03/:23/:43 (no en punto) por el mismo motivo que
     # sync_data.yml -- ":23" se conserva como ancla porque fue la hora
     # elegida explícitamente por el usuario antes de repetir el cron.
     # Sigue sin ser un dato dinámico real -- si una jornada empezara antes
-    # de las 15:23 UTC (inusual pero no imposible: mitad de semana tras un
-    # parón), seguiría sin cubrirse; la solución completa requeriría leer
-    # el calendario real de la jornada, no implementado todavía.
-    - cron: "3,23,43 15-19 * * 5"
+    # de las 17:23 hora local (inusual pero no imposible: mitad de semana
+    # tras un parón), seguiría sin cubrirse; la solución completa
+    # requeriría leer el calendario real de la jornada, no implementado
+    # todavía.
+    - cron: "3,23,43 15-20 * * 5"
 
 permissions:
   contents: write

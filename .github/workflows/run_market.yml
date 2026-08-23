@@ -19,11 +19,20 @@ on:
     # plaza de plantilla que libera una venta aceptada por run_sales (1h
     # después de cada pasada de éste, mismo patrón de siempre).
     #
+    # Ampliado de "horario activo" (8-22 UTC) a las 24h, y de 8 a 12
+    # pasadas/día (2026-08-23, a petición del usuario): el "horario activo"
+    # de antes asumía implícitamente que lo que importa es cuándo hay
+    # actividad HUMANA (otros managers navegando la web) -- pero, como ya
+    # confirma la sección de arriba, jugar contra este mercado es jugar
+    # contra un temporizador individual por jugador (`expirationDate`),
+    # no contra la actividad de otros usuarios en tiempo real. No hay
+    # ninguna razón para dejar de pujar/reaccionar durante la madrugada.
+    #
     # Minuto 6 (no en punto), mismo motivo que sync_data.yml: GitHub retrasa
     # los cron programados EN PUNTO por congestión (minuto más solicitado de
     # toda la plataforma). Sin deadline externo real (ver README, "Delay de
     # GitHub Actions y horas críticas"), es seguro mover el minuto.
-    - cron: "6 8,10,12,14,16,18,20,22 * * *"  # cada 2h en horario activo (antes 2 veces/día)
+    - cron: "6 0,2,4,6,8,10,12,14,16,18,20,22 * * *"  # cada 2h, las 24h (antes solo horario activo)
 
 permissions:
   contents: write

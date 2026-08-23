@@ -14,7 +14,13 @@ on:
     # hasta 12h (el hueco de las 2 pasadas/día de antes) -- tiempo de sobra
     # para que se arrepienta o para simplemente demorar el ingreso real.
     # Con 8 pasadas/día el margen máximo baja a ~2h.
-    - cron: "6 9,11,13,15,17,19,21,23 * * *"  # cada 2h, 1h después de cada run_market
+    #
+    # Ampliado de "horario activo" (9-23 UTC) a las 24h, y de 8 a 12
+    # pasadas/día (2026-08-23, mismo motivo que run_market.yml): una oferta
+    # real puede llegar a cualquier hora, no solo en horario diurno
+    # español -- restringir a horario activo solo alargaba sin necesidad el
+    # margen máximo hasta aceptarla. Con 12 pasadas/día baja a ~2h, las 24h.
+    - cron: "6 1,3,5,7,9,11,13,15,17,19,21,23 * * *"  # cada 2h, las 24h, 1h después de cada run_market
 
 permissions:
   contents: write

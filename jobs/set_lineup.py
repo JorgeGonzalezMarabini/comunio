@@ -106,6 +106,16 @@ from engine.evaluator import evaluate_players
 from engine.lineup_optimizer import apply_fixture_difficulty, build_bench_changes, build_lineup_changes, pick_lineup, pick_substitutes
 from engine.squad_risk import assess_squad_depth, depth_warnings
 from notifier import notify, track_job_run
+from scheduling import is_within_local_window
+
+# Ventana horaria LOCAL (Europe/Madrid) real que se busca cubrir con el
+# cron de set_lineup.yml -- ver README, "Delay de GitHub Actions y horas
+# críticas". El cron en sí se deja en UTC con un rango más ancho (la unión
+# de esta ventana en CET y en CEST) porque GitHub Actions no soporta zona
+# horaria; este es el filtro que hace que, sea cual sea la hora del año,
+# solo se ejecute de verdad dentro de estas horas locales.
+LOCAL_WINDOW_START = (17, 23)
+LOCAL_WINDOW_END = (21, 43)
 
 
 def run():
@@ -260,8 +270,19 @@ if __name__ == "__main__":
     # igualmente se registraría una fila en `job_runs`, ese INSERT por sí
     # solo ensuciaría db/futmondo.db, y el step "Commit BD actualizada" del
     # workflow comitearía/pushearía igual aunque el bot no haga nada real.
+    #
+    # El filtro de ventana horaria local va SOLO aquí, no dentro de run()
+    # -- a diferencia de ENABLE_BOT, esto no es una decisión de negocio que
+    # deba proteger a quien llame a run() directamente (tests incluidos,
+    # que no controlan la hora real del sistema), sino un filtro de "debe
+    # disparar este cron concreto" (ver scheduling.py y set_lineup.yml para
+    # el porqué: el cron de GitHub Actions cubre, en UTC, un rango más
+    # ancho que la ventana local real para no depender de si hay cambio de
+    # hora o no).
     if not config.ENABLE_BOT:
         print("set_lineup: ENABLE_BOT=false, no se ejecuta.")
+    elif not is_within_local_window(datetime.now(timezone.utc), LOCAL_WINDOW_START, LOCAL_WINDOW_END):
+        print(f"set_lineup: fuera de la ventana horaria local ({LOCAL_WINDOW_START[0]:02d}:{LOCAL_WINDOW_START[1]:02d}-{LOCAL_WINDOW_END[0]:02d}:{LOCAL_WINDOW_END[1]:02d} Europe/Madrid), no se ejecuta.")
     else:
         with track_job_run("set_lineup"):
             run()

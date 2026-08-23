@@ -923,7 +923,9 @@ necesita esto en el repo de GitHub (`Settings` del repo, no en el código):
    código no tiene acceso de push desde este entorno — hace falta hacerlo
    manualmente o darle acceso).
 4. Los 5 workflows (`sync_data` cada hora, `run_market` y `run_sales`
-   cada 2h en horario activo, `set_lineup` viernes cada 20 min 15:23-19:43 UTC, `manage_substitutes` cada 20 min
+   cada 2h las 24h, `set_lineup` viernes cada 20 min (cron 15:23-20:43 UTC,
+   filtrado a la ventana local real 17:23-21:43 Europe/Madrid — ver más
+   abajo), `manage_substitutes` cada 20 min
    de viernes a lunes) ya tienen el `schedule:` activado — correrán solos
    en cuanto 1-2 estén hechos. Cada uno comitea `db/futmondo.db`/`logs/` de
    vuelta al repo al terminar (si no, cada ejecución perdería lo
@@ -1020,19 +1022,22 @@ cada uno:
   fuente que consulte el calendario real de cada jornada (a diferencia de
   Fotmob para "quién juega hoy", no se usa nada equivalente para "cuándo
   empieza la jornada"); si alguna jornada excepcional empezara antes de
-  las 15:23 UTC del viernes, seguiría sin cubrirse. La solución completa
-  sería leer ese calendario real en vez de asumir un día/hora fijos — no
-  implementado.
+  las 17:23 hora local del viernes, seguiría sin cubrirse. La solución
+  completa sería leer ese calendario real en vez de asumir un día/hora
+  fijos — no implementado.
 
 Ranking de criticidad actualizado (de más a menos sensible al delay):
 
 1. **`set_lineup`** (MEDIO, bajó de CRÍTICO) — ya no corre una sola vez
-   por semana: repetido cada 20 min (15:23-19:43 UTC los viernes, ver
-   arriba), con la misma red de seguridad por frecuencia que
+   por semana: repetido cada 20 min los viernes en ventana LOCAL
+   17:23-21:43 Europe/Madrid (cron ampliado a 15:23-20:43 UTC + filtro por
+   `scheduling.is_within_local_window()`, ver "El problema del cambio de
+   hora" más abajo), con la misma red de seguridad por frecuencia que
    `manage_substitutes`. El riesgo que queda es el mismo tipo que el de
    `manage_substitutes` (delay acumulado reduciendo el margen entre
    pasadas) más el caso de una jornada excepcional que empiece antes de
-   las 15:23 UTC del viernes (sin cobertura, no es un tema de frecuencia).
+   las 17:23 hora local del viernes (sin cobertura, no es un tema de
+   frecuencia).
 2. **`manage_substitutes`** (MEDIO, mitigado por frecuencia) — el cron a
    20 min ya está para esto: si UNA pasada llega tarde, la siguiente (20
    min después) puede seguir cubriendo la ventana. El riesgo no es un
@@ -1043,15 +1048,16 @@ Ranking de criticidad actualizado (de más a menos sensible al delay):
    minuto de este mismo apartado.
 3. **`run_market`** (BAJO, corregido — ver arriba) — sin cierre diario
    real al que llegar tarde; ya daba margen de sobra frente a listados de
-   1-3 días con 2x/día, así que subir a 8x/día (2026-08-22, TODO.md #15 —
-   ver "Venta: aceptar ofertas recibidas") no cambia este análisis, solo
-   reduce la latencia hasta reaccionar al presupuesto/plaza liberados por
-   una venta.
-4. **`run_sales`** (BAJO) — 8x/día (antes 2x/día, mismo motivo que
-   `run_market` de arriba), 1h después de cada pasada de `run_market` a
-   propósito. Un delay de ~30 min en cualquiera de los dos no invierte el
-   orden porque el hueco entre ambos (1h) es mayor que el delay típico
-   observado.
+   1-3 días con 2x/día, así que subir a 12x/día, las 24h (2026-08-22 a
+   8x/día en horario activo, TODO.md #15; ampliado a 24h el 2026-08-23 —
+   ver "El problema del cambio de hora" más abajo) no cambia este análisis,
+   solo reduce la latencia hasta reaccionar al presupuesto/plaza liberados
+   por una venta.
+4. **`run_sales`** (BAJO) — 12x/día, las 24h (antes 2x/día en horario
+   activo, luego 8x/día, mismo historial que `run_market` de arriba), 1h
+   después de cada pasada de `run_market` a propósito. Un delay de ~30 min
+   en cualquiera de los dos no invierte el orden porque el hueco entre
+   ambos (1h) es mayor que el delay típico observado.
 5. **`sync_data`** (BAJO en sí mismo, pero ver nota) — no tiene deadline
    propio; solo necesita alimentar a los demás con datos razonablemente
    frescos.
@@ -1076,6 +1082,54 @@ Futmondo. Ya confirmado (ver arriba) y ajustado en `set_lineup.yml` /
 horario: una fuente que consulte el calendario real de cada jornada, para
 que `set_lineup` no dependa de asumir "siempre viernes, siempre antes de
 las 15:23 UTC".
+
+**(2026-08-23) `sync_data`/`run_market`/`run_sales` pasan de "horario
+activo" a las 24h.** El límite a horario diurno (8-23 UTC según el job) se
+fijó pensando implícitamente en actividad HUMANA — pero, como ya queda
+confirmado más arriba, jugar contra el mercado de Futmondo es jugar contra
+un temporizador individual por jugador (`expirationDate`), no contra la
+actividad de otros managers en tiempo real; y aceptar ofertas recibidas
+(sección "Venta: aceptar ofertas recibidas") tampoco depende de que sea de
+día — una oferta real puede llegar a cualquier hora. Sin ninguna razón
+real para el hueco nocturno, los tres pasan a correr las 24h:
+`sync_data` cada hora (antes 08:06-23:06 UTC), `run_market`/`run_sales` a
+12 pasadas/día cada uno (antes 8), manteniendo el hueco de 1h entre ambos.
+
+**(2026-08-23) El problema del cambio de hora (CET/CEST) y su solución.**
+El cron de GitHub Actions es SIEMPRE en UTC — no admite zona horaria. Para
+los tres jobs de arriba esto deja de importar (corren las 24h, cualquier
+hora vale), pero `set_lineup` sí depende de una ventana en hora LOCAL
+española (el cierre real de jornada, ligado al primer partido de LaLiga,
+se piensa en hora española) — y con el cron fijo en UTC, la MISMA hora UTC
+cae en una hora local distinta según haya cambio de hora o no: el rango
+`15:23-19:43 UTC` fijado el 2026-08-18 corresponde a `17:23-21:43` hora
+local SOLO en CEST (verano, UTC+2); en CET (invierno, UTC+1) esa misma
+franja UTC equivale a `16:23-20:43` local, una hora antes de lo pensado —
+podía cerrar la ventana 1h antes de lo esperado frente al partido más
+tardío de una jornada de invierno. Retocar el cron a mano dos veces al año
+(y las fechas exactas de cambio de hora varían cada año) es frágil y fácil
+de olvidar.
+
+Solución adoptada, pensada para no requerir mantenimiento nunca:
+`scheduling.is_within_local_window()` (nuevo módulo, sin dependencia
+extra: usa `zoneinfo`, stdlib desde Python 3.9, contra la base de datos de
+zonas horaria del sistema, que sabe las fechas exactas del cambio de hora
+cada año) convierte la hora UTC real de la ejecución a hora local de
+`Europe/Madrid` y compara contra la ventana local real
+(`LOCAL_WINDOW_START`/`LOCAL_WINDOW_END` en `jobs/set_lineup.py`,
+17:23-21:43). El cron de `set_lineup.yml` se amplía a la UNIÓN de los dos
+rangos UTC posibles (`15:23-20:43 UTC`, cubre la ventana local tanto en
+CET como en CEST) y el filtro, en el bloque `if __name__ == "__main__":`
+(no dentro de `run()`, para no afectar a los tests que llaman a `run()`
+directamente sin controlar la hora — mismo criterio que la duplicación del
+chequeo de `ENABLE_BOT`), descarta sin tocar la red ni la BD las pasadas
+que caen fuera de la ventana local real. Sale más caro en minutos de
+Actions (algunas pasadas por jornada arrancan y salen enseguida sin hacer
+nada) pero el resultado es correcto en cualquier época del año sin volver
+a tocar el cron. Ver `tests/test_scheduling.py` para los casos límite
+(verano/invierno) verificados. El mismo patrón queda disponible para
+`manage_substitutes` si su margen (hoy generoso en ambos DST, ver
+"Banquillo/suplentes") se llegara a estrechar.
 
 ## Estructura
 
