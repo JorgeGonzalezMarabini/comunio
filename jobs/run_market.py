@@ -156,10 +156,18 @@ VECES el mismo día que se introdujo, ver docstring de arriba), ambos
 guards (`roster_full`/`available_roster_slots`) se desactivaban en
 silencio y se volvía a pujar sin ningún tope de plazas -- justo el bug
 original de las 11 pujas fallidas, pero sin ningún aviso de que el propio
-guard se había saltado. Ahora se trata explícitamente como anomalía: no se
-puja NINGÚN candidato nuevo esta pasada (igual que si la plantilla
-estuviera llena) y se notifica -- mejor perderse una pasada de fichajes
-que repetir el incidente sin enterarse.
+guard se había saltado. Primer arreglo (mismo día): tratarlo explícitamente
+como anomalía y no pujar NINGÚN candidato nuevo esa pasada -- correcto,
+pero de sobra: es un valor de configuración de LIGA que el usuario fija
+una vez al crearla y no cambia en la práctica, así que bloquear pujas
+enteras por un glitch puntual de la API era más conservador de lo
+necesario. Arreglo definitivo (a petición del usuario, mismo día, ver
+TODO.md #19): se cachea en `db.models.league_settings`
+(`get_league_setting()`/`save_league_setting()`) en cuanto la API lo
+confirma, y si una pasada concreta no lo informa, se cae a ese último
+valor confirmado en vez de bloquear o degradar a "sin límite" -- solo si
+NUNCA se confirmó (ni ahora ni antes, primera vez que corre el bot contra
+esta liga) se trata como anomalía de verdad.
 
 El error real de cada puja fallida (antes solo vivía en el mensaje de
 Telegram de esa pasada, nunca en la BD -- imposible diagnosticar después
@@ -206,9 +214,11 @@ from clients.futmondo_client import (
 from db.models import (
     get_connection,
     get_bids_risked_today,
+    get_league_setting,
     get_open_bids,
     get_pending_bid_amount,
     get_player_features,
+    save_league_setting,
     update_bid_status,
 )
 from engine.bidding_strategy import (
@@ -365,26 +375,45 @@ def run():
     max_roster_size = information.get("answer", {}).get("configuration", {}).get("maxPlayersInRoster")
 
     # `maxPlayersInRoster` ausente (a raíz del incidente real 2026-08-23,
-    # ver TODO.md #18 y docstring del módulo): este campo concreto ya se
-    # confundió DOS VECES el mismo día que se introdujo el límite de
+    # ver TODO.md #18/#19 y docstring del módulo): este campo concreto ya
+    # se confundió DOS VECES el mismo día que se introdujo el límite de
     # plantilla, así que no es descabellado que un glitch transitorio de la
-    # API o un cambio de forma de la respuesta lo dejen sin informar. Antes
-    # esto degradaba en SILENCIO a "sin límite" (`max_roster_size is not
-    # None` daba False en los dos guards de abajo) -- reproduciendo el bug
-    # original de las 11 pujas fallidas sin ningún aviso de que el guard se
-    # había saltado. Tratado explícitamente como anomalía: comportamiento
-    # conservador (no pujar ningún candidato nuevo esta pasada, igual que
-    # plantilla llena) y notificado, en vez de asumir que no hay tope.
+    # API o un cambio de forma de la respuesta lo dejen sin informar. Es un
+    # valor de configuración de LIGA que el usuario fija una vez al crearla
+    # y no cambia en la práctica -- así que, si la API no lo informa esta
+    # pasada, tiene mucho más sentido caer al último valor CONFIRMADO por
+    # ella misma en una pasada anterior (`db.models.get_league_setting()`)
+    # que degradar a "sin límite" (bug original, TODO.md #16) NI bloquear
+    # pujas nuevas sin necesidad (comportamiento previo de este mismo fix,
+    # TODO.md #18) -- ambos evitables si ya lo sabíamos de antes. Cuando SÍ
+    # viene informado, se cachea (solo si cambió, para no escribir de más)
+    # -- nunca se cachea el propio valor de fallback, para que uno viejo no
+    # se reafirme a sí mismo sin ninguna confirmación real nueva.
+    max_roster_size_from_cache = False
+    if max_roster_size is not None:
+        if get_league_setting("max_players_in_roster") != max_roster_size:
+            save_league_setting("max_players_in_roster", max_roster_size, datetime.now(timezone.utc).isoformat())
+    else:
+        cached_max_roster_size = get_league_setting("max_players_in_roster")
+        if cached_max_roster_size is not None:
+            max_roster_size = cached_max_roster_size
+            max_roster_size_from_cache = True
+
+    # Solo si NUNCA se confirmó un valor real (ni esta pasada ni ninguna
+    # anterior, así que tampoco hay nada cacheado) se trata como anomalía
+    # de verdad: comportamiento conservador (no pujar ningún candidato
+    # nuevo esta pasada, igual que plantilla llena) y notificado, en vez de
+    # asumir que no hay tope.
     max_roster_size_unknown = max_roster_size is None
     roster_full = not max_roster_size_unknown and len(roster_ids) >= max_roster_size
     roster_full_discarded = len(raw_candidates) if (roster_full or max_roster_size_unknown) else 0
     if roster_full or max_roster_size_unknown:
         # Descarta los candidatos NUEVOS (Futmondo rechazaría cualquier
         # puja nueva sin importar posición/presupuesto, o no hay tope
-        # confirmado para saber si hay hueco), pero NO corta la ejecución
-        # -- el reajuste a la baja de pujas YA abiertas de más abajo sigue
-        # adelante igual: cancelar+repujar más barato no pide una plaza
-        # nueva, reutiliza la que esa puja ya tenía reservada.
+        # confirmado ni cacheado para saber si hay hueco), pero NO corta la
+        # ejecución -- el reajuste a la baja de pujas YA abiertas de más
+        # abajo sigue adelante igual: cancelar+repujar más barato no pide
+        # una plaza nueva, reutiliza la que esa puja ya tenía reservada.
         raw_candidates = []
 
     # Hueco parcial: si queda sitio pero no para todos los candidatos
@@ -398,11 +427,12 @@ def run():
     # abajo) ya ordenado por score+boosts de mayor a menor -- pasarle
     # `max_bids` respeta ese mismo orden de importancia.
     #
-    # Con `max_roster_size` ausente, 0 en vez de `None` ("sin límite") --
-    # mismo comportamiento conservador de arriba, ver `max_roster_size_unknown`.
-    available_roster_slots = 0 if max_roster_size_unknown else None
-    if not max_roster_size_unknown and max_roster_size is not None:
-        available_roster_slots = max(0, max_roster_size - len(roster_ids) - len(already_bid_ids))
+    # Con `max_roster_size` sin confirmar ni cacheado, 0 en vez de "sin
+    # límite" -- mismo comportamiento conservador de arriba, ver
+    # `max_roster_size_unknown`.
+    available_roster_slots = (
+        0 if max_roster_size_unknown else max(0, max_roster_size - len(roster_ids) - len(already_bid_ids))
+    )
 
     at_risk_positions = set()
     upgrade_thresholds = {}
@@ -616,7 +646,9 @@ def run():
         if roster_full:
             skip_context.append(f"plantilla completa ({len(roster_ids)}/{max_roster_size})")
         if max_roster_size_unknown:
-            skip_context.append("maxPlayersInRoster no informado por la API (anomalía, ver TODO.md #18)")
+            skip_context.append("maxPlayersInRoster no informado por la API ni cacheado (anomalía, ver TODO.md #18/#19)")
+        elif max_roster_size_from_cache:
+            skip_context.append(f"maxPlayersInRoster no informado por la API esta pasada, usando caché ({max_roster_size})")
         skip_note = f" [{'; '.join(skip_context)}]" if skip_context else ""
         notify(
             f"run_market: sin pujas esta ejecución (saldo={format_number(remaining_budget)}, "
@@ -840,8 +872,13 @@ def run():
         )
     if max_roster_size_unknown:
         summary.append(
-            f"⚠️ maxPlayersInRoster no informado por la API esta pasada (anomalía, ver TODO.md #18) -- "
+            f"⚠️ maxPlayersInRoster no informado por la API ni cacheado esta pasada (anomalía, ver TODO.md #18/#19) -- "
             f"{roster_full_discarded} candidato(s) nuevo(s) descartado(s) por precaución, no se pujó por ninguno"
+        )
+    elif max_roster_size_from_cache:
+        summary.append(
+            f"ℹ️ maxPlayersInRoster no informado por la API esta pasada -- usado el último valor confirmado en "
+            f"caché ({max_roster_size}, ver TODO.md #19)"
         )
     if pending_committed:
         summary.append(

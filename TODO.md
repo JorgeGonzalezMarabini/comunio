@@ -956,6 +956,49 @@ ausencia bloquea pujas nuevas por diseño. Suite completa: 355 passed.
 
 ---
 
+## 19. Caché local de `maxPlayersInRoster` como fallback (a petición del usuario, 2026-08-23)
+
+**Contexto**: al revisar el item #18, el usuario cuestionó con razón la
+explicación inicial de TOCTOU (el propio dato de `job_runs` muestra que
+`run_market` tarda ~2 segundos, sin llamadas a Fotmob/Understat -- esas
+son de `sync_data.py`, no de este job; y no hay ninguna puja `'won'`/
+`'lost'` entre la última puja abierta anterior y el incidente, así que
+nada se resolvió a mitad de esa pasada concreta). La explicación que mejor
+encaja con que fallaran las DOS pujas a la vez (no una sí y otra no,
+patrón esperable de un drift a mitad de ejecución) es que
+`maxPlayersInRoster` viniera `None` esa pasada -- exactamente el
+escenario que el item #18 ya trataba como anomalía bloqueando toda puja
+nueva.
+
+**Propuesta del usuario**: `maxPlayersInRoster` es un valor de
+configuración de LIGA que se fija una vez al crear la liga y no cambia en
+la práctica -- así que bloquear TODAS las pujas nuevas de una pasada
+porque la API tuvo un glitch puntual es más conservador de lo necesario.
+Mejor: guardarlo en una tabla de configuración local en cuanto se
+confirma, y usar ese valor como fallback cualquier pasada en la que la API
+no lo informe; si se obtiene correctamente y es distinto del cacheado,
+actualizar la caché.
+
+**Implementado**: tabla nueva `league_settings` (clave/valor,
+`db/models.py`) con `get_league_setting()`/`save_league_setting()`. En
+`jobs/run_market.py`: si `maxPlayersInRoster` viene informado, se compara
+contra la caché y se sobreescribe solo si cambió (nunca se reafirma a sí
+misma con el propio fallback); si NO viene informado, se usa el último
+valor cacheado con normalidad (sin bloquear pujas nuevas ni notificar como
+anomalía, solo informativo). El bloqueo total del item #18 queda reservado
+para el caso genuino de "nunca se confirmó, ni ahora ni antes" (primera
+vez que corre el bot contra una liga, o caché vacía por cualquier motivo).
+
+**Verificado con test**: `test_run_market_falls_back_to_cached_max_roster_size_when_api_omits_it`
+y `test_run_market_caches_max_roster_size_when_api_confirms_it` (nuevos,
+`tests/test_jobs_run_market.py`). Suite completa: 357 passed.
+
+**Afecta a**: `db/models.py` (tabla `league_settings`,
+`get_league_setting()`, `save_league_setting()`), `jobs/run_market.py`,
+`tests/test_jobs_run_market.py`.
+
+---
+
 ## Ya resuelto (para referencia, no es un pendiente)
 
 **`build_bench_changes()` repetía un `"from"` ya caducado en un intercambio

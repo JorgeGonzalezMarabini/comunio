@@ -206,6 +206,26 @@ CREATE TABLE IF NOT EXISTS job_runs (
     started_at        TEXT NOT NULL,
     finished_at       TEXT NOT NULL
 );
+
+-- Caché local de valores de configuración de LIGA que el usuario fija una
+-- vez al crearla y Futmondo no cambia en la práctica (a petición del
+-- usuario, 2026-08-23, ver TODO.md #18/#19) -- pensada como FALLBACK
+-- cuando `client.get_information()` no informa un campo concreto en una
+-- pasada puntual (glitch transitorio de la API: `configuration.
+-- maxPlayersInRoster` ya vino ausente/confundido más de una vez el mismo
+-- día que se empezó a usar, ver TODO.md #16). Antes, esa ausencia puntual
+-- degradaba a "sin límite" (bug de las 11 pujas fallidas) o, tras el
+-- primer arreglo, bloqueaba TODAS las pujas nuevas de esa pasada aunque ya
+-- se supiera el valor real de una pasada anterior -- ninguna de las dos
+-- reacciones tiene sentido si el dato ya lo conocíamos. Una fila por
+-- clave (`key`), sobreescrita (INSERT OR REPLACE, ver
+-- db.models.save_league_setting()) solo cuando la API real confirma un
+-- valor -- nunca se reafirma a sí misma con el propio fallback.
+CREATE TABLE IF NOT EXISTS league_settings (
+    key         TEXT PRIMARY KEY,   -- 'max_players_in_roster'
+    value       INTEGER NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -509,6 +529,36 @@ def save_real_lineup_check(
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (team, match_date, fixture_id, 1 if lineup_published else 0, json.dumps(starting_player_ids), checked_at),
+        )
+
+
+def get_league_setting(key: str) -> int | None:
+    """
+    Lee un valor de configuración de LIGA cacheado localmente (ver
+    save_league_setting()/docstring de la tabla `league_settings`) -- None
+    si nunca se confirmó ese `key` en ninguna pasada anterior. Pensado
+    SOLO como fallback cuando la API real no informa el campo en la pasada
+    actual (ver jobs/run_market.py, TODO.md #18/#19) -- `client.
+    get_information()` sigue siendo la fuente de verdad cuando sí responde
+    con el campo.
+    """
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM league_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def save_league_setting(key: str, value: int, now: str) -> None:
+    """
+    Guarda/sobreescribe (INSERT OR REPLACE, clave `key`) un valor de
+    configuración de liga -- ver get_league_setting(). Llamar solo con un
+    valor que de verdad vino de la API REAL en esta misma pasada, nunca
+    con el propio valor de fallback (evitaría que un valor viejo se
+    reafirmara a sí mismo sin ninguna confirmación nueva).
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO league_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now),
         )
 
 

@@ -7,7 +7,7 @@ import pytest
 import config
 import jobs.run_market as run_market
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
-from db.models import get_connection
+from db.models import get_connection, get_league_setting, save_league_setting
 
 NOW = "2026-08-16T18:00:00+00:00"
 JOB_PATH = str(Path(__file__).resolve().parent.parent / "jobs" / "run_market.py")
@@ -212,6 +212,75 @@ def test_run_market_treats_missing_max_roster_size_as_anomaly(tmp_db):
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"]
     assert count == 0
+
+
+def test_run_market_falls_back_to_cached_max_roster_size_when_api_omits_it(tmp_db):
+    """
+    Regresión (2026-08-23, a petición del usuario -- ver TODO.md #19):
+    `maxPlayersInRoster` es un valor de configuración de LIGA que no
+    cambia en la práctica, así que si la API no lo informa esta pasada
+    pero SÍ se confirmó en una pasada anterior (cacheado en
+    `league_settings`, ver db.models.save_league_setting()), el job debe
+    usar ese valor cacheado con normalidad -- ni degradar a "sin límite"
+    ni bloquear pujas nuevas sin necesidad.
+    """
+    save_league_setting("max_players_in_roster", 2, NOW)
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}  # 0/2 -- hay hueco de sobra según la caché
+
+        def get_information(self):
+            # Sin "configuration" -- mismo glitch que el test de arriba,
+            # pero esta vez SÍ hay un valor confirmado antes en caché.
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "usado" in captured[0] and "caché" in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT status FROM bids").fetchone()
+    assert row["status"] == "placed"
+    # La caché no se toca solo por haberla usado como fallback -- sigue en 2.
+    assert get_league_setting("max_players_in_roster") == 2
+
+
+def test_run_market_caches_max_roster_size_when_api_confirms_it(tmp_db):
+    """
+    Regresión (2026-08-23, ver TODO.md #19): en cuanto la API confirma
+    `maxPlayersInRoster` en una pasada, el job debe guardarlo en
+    `league_settings` para poder usarlo de fallback el día que la API no
+    lo informe (ver test_run_market_falls_back_to_cached_max_roster_size...).
+    """
+    assert get_league_setting("max_players_in_roster") is None  # nada cacheado todavía
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 18}}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", lambda m: None):
+        run_market.run()
+
+    assert get_league_setting("max_players_in_roster") == 18
 
 
 def test_run_market_aborts_remaining_new_bids_after_live_roster_full_rejection(tmp_db):
