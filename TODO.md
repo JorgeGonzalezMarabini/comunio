@@ -885,6 +885,77 @@ mercado). Suite completa: 329 passed.
 
 ---
 
+## 18. ~~2 pujas fallidas en vivo por `max_number_players_in_roster` a pesar del guard de plantilla llena~~ (arreglado, 2026-08-23)
+
+**Qué pasaba**: pese al guard de plantilla completa del item #16, la
+ejecución de `run_market` del 2026-08-23T14:32:06 intentó 2 pujas nuevas
+(jugadores `522ccdeb...`/`61d98435...`) que Futmondo rechazó igualmente con
+`api.market.max_number_players_in_roster`. Investigado a petición del
+usuario ("esto no estaba ya controlado?").
+
+**Causa raíz, dos problemas independientes, ambos reales**:
+
+1. **TOCTOU (time-of-check-to-time-of-use)**: `get_roster()`/
+   `get_information()` se leen UNA SOLA VEZ al principio de `run()`, y con
+   ese único snapshot se decide TODO el lote de pujas nuevas de la pasada
+   (`available_roster_slots` pasado como `max_bids` a
+   `decide_bids_for_market`). Entre esa lectura y el `place_bid()` real de
+   cada candidato pasa el tiempo de evaluar el pool completo del mercado
+   (Fotmob/Understat incluidos) -- si el hueco real de plantilla cambia en
+   ese margen (otra oferta resuelta de forma asíncrona por Futmondo, o una
+   acción manual del usuario en la app; nada bloquea la cuenta entre
+   medias, y ninguno de los workflows de `.github/workflows/*.yml` tiene
+   `concurrency:`), el snapshot queda obsoleto y el guard ya no protege el
+   lote entero.
+2. Adicionalmente (no confirmado al 100% que fuera la causa de ESTE
+   incidente concreto, pero mismo riesgo real): si `maxPlayersInRoster`
+   venía `None` (glitch transitorio, o el mismo tipo de cambio de forma de
+   respuesta que ya pasó dos veces el mismo día en el item #16), ambos
+   guards se desactivaban en SILENCIO y se volvía a pujar sin ningún tope.
+
+**Hallazgo adicional de la investigación**: el error real de la API
+(`str(FutmondoOfferError)`) nunca se persistía en la BD -- `_persist_bid()`
+solo guardaba `decision["reason"]` (la justificación del SCORE, no el
+motivo del fallo). Sin este dato, un incidente real quedaba imposible de
+diagnosticar desde `db/futmondo.db` después de los hechos; solo vivía en el
+mensaje de Telegram de esa pasada concreta, que no se conserva.
+
+**Arreglado** (deliberadamente SIN tocar el punto 4 de concurrencia en
+GitHub Actions -- descartado a petición del usuario, no convencido de que
+sea la explicación completa; sigue como riesgo abierto si se confirma más
+adelante):
+
+1. `bids.error` (columna nueva, `db/models.py`, migrada con
+   `_ensure_column`): guarda `str(excepción)` de cada puja fallida, no solo
+   el `reason` del score.
+2. `FutmondoOfferError` ahora expone `.code` (`answer.get("code")`, ver
+   `clients/futmondo_client.py._check_ok`). El bucle de pujas nuevas de
+   `jobs/run_market.py` aborta el resto del lote en cuanto un `place_bid()`
+   real falla con `code == "api.market.max_number_players_in_roster"` --
+   no reintenta ni sigue probando candidatos que comparten el mismo hueco
+   ya confirmado inexistente por la propia API.
+3. `maxPlayersInRoster is None` ya NO degrada a "sin límite" -- se trata
+   como anomalía explícita: no se puja ningún candidato nuevo esta pasada
+   (igual que plantilla llena) y se notifica.
+
+**Verificado con test** (nuevos, `tests/test_jobs_run_market.py`):
+`test_run_market_aborts_remaining_new_bids_after_live_roster_full_rejection`
+(TOCTOU -- el segundo candidato del lote nunca llega a `place_bid()` tras
+el rechazo real del primero, y el error queda persistido en `bids.error`),
+`test_run_market_treats_missing_max_roster_size_as_anomaly` y
+`test_run_market_ignores_numberOfPlayers_field_for_roster_limit`
+(actualizado: antes verificaba que se pujaba igual sin
+`maxPlayersInRoster` informado, ahora verifica el comportamiento
+conservador nuevo). Resto de tests de `run_market` con `get_information()`
+sin `configuration.maxPlayersInRoster` (irrelevantes para lo que
+comprueban) actualizados para informarlo con un tope alto, ya que ahora su
+ausencia bloquea pujas nuevas por diseño. Suite completa: 355 passed.
+
+**Afecta a**: `db/models.py`, `clients/futmondo_client.py`,
+`jobs/run_market.py`, `tests/test_jobs_run_market.py`.
+
+---
+
 ## Ya resuelto (para referencia, no es un pendiente)
 
 **`build_bench_changes()` repetía un `"from"` ya caducado en un intercambio

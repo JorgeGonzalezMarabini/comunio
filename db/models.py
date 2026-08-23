@@ -98,7 +98,10 @@ CREATE TABLE IF NOT EXISTS bids (
     amount          INTEGER NOT NULL,
     status          TEXT NOT NULL,         -- 'placed' | 'won' | 'lost' | 'failed' | 'cancelled'
     score           REAL,                  -- score del evaluator que justificó la puja
-    reason          TEXT,                  -- explicación legible para auditoría
+    reason          TEXT,                  -- explicación legible de por qué se decidió pujar (auditoría del score)
+    error           TEXT,                  -- mensaje de error real (str(excepción)) si status='failed', NULL en el resto de casos
+                                            -- (2026-08-23: antes solo quedaba en memoria/Telegram, no en la BD --
+                                            -- ver TODO.md #18, imposible diagnosticar un fallo real después de la pasada)
     created_at      TEXT NOT NULL
 );
 
@@ -236,6 +239,7 @@ def init_db():
         _ensure_column(conn, "external_stats", "team_games", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "listing_price", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "is_clause", "INTEGER")
+        _ensure_column(conn, "bids", "error", "TEXT")
 
 
 # Última fila de futmondo_snapshots/external_stats por jugador (usa

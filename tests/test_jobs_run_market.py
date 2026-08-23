@@ -56,7 +56,7 @@ def test_run_market_places_bid_and_persists(tmp_db):
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
@@ -84,7 +84,7 @@ def test_run_market_business_rejection_is_audited_as_failed_without_crashing(tmp
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
@@ -143,9 +143,12 @@ def test_run_market_ignores_numberOfPlayers_field_for_roster_limit(tmp_db):
     `configuration.numberOfPlayers` es el número de jugadores INICIALES de
     la liga (confirmado inspeccionando main.dart.js de la propia app,
     ver docstring de clients/futmondo_client.py.get_information()), NO el
-    máximo real -- este job nunca debe leerlo para decidir si la plantilla
-    está llena. Plantilla de 15 (== numberOfPlayers) pero SIN
-    `maxPlayersInRoster` informado -> no hay máximo confirmado, no se corta.
+    máximo real -- este job nunca debe leerlo como si fuera
+    `maxPlayersInRoster`. Plantilla de 15 (== numberOfPlayers) pero SIN
+    `maxPlayersInRoster` informado -> sin máximo confirmado, comportamiento
+    conservador (ver test_run_market_treats_missing_max_roster_size_as_anomaly
+    más abajo, TODO.md #18): no se puja ningún candidato nuevo, no se lee
+    `numberOfPlayers` como fallback.
     """
     _seed_player("4069", "DEF", price=350_000)
 
@@ -162,16 +165,106 @@ def test_run_market_ignores_numberOfPlayers_field_for_roster_limit(tmp_db):
             return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
 
         def place_bid(self, player_id, player_slug, amount, is_clause=False):
-            return {"code": "api.general.ok"}
+            raise AssertionError("no debería intentar pujar sin maxPlayersInRoster confirmado")
 
     captured = []
     with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
         run_market.run()
 
     assert "plantilla completa" not in captured[0]
+    assert "maxPlayersInRoster no informado" in captured[0]
     with get_connection() as conn:
-        row = conn.execute("SELECT status FROM bids").fetchone()
-    assert row["status"] == "placed"
+        count = conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"]
+    assert count == 0
+
+
+def test_run_market_treats_missing_max_roster_size_as_anomaly(tmp_db):
+    """
+    Regresión (2026-08-23, a raíz de 2 pujas fallidas reales en vivo por
+    api.market.max_number_players_in_roster -- ver TODO.md #18): si
+    `configuration.maxPlayersInRoster` viene `None` (glitch transitorio de
+    la API, o un cambio de forma de la respuesta), NO se debe degradar en
+    silencio a "sin límite" -- eso reproduciría el bug original de las 11
+    pujas fallidas. Comportamiento conservador esperado: no se puja NINGÚN
+    candidato nuevo y se notifica la anomalía explícitamente.
+    """
+    _seed_player("4069", "DEF", price=350_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            # Ni siquiera trae la clave "configuration" -- caso extremo del mismo bug.
+            return {"answer": {"budget": 20_000_000}}
+
+        def get_market(self):
+            return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería intentar pujar sin maxPlayersInRoster confirmado")
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "maxPlayersInRoster no informado" in captured[0]
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM bids").fetchone()["n"]
+    assert count == 0
+
+
+def test_run_market_aborts_remaining_new_bids_after_live_roster_full_rejection(tmp_db):
+    """
+    Regresión (2026-08-23, 2 pujas fallidas reales en vivo con
+    api.market.max_number_players_in_roster a pesar de que el snapshot
+    inicial de roster decía que había hueco -- TOCTOU, ver TODO.md #18): en
+    cuanto Futmondo rechaza EN VIVO un candidato con ese código exacto, el
+    resto de candidatos NUEVOS de este mismo lote comparte el mismo hueco
+    ya inexistente -- el job no debe seguir intentándolos uno a uno.
+    """
+    _seed_player("mejor", "MED", price=350_000, points=20)
+    _seed_player("peor", "DEF", price=350_000, points=5)
+    attempts = []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            # Snapshot inicial: 0 en plantilla, tope 2 -- "hueco" para ambos candidatos.
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 2}}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {"id": "mejor", "slug": "jugador-mejor", "value": 350_000, "computer": True},
+                    {"id": "peor", "slug": "jugador-peor", "value": 350_000, "computer": True},
+                ]
+            }
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            attempts.append(player_id)
+            # En vivo, Futmondo ya rechaza -- el hueco real cambió entre el
+            # snapshot y este intento (otra oferta se resolvió en medio).
+            raise FutmondoOfferError(
+                "Futmondo rechazó la operación: api.market.max_number_players_in_roster",
+                code="api.market.max_number_players_in_roster",
+            )
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    # Solo se intentó el mejor candidato (primero del lote) -- "peor" nunca llegó a place_bid().
+    assert attempts == ["mejor"]
+    with get_connection() as conn:
+        rows = {(r["player_id"], r["status"], r["error"]) for r in conn.execute("SELECT player_id, status, error FROM bids")}
+    assert rows == {
+        ("mejor", "failed", "Futmondo rechazó la operación: api.market.max_number_players_in_roster")
+    }
+    assert "plantilla llena detectada A MITAD" in captured[0]
+    assert "peor" in captured[0]
 
 
 def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
@@ -231,7 +324,7 @@ def test_run_market_player_no_longer_in_market_is_audited_as_failed(tmp_db, monk
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": []}  # ya no está
@@ -411,7 +504,7 @@ def test_run_market_bids_on_manager_listed_candidate_when_flag_enabled(tmp_db, m
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [{"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": False}]}
@@ -584,7 +677,7 @@ def test_run_market_still_bids_on_doubtful_candidate_with_reduced_score(tmp_db):
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [
@@ -634,7 +727,7 @@ def test_run_market_prioritizes_at_risk_position_over_higher_score(tmp_db):
             return {"answer": [{"id": str(pid), "status": ""} for pid in squad_ids]}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [
@@ -690,7 +783,7 @@ def test_run_market_prioritizes_candidate_that_would_upgrade_lineup(tmp_db):
             return {"answer": [{"id": pid, "status": ""} for pid in squad_ids]}
 
         def get_information(self):
-            return {"answer": {"budget": 20_000_000}}
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [
@@ -773,7 +866,7 @@ def test_run_market_scores_sacrificable_bids_freshly_not_frozen(tmp_db):
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 0}}  # nada entra por la vía normal -- todo queda "blocked"
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 999}}}  # nada entra por la vía normal -- todo queda "blocked"
 
         def get_market(self):
             # "computer": True en ambos -- si no, la nueva revisión de
@@ -855,7 +948,7 @@ def test_run_market_executes_cancel_swap_end_to_end(tmp_db):
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 5_000_000}}
+            return {"answer": {"budget": 5_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [{"id": "new", "slug": "jugador-new", "value": 500_000, "computer": True}]}
@@ -922,7 +1015,7 @@ def test_run_market_cancel_swap_aborts_cleanly_when_cancel_bid_fails(tmp_db):
             return {"answer": []}
 
         def get_information(self):
-            return {"answer": {"budget": 5_000_000}}
+            return {"answer": {"budget": 5_000_000, "configuration": {"maxPlayersInRoster": 999}}}
 
         def get_market(self):
             return {"answer": [{"id": "new", "slug": "jugador-new", "value": 500_000, "computer": True}]}

@@ -128,6 +128,45 @@ queda auditado en `bids` como `'cancelled'`+`'failed'`, nunca silencioso —
 ver `config.BIDDING_MAX_CANCEL_SWAPS_PER_RUN` (1 por defecto, deliberado
 mientras esta feature no tiene histórico real).
 
+TOCTOU entre el snapshot de plantilla y la ejecución real de las pujas
+(bug real en vivo, 2 pujas fallidas 2026-08-23 con
+`api.market.max_number_players_in_roster` a pesar del guard de arriba, ver
+TODO.md #18): `get_roster()`/`get_information()` se leen UNA SOLA VEZ al
+principio de `run()`, y con ese único snapshot se decide TODO el lote de
+pujas nuevas de esta pasada -- pero entre esa lectura y el `place_bid()`
+real de cada candidato pasa el tiempo de evaluar el pool completo del
+mercado (Fotmob/Understat incluidos), tiempo en el que el hueco real de
+plantilla puede cambiar (otra oferta resuelta de forma asíncrona por
+Futmondo, o incluso una acción manual del usuario en la app -- nada
+bloquea la cuenta entre medias). Si eso pasa, el snapshot queda obsoleto
+y el guard de arriba ya no protege nada: seguiría intentando pujar todo el
+lote igual. Arreglado sin tener que releer `get_roster()` antes de cada
+`place_bid()` (evita más llamadas de las necesarias): el bucle de pujas de
+más abajo reacciona al primer rechazo REAL de Futmondo con ese código
+concreto (`FutmondoOfferError.code`, ver clients/futmondo_client.py) y
+aborta el resto de candidatos NUEVOS de este mismo lote sin intentarlos --
+todos comparten el mismo hueco que la propia API ya confirmó que no
+existe, así que seguir probando uno a uno solo generaría más pujas
+condenadas a fallar.
+
+`maxPlayersInRoster` ausente en la respuesta (mismo incidente, mismo
+día): antes, si el campo venía `None` (glitch transitorio de la API, o un
+cambio de forma de la respuesta -- este campo concreto ya se confundió DOS
+VECES el mismo día que se introdujo, ver docstring de arriba), ambos
+guards (`roster_full`/`available_roster_slots`) se desactivaban en
+silencio y se volvía a pujar sin ningún tope de plazas -- justo el bug
+original de las 11 pujas fallidas, pero sin ningún aviso de que el propio
+guard se había saltado. Ahora se trata explícitamente como anomalía: no se
+puja NINGÚN candidato nuevo esta pasada (igual que si la plantilla
+estuviera llena) y se notifica -- mejor perderse una pasada de fichajes
+que repetir el incidente sin enterarse.
+
+El error real de cada puja fallida (antes solo vivía en el mensaje de
+Telegram de esa pasada, nunca en la BD -- imposible diagnosticar después
+de los hechos si no se guardó a mano) ahora se persiste también en
+`bids.error` (ver `_persist_bid()`), no solo el `reason` del score que la
+justificó.
+
 Reajustar a la baja pujas abiertas cuyo VM ha caído (a petición del
 usuario, 2026-08-22, ver engine.bidding_strategy.
 find_reprice_down_candidates): `decide_bid()` ancla el importe al VM del
@@ -186,13 +225,22 @@ from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starte
 from notifier import notify, track_job_run, format_number
 
 
-def _persist_bid(conn, decision: dict, status: str, now: str) -> None:
+def _persist_bid(conn, decision: dict, status: str, now: str, error: str | None = None) -> None:
+    """
+    `error`: mensaje real del fallo (`str(excepción)`) cuando `status`
+    es 'failed' -- antes solo se guardaba `decision["reason"]` (la
+    justificación del SCORE que decidió pujar, no el motivo del fallo), así
+    que un incidente real (p. ej. las 2 pujas fallidas del 2026-08-23 con
+    `api.market.max_number_players_in_roster`) quedaba sin poder
+    diagnosticarse desde la BD después de los hechos -- solo vivía en el
+    mensaje de Telegram de esa pasada concreta. Ver TODO.md #18.
+    """
     conn.execute(
         """
-        INSERT INTO bids (player_id, amount, status, score, reason, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO bids (player_id, amount, status, score, reason, error, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (str(decision["player_id"]), decision["amount"], status, decision["score"], decision["reason"], now),
+        (str(decision["player_id"]), decision["amount"], status, decision["score"], decision["reason"], error, now),
     )
 
 
@@ -315,14 +363,28 @@ def run():
     # la cuenta real.
     information = client.get_information()
     max_roster_size = information.get("answer", {}).get("configuration", {}).get("maxPlayersInRoster")
-    roster_full = max_roster_size is not None and len(roster_ids) >= max_roster_size
-    roster_full_discarded = len(raw_candidates) if roster_full else 0
-    if roster_full:
+
+    # `maxPlayersInRoster` ausente (a raíz del incidente real 2026-08-23,
+    # ver TODO.md #18 y docstring del módulo): este campo concreto ya se
+    # confundió DOS VECES el mismo día que se introdujo el límite de
+    # plantilla, así que no es descabellado que un glitch transitorio de la
+    # API o un cambio de forma de la respuesta lo dejen sin informar. Antes
+    # esto degradaba en SILENCIO a "sin límite" (`max_roster_size is not
+    # None` daba False en los dos guards de abajo) -- reproduciendo el bug
+    # original de las 11 pujas fallidas sin ningún aviso de que el guard se
+    # había saltado. Tratado explícitamente como anomalía: comportamiento
+    # conservador (no pujar ningún candidato nuevo esta pasada, igual que
+    # plantilla llena) y notificado, en vez de asumir que no hay tope.
+    max_roster_size_unknown = max_roster_size is None
+    roster_full = not max_roster_size_unknown and len(roster_ids) >= max_roster_size
+    roster_full_discarded = len(raw_candidates) if (roster_full or max_roster_size_unknown) else 0
+    if roster_full or max_roster_size_unknown:
         # Descarta los candidatos NUEVOS (Futmondo rechazaría cualquier
-        # puja nueva sin importar posición/presupuesto), pero NO corta la
-        # ejecución -- el reajuste a la baja de pujas YA abiertas de más
-        # abajo sigue adelante igual: cancelar+repujar más barato no pide
-        # una plaza nueva, reutiliza la que esa puja ya tenía reservada.
+        # puja nueva sin importar posición/presupuesto, o no hay tope
+        # confirmado para saber si hay hueco), pero NO corta la ejecución
+        # -- el reajuste a la baja de pujas YA abiertas de más abajo sigue
+        # adelante igual: cancelar+repujar más barato no pide una plaza
+        # nueva, reutiliza la que esa puja ya tenía reservada.
         raw_candidates = []
 
     # Hueco parcial: si queda sitio pero no para todos los candidatos
@@ -335,8 +397,11 @@ def run():
     # pendientes. `decide_bids_for_market` recorre `prioritized` (ver
     # abajo) ya ordenado por score+boosts de mayor a menor -- pasarle
     # `max_bids` respeta ese mismo orden de importancia.
-    available_roster_slots = None
-    if max_roster_size is not None:
+    #
+    # Con `max_roster_size` ausente, 0 en vez de `None` ("sin límite") --
+    # mismo comportamiento conservador de arriba, ver `max_roster_size_unknown`.
+    available_roster_slots = 0 if max_roster_size_unknown else None
+    if not max_roster_size_unknown and max_roster_size is not None:
         available_roster_slots = max(0, max_roster_size - len(roster_ids) - len(already_bid_ids))
 
     at_risk_positions = set()
@@ -550,6 +615,8 @@ def run():
             skip_context.append(f"{len(skipped_injured)} con lesión confirmada")
         if roster_full:
             skip_context.append(f"plantilla completa ({len(roster_ids)}/{max_roster_size})")
+        if max_roster_size_unknown:
+            skip_context.append("maxPlayersInRoster no informado por la API (anomalía, ver TODO.md #18)")
         skip_note = f" [{'; '.join(skip_context)}]" if skip_context else ""
         notify(
             f"run_market: sin pujas esta ejecución (saldo={format_number(remaining_budget)}, "
@@ -567,13 +634,14 @@ def run():
 
     now = datetime.now(timezone.utc).isoformat()
     placed, failed = [], []
+    skipped_roster_full_mid_run = []
 
     with get_connection() as conn:
-        for decision in decisions:
+        for i, decision in enumerate(decisions):
             market_player = market_by_id.get(str(decision["player_id"]))
             if market_player is None:
                 # Ya no está en el mercado (mercado cambió entre evaluar y pujar) -- no se puede pujar.
-                _persist_bid(conn, decision, "failed", now)
+                _persist_bid(conn, decision, "failed", now, error="el jugador ya no está en el mercado")
                 failed.append((decision, "el jugador ya no está en el mercado"))
                 continue
             try:
@@ -581,8 +649,18 @@ def run():
                 _persist_bid(conn, decision, "placed", now)
                 placed.append(decision)
             except (requests.RequestException, FutmondoOfferError) as e:
-                _persist_bid(conn, decision, "failed", now)
+                _persist_bid(conn, decision, "failed", now, error=str(e))
                 failed.append((decision, str(e)))
+                if isinstance(e, FutmondoOfferError) and e.code == "api.market.max_number_players_in_roster":
+                    # TOCTOU real (2026-08-23, ver docstring del módulo/TODO.md #18): el
+                    # snapshot de roster de arriba decía que había hueco para todo este
+                    # lote, pero Futmondo ya rechaza este candidato con el código exacto de
+                    # "plantilla llena" -- el hueco real cambió entre el snapshot y este
+                    # intento. El resto de candidatos NUEVOS de `decisions` comparte ese
+                    # mismo hueco, que la propia API ya confirmó que no existe: abortar en
+                    # vez de seguir generando más pujas condenadas a fallar igual.
+                    skipped_roster_full_mid_run = decisions[i + 1 :]
+                    break
 
     # --- Ejecutar las propuestas de swap calculadas arriba (TODO.md #13):
     # cancelar una puja floja para pujar por un candidato mejor bloqueado
@@ -634,7 +712,7 @@ def run():
                     _persist_bid(conn, new_decision, "placed", now)
                     swapped.append({"decision": new_decision, "sacrificed_player_id": sacrifice["player_id"]})
                 except (requests.RequestException, FutmondoOfferError) as e:
-                    _persist_bid(conn, new_decision, "failed", now)
+                    _persist_bid(conn, new_decision, "failed", now, error=str(e))
                     swap_failed.append(
                         (
                             candidate,
@@ -676,7 +754,7 @@ def run():
                     _persist_bid(conn, new_decision, "placed", now)
                     reprice_downs.append(proposal)
                 except (requests.RequestException, FutmondoOfferError) as e:
-                    _persist_bid(conn, new_decision, "failed", now)
+                    _persist_bid(conn, new_decision, "failed", now, error=str(e))
                     reprice_down_failed.append(
                         (
                             proposal,
@@ -704,6 +782,13 @@ def run():
         summary.append(f"{len(failed)} puja(s) fallida(s):")
         for d, err in failed:
             summary.append(f"  - jugador {d['player_id']}: {err}")
+    if skipped_roster_full_mid_run:
+        summary.append(
+            f"🏟️ plantilla llena detectada A MITAD de esta pasada (tras un rechazo real de Futmondo con "
+            f"api.market.max_number_players_in_roster) -- {len(skipped_roster_full_mid_run)} candidato(s) "
+            "más de este lote sin intentar (ver TODO.md #18): "
+            + ", ".join(str(d["player_id"]) for d in skipped_roster_full_mid_run)
+        )
     if swapped:
         summary.append(f"🔄 {len(swapped)} swap(s) (cancelar+pujar mejor, TODO.md #13):")
         for s in swapped:
@@ -752,6 +837,11 @@ def run():
         summary.append(
             f"🏟️ plantilla completa ({len(roster_ids)}/{max_roster_size}) -- "
             f"{roster_full_discarded} candidato(s) nuevo(s) descartado(s), no se pujó por ninguno"
+        )
+    if max_roster_size_unknown:
+        summary.append(
+            f"⚠️ maxPlayersInRoster no informado por la API esta pasada (anomalía, ver TODO.md #18) -- "
+            f"{roster_full_discarded} candidato(s) nuevo(s) descartado(s) por precaución, no se pujó por ninguno"
         )
     if pending_committed:
         summary.append(

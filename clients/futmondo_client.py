@@ -181,7 +181,20 @@ class FutmondoOfferError(Exception):
     `answer.code` — "api.general.ok" si fue bien, otro código de error si
     no (ej. "api.market.max_number_players_in_roster", visto documentado
     en la referencia comunitaria, no en captura propia).
+
+    `code`: el código de negocio tal cual (`answer.get("code")`), o None si
+    la respuesta ni siquiera trajo ese campo (ver `_check_ok`). Añadido
+    2026-08-23 (ver TODO.md #18) para que quien llame pueda reaccionar a un
+    código concreto sin tener que parsear `str(e)` — `jobs/run_market.py` lo
+    usa para abortar el resto de un lote de pujas nuevas en cuanto
+    Futmondo confirma "api.market.max_number_players_in_roster" en vivo,
+    en vez de seguir intentando el resto de candidatos del mismo lote
+    contra un hueco de plantilla que ya no existe.
     """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 # Futmondo usa la palabra completa en ESPAÑOL para el rol (confirmado por
@@ -388,8 +401,9 @@ class FutmondoClient:
         bien.
         """
         answer = result.get("answer", {})
-        if answer.get("code") != "api.general.ok":
-            raise FutmondoOfferError(f"Futmondo rechazó la operación: {answer.get('code') or answer!r}")
+        code = answer.get("code")
+        if code != "api.general.ok":
+            raise FutmondoOfferError(f"Futmondo rechazó la operación: {code or answer!r}", code=code)
         return answer
 
     # --- lectura ---
