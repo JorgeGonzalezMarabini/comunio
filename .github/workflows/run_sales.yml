@@ -3,9 +3,16 @@ name: run_sales
 on:
   workflow_dispatch: {}
   schedule:
-    # Minuto 6 (no en punto), mismo motivo que sync_data.yml/run_market.yml:
+    # Minuto 36 (antes 6), mismo motivo que sync_data.yml/run_market.yml:
     # GitHub retrasa los cron EN PUNTO por congestión. Se conserva el hueco
-    # de 1h frente a run_market.
+    # de 1h frente a run_market (es el desfase de HORA lo que importa, no
+    # el minuto exacto -- run_sales sigue siendo hora impar frente a las
+    # horas pares de run_market).
+    #
+    # Escalonado (2026-08-23) para no coincidir con el resto de workflows
+    # que comitean db/futmondo.db -- ver el comentario largo en
+    # sync_data.yml y el `concurrency:` de abajo, que es la protección real
+    # frente a colisiones de commit/push sobre ese binario.
     #
     # Subido de 2 a 8 pasadas/día (a petición del usuario, 2026-08-22, TODO.md
     # #15): desde que run_sales acepta solo ofertas recibidas
@@ -20,7 +27,11 @@ on:
     # real puede llegar a cualquier hora, no solo en horario diurno
     # español -- restringir a horario activo solo alargaba sin necesidad el
     # margen máximo hasta aceptarla. Con 12 pasadas/día baja a ~2h, las 24h.
-    - cron: "6 1,3,5,7,9,11,13,15,17,19,21,23 * * *"  # cada 2h, las 24h, 1h después de cada run_market
+    - cron: "36 1,3,5,7,9,11,13,15,17,19,21,23 * * *"  # cada 2h, las 24h, 1h después de cada run_market
+
+concurrency:
+  group: db-futmondo-write
+  cancel-in-progress: false
 
 permissions:
   contents: write

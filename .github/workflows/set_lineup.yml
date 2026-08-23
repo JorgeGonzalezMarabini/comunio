@@ -58,6 +58,16 @@ on:
     # todavía.
     - cron: "3,23,43 15-20 * * 5"
 
+# No se toca el minuto (:23 es el ancla histórica, ver arriba) -- con el
+# escalonado del resto de workflows (sync_data:06, run_market:16,
+# run_sales:36, manage_substitutes:13/33/53) ya no coincide con ninguno.
+# El `concurrency.group` compartido es la protección real frente a
+# colisiones de commit/push sobre db/futmondo.db -- ver el comentario largo
+# en sync_data.yml.
+concurrency:
+  group: db-futmondo-write
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

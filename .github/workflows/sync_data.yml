@@ -20,6 +20,32 @@ on:
     # durante la madrugada.
     - cron: "6 * * * *"  # cada hora, las 24h
 
+# db/futmondo.db es un binario SQLite versionado en git (ver README, sección
+# de commits automáticos) que comitean 5 workflows: este, run_market.yml,
+# run_sales.yml, manage_substitutes.yml y set_lineup.yml. Al ser binario no
+# hay merge posible entre dos commits concurrentes -- el segundo `git push`
+# simplemente falla (non-fast-forward).
+#
+# Hasta 2026-08-23 los 5 usaban minutos coincidentes (varios en :06, o en
+# :06/:26/:46) -- colisión CONFIRMADA en real comparando timestamps de commit
+# (p. ej. tres commits de sync_data/manage_substitutes/run_market entre las
+# 10:32:10 y 10:32:58 del 2026-08-23, pese a tener minutos de cron distintos:
+# el retraso de GitHub al disparar cron programados no es fijo ni
+# proporcional al minuto pedido, así que escalonar minutos por sí solo NO
+# garantiza nada, solo reduce la frecuencia del choque). Se aplican dos
+# capas:
+#   1. Minutos escalonados entre los 5 (éste se deja en :06 como ancla,
+#      igual que antes) -- reduce cuántas veces coinciden.
+#   2. `concurrency.group` con el MISMO nombre en los 5 workflows -- esta es
+#      la protección real: GitHub Actions serializa (encola, no cancela)
+#      cualquier run de cualquiera de los 5 que se solape en el tiempo, sin
+#      importar el retraso de cron. `cancel-in-progress: false` a propósito:
+#      cancelar un run a medias podría dejar `db/futmondo.db` a medio
+#      escribir sin commitear.
+concurrency:
+  group: db-futmondo-write
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

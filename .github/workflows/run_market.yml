@@ -28,11 +28,29 @@ on:
     # no contra la actividad de otros usuarios en tiempo real. No hay
     # ninguna razón para dejar de pujar/reaccionar durante la madrugada.
     #
-    # Minuto 6 (no en punto), mismo motivo que sync_data.yml: GitHub retrasa
+    # Minuto 16 (no en punto), mismo motivo que sync_data.yml: GitHub retrasa
     # los cron programados EN PUNTO por congestión (minuto más solicitado de
     # toda la plataforma). Sin deadline externo real (ver README, "Delay de
     # GitHub Actions y horas críticas"), es seguro mover el minuto.
-    - cron: "6 0,2,4,6,8,10,12,14,16,18,20,22 * * *"  # cada 2h, las 24h (antes solo horario activo)
+    #
+    # Antes minuto 6, igual que sync_data.yml/run_sales.yml/
+    # manage_substitutes.yml -- todos coincidían en el minuto 6 (o en 6/26/46),
+    # lo que provocaba colisiones sistemáticas al comitear db/futmondo.db
+    # (los 5 workflows que la modifican comparten checkout+commit+push sobre
+    # un binario SQLite, sin merge posible). Escalonado (2026-08-23) junto
+    # con el `concurrency:` de más abajo, que es la protección real -- el
+    # escalonado solo reduce cuántas veces un run tiene que esperar en cola.
+    - cron: "16 0,2,4,6,8,10,12,14,16,18,20,22 * * *"  # cada 2h, las 24h (antes solo horario activo)
+
+# db/futmondo.db es un binario SQLite versionado en git (ver README) que
+# comitean 5 workflows (sync_data, run_market, run_sales,
+# manage_substitutes, set_lineup) -- sin merge posible entre ellos. Group
+# compartido por NOMBRE entre los 5 para que GitHub Actions serialice sus
+# ejecuciones (encola, no cancela) sin importar el retraso real de cada
+# cron. Ver sync_data.yml para el detalle completo.
+concurrency:
+  group: db-futmondo-write
+  cancel-in-progress: false
 
 permissions:
   contents: write
