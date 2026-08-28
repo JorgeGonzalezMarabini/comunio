@@ -22,6 +22,14 @@ que lo pedido"). Si ninguna oferta supera el precio pedido, el listado se
 deja tal cual esperando una mejor -- Futmondo no vende solo al precio
 pedido, hace falta que alguien iguale o supere esa cifra.
 
+Solo ofertas de Futmondo, nunca de otro manager (a petición del usuario,
+2026-08-28): de las ofertas anteriores, se ignoran por completo las que
+vienen de OTRO MANAGER real -- solo se evalúa/acepta la mejor oferta que
+identifique como puesta por el propio Futmondo/"Computer" (ver
+`_is_futmondo_offer()`). Se siguen registrando TODAS las ofertas vistas en
+`received_sale_offers` (para auditoría/análisis), pero una oferta de otro
+manager nunca se acepta automáticamente, por alta que sea.
+
 Cada oferta vista (aceptada o no) se registra en `db.models.
 received_sale_offers` -- pensado para analizar más adelante, con datos
 reales acumulados, si el `asking_price` que calcula
@@ -117,23 +125,51 @@ def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
     )
 
 
+def _is_futmondo_offer(bid: dict) -> bool:
+    """
+    Distingue una oferta puesta por el propio Futmondo ("Computer") de una
+    de OTRO MANAGER real, dentro de `bids[].userTeam` (a petición del
+    usuario, 2026-08-28: solo se aceptan automáticamente ofertas de
+    Futmondo, nunca de otro manager -- ver docstring del módulo).
+
+    Futmondo no documenta ningún campo para esto en `bids[]` (a diferencia
+    de `computer: bool` en `get_market()`, que identifica al PROPIETARIO
+    actual de un jugador del mercado de fichajes -- un concepto distinto,
+    no quién puja sobre los tuyos puestos en venta). Es una heurística
+    empírica sobre datos reales de producción (`received_sale_offers`,
+    revisados 2026-08-28): las ofertas de otros managers reales siempre
+    traen `userTeam.name`/`userTeam.slug` NO vacíos (p.ej.
+    "Javier Mediavilla"/"javier-mediavilla"), mientras que las que no
+    tienen manager real identificado llegan con ambos campos como cadena
+    vacía "". No está confirmado visualmente en la UI de Futmondo (a
+    diferencia del resto de mecanismos de este módulo, TODO.md #15) --
+    revisar si aparece algún caso real que la contradiga.
+    """
+    user_team = bid.get("userTeam") or {}
+    return not (user_team.get("name") or "").strip() and not (user_team.get("slug") or "").strip()
+
+
 def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list[dict], list[tuple[dict, str]]]:
     """
     Lee las ofertas de compra recibidas sobre jugadores propios puestos en
     venta NORMAL (`client.get_my_players_in_market()[].bids`) y acepta
-    SIEMPRE la oferta más alta que SUPERE el precio de salida pedido (ver
-    docstring del módulo, TODO.md #15). Si la mejor oferta no supera el
-    precio pedido, el listado se deja tal cual.
+    SIEMPRE la oferta más alta -- SOLO entre las de Futmondo
+    (`_is_futmondo_offer()`, ver docstring del módulo) -- que SUPERE el
+    precio de salida pedido. Si no hay ninguna oferta de Futmondo, o
+    ninguna supera el precio pedido, el listado se deja tal cual; las
+    ofertas de otro manager real nunca se aceptan automáticamente, por
+    alta que sea su cuantía.
 
     Ignora listados de CLÁUSULA (`isClause: true`) -- fuera del alcance
     confirmado de `accept_sale_offer()` (ver su docstring): esos usan un
     mecanismo de compra distinto (`pay_clause()`), sin oferta que aceptar.
 
-    Registra TODAS las ofertas vistas (aceptadas o no) en
-    `db.models.received_sale_offers`, una sola vez cada una por su id real
-    de Futmondo -- ver `record_received_offer()`. Solo se marca `accepted`
-    tras confirmar éxito real de `accept_sale_offer()`, nunca antes (si la
-    llamada falla, la oferta queda registrada pero sin marcar).
+    Registra TODAS las ofertas vistas (aceptadas o no, de Futmondo o de
+    otro manager) en `db.models.received_sale_offers`, una sola vez cada
+    una por su id real de Futmondo -- ver `record_received_offer()`. Solo
+    se marca `accepted` tras confirmar éxito real de `accept_sale_offer()`,
+    nunca antes (si la llamada falla, la oferta queda registrada pero sin
+    marcar).
 
     Devuelve (aceptadas, fallidas) para el resumen de notificación de
     `run()`. Un fallo al aceptar una oferta concreta (red o rechazo de
@@ -151,7 +187,6 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
             continue
 
         listing_price = item["price"]
-        best = max(bids, key=lambda b: b["price"])
 
         for bid in bids:
             record_received_offer(
@@ -164,6 +199,11 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
                 seen_at=seen_at,
             )
 
+        futmondo_bids = [b for b in bids if _is_futmondo_offer(b)]
+        if not futmondo_bids:
+            continue  # ninguna oferta es de Futmondo -- se ignoran las de otro manager
+
+        best = max(futmondo_bids, key=lambda b: b["price"])
         if best["price"] <= listing_price:
             continue  # ninguna oferta supera lo pedido -- se deja listado tal cual
 

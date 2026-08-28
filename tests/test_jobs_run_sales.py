@@ -245,18 +245,23 @@ def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):
     assert "plantilla vino vacía" in captured[0]
 
 
-def _offer_listing(player_id=25, name="Fer Niño", listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000, is_clause=False):
-    """Item de get_my_players_in_market()["answer"] con una única oferta -- ver TODO.md #15."""
+def _offer_listing(player_id=25, name="Fer Niño", listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000, is_clause=False, bidder_name="", bidder_slug=""):
+    """
+    Item de get_my_players_in_market()["answer"] con una única oferta -- ver
+    TODO.md #15. Por defecto la oferta es "de Futmondo" (bidder_name/slug
+    vacíos, ver _is_futmondo_offer()) -- pasa un bidder_name/slug real para
+    simular una oferta de otro manager.
+    """
     return {
         "id": player_id,
         "name": name,
         "price": listing_price,
         "isClause": is_clause,
-        "bids": [{"id": bid_id, "price": offer_price, "userTeam": {"name": "jorge.gonzalez", "slug": "jorgegonzalez"}}],
+        "bids": [{"id": bid_id, "price": offer_price, "userTeam": {"name": bidder_name, "slug": bidder_slug}}],
     }
 
 
-def test_run_sales_accepts_highest_offer_above_asking_price(tmp_db):
+def test_run_sales_accepts_highest_futmondo_offer_above_asking_price(tmp_db):
     """Criterio del usuario (2026-08-22, TODO.md #15): aceptar SIEMPRE la oferta que SUPERE el precio pedido."""
     accept_calls = []
 
@@ -284,7 +289,40 @@ def test_run_sales_accepts_highest_offer_above_asking_price(tmp_db):
     assert row["accepted"] == 1
     assert row["listing_price"] == 2_623_496
     assert row["offer_price"] == 2_700_000
-    assert row["bidder_name"] == "jorge.gonzalez"
+    assert row["bidder_name"] == ""
+
+
+def test_run_sales_ignores_offer_from_another_manager_even_if_above_asking_price(tmp_db):
+    """A petición del usuario (2026-08-28): una oferta de OTRO MANAGER nunca se acepta, por alta que sea."""
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {
+                "answer": [
+                    _offer_listing(
+                        listing_price=1_000_000,
+                        bid_id="bid_manager",
+                        offer_price=5_000_000,
+                        bidder_name="Javier Mediavilla",
+                        bidder_slug="javier-mediavilla",
+                    )
+                ]
+            }
+
+        def accept_sale_offer(self, bid_id, player_id):
+            raise AssertionError("no debería aceptar una oferta de otro manager")
+
+        def get_roster(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert "ACEPTADA" not in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT accepted, bidder_name FROM received_sale_offers WHERE futmondo_bid_id = 'bid_manager'").fetchone()
+    assert row["accepted"] == 0
+    assert row["bidder_name"] == "Javier Mediavilla"  # se registra para auditoría igualmente
 
 
 def test_run_sales_does_not_accept_offer_at_or_below_asking_price(tmp_db):
