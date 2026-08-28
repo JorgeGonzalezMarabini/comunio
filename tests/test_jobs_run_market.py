@@ -443,6 +443,38 @@ def test_run_market_respects_pending_committed_from_local_db(tmp_db):
         assert conn.execute("SELECT COUNT(*) AS n FROM bids WHERE status != 'placed' OR player_id != '9999'").fetchone()["n"] == 0
 
 
+def test_run_market_no_bids_pass_still_reports_squad_risk(tmp_db):
+    """
+    Regresión: antes, si esta pasada no generaba ninguna puja/swap/reprecio
+    (p.ej. el mercado no ofrece ningún candidato de la posición en riesgo),
+    el aviso de riesgo de plantilla (engine/squad_risk.py:depth_warnings)
+    se calculaba pero se quedaba solo en el log interno -- el mensaje de
+    Telegram de "sin pujas esta ejecución" no lo mencionaba, así que el
+    usuario nunca se enteraba de que una posición se había quedado sin
+    banquillo salvo que esa misma pasada también pujara por algo.
+    """
+    _seed_player("del1", "DEL", price=1_000_000)
+    _seed_player("del2", "DEL", price=1_000_000)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": "del1"}, {"id": "del2"}]}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
+
+        def get_market(self):
+            return {"answer": []}  # sin candidatos -- no hay nada que pujar esta pasada
+
+    captured = []
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)):
+        run_market.run()
+
+    assert "sin pujas esta ejecución" in captured[0]
+    assert "Riesgo de plantilla detectado" in captured[0]
+    assert "DEL" in captured[0]
+
+
 def test_run_market_respects_pending_committed_from_live_market_bid_field(tmp_db):
     """
     Resuelve TODO.md #3: si la BD local no sabe nada (perdida/no

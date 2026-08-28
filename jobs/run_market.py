@@ -650,13 +650,24 @@ def run():
         elif max_roster_size_from_cache:
             skip_context.append(f"maxPlayersInRoster no informado por la API esta pasada, usando caché ({max_roster_size})")
         skip_note = f" [{'; '.join(skip_context)}]" if skip_context else ""
-        notify(
+        message = (
             f"run_market: sin pujas esta ejecución (saldo={format_number(remaining_budget)}, "
             f"comprometido en pujas pendientes={format_number(pending_committed)}, "
             f"ya arriesgado hoy={format_number(already_risked)}, "
             f"candidatos evaluados={len(ranked)}, tope dinámico por jugador={format_number(player_cap)})."
             f"{skip_note}"
         )
+        if risk_warnings:
+            # Sin esto, un riesgo de plantilla detectado (ver
+            # engine/squad_risk.py) que esta pasada no llega a traducirse en
+            # ninguna puja/swap/reprecio (p.ej. mercado sin candidatos de esa
+            # posición, o plantilla llena) quedaba SOLO en el log interno --
+            # nunca llegaba a Telegram porque este `return` corta antes de
+            # alcanzar el bloque `if risk_warnings` de más abajo, que solo se
+            # ejecuta en el camino de "sí hubo alguna acción".
+            message += "\n⚠️ Riesgo de plantilla detectado (sin candidato con el que actuar esta pasada):"
+            message += "\n" + "\n".join(f"  - {w}" for w in risk_warnings)
+        notify(message)
         return
 
     # `player_slug` no viene en `get_player_features()` (columnas de BD),

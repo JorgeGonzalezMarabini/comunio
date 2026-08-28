@@ -19,6 +19,26 @@ def test_assess_squad_depth_flags_positions_without_healthy_bench():
     assert assessment["DEL"]["at_risk"] is True
 
 
+def test_assess_squad_depth_excludes_players_already_listed_for_sale():
+    """
+    Un jugador ya puesto en venta (por una pasada anterior de run_sales) no
+    debería contar como "disponible" en el cálculo de banquillo -- si su
+    venta se resuelve mientras tanto, deja el mismo hueco que un lesionado.
+    Cubre ambos formatos de "ya en venta" que usan los distintos llamantes:
+    `on_market` (get_player_features(), jobs/run_market.py) y `market`
+    (item crudo de FutmondoClient.get_roster(), engine/selling_strategy.py).
+    """
+    squad = [
+        {"id": "del1", "position": "DEL", "status": "", "on_market": 1},  # ya listado -- no disponible
+        {"id": "del2", "position": "DEL", "status": "", "market": {"price": 123}},  # ya listado -- no disponible
+    ]
+    assessment = assess_squad_depth(squad, formation="4-4-2")
+
+    assert assessment["DEL"]["total"] == 2
+    assert assessment["DEL"]["available"] == 0
+    assert assessment["DEL"]["at_risk"] is True
+
+
 def test_depth_warnings_only_lists_at_risk_positions():
     squad = (
         [{"id": "por1", "position": "POR", "status": ""}]

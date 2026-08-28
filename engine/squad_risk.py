@@ -34,7 +34,14 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
     `squad`: lista de jugadores con al menos "position" (POR/DEF/MED/DEL)
     y "status" (para poder descontar lesionados/sancionados — ver
     clients.futmondo_client.is_injury_status()). Normalmente toda la
-    plantilla, no solo los titulares de esta jornada.
+    plantilla, no solo los titulares de esta jornada. Si el jugador ya
+    está puesto en venta (`on_market` truthy — `get_player_features()`,
+    ver jobs/run_market.py — o `market` truthy — item crudo de
+    `FutmondoClient.get_roster()`, ver engine/selling_strategy.py) también
+    se descuenta de "disponible", igual que un lesionado: sigue en la
+    plantilla hasta que alguien lo compre, pero no protege de verdad de un
+    hueco si su venta se resuelve o si mientras tanto pierdes a otro
+    titular de la misma posición.
 
     Devuelve un dict por posición:
         {
@@ -42,10 +49,11 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
                      "bench": int, "at_risk": bool},
             "DEF": {...}, "MED": {...}, "DEL": {...},
         }
-    `available` cuenta solo jugadores SIN lesión/sanción (un suplente
-    lesionado no protege de verdad). `bench` = available - required; si
-    `bench <= 0`, perder a un solo jugador más de esa posición (cláusula,
-    lesión...) ya deja un hueco en la alineación -> `at_risk = True`.
+    `available` cuenta solo jugadores SIN lesión/sanción y que no estén ya
+    puestos en venta (ni uno ni otro protege de verdad). `bench` =
+    available - required; si `bench <= 0`, perder a un solo jugador más de
+    esa posición (cláusula, lesión...) ya deja un hueco en la alineación
+    -> `at_risk = True`.
     """
     formation = formation or config.DEFAULT_FORMATION
     slots = FORMATIONS.get(formation)
@@ -55,7 +63,11 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
     assessment = {}
     for position, required in slots.items():
         players_in_position = [p for p in squad if p.get("position") == position]
-        available = [p for p in players_in_position if not is_injury_status(p.get("status"))]
+        available = [
+            p
+            for p in players_in_position
+            if not is_injury_status(p.get("status")) and not p.get("on_market") and not p.get("market")
+        ]
         bench = len(available) - required
         assessment[position] = {
             "total": len(players_in_position),
