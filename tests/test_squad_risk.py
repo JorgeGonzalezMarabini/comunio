@@ -1,4 +1,4 @@
-from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
+from engine.squad_risk import assess_squad_depth, depth_warnings, sales_to_cancel, weakest_starter_scores
 
 
 def test_assess_squad_depth_flags_positions_without_healthy_bench():
@@ -53,6 +53,73 @@ def test_depth_warnings_only_lists_at_risk_positions():
     assert warned_positions == {"POR", "MED", "DEL"}
     assert "DEF" not in warned_positions
     assert all("-4 puntos" in w for w in warnings)
+
+
+def test_sales_to_cancel_ignores_zero_margin_only_deficit_triggers():
+    """
+    `at_risk` (margen cero) NO debe disparar la cancelación por sí solo --
+    si no, cualquier venta recién listada se cancelaría en la primera
+    pasada (listar ya resta uno de "disponible", ver docstring de
+    `assess_squad_depth`). Solo `deficit > 0` (margen negativo) justifica
+    recuperar una venta ya activa.
+    """
+    assessment = {"DEF": {"deficit": 0}}
+    open_sales = [{"id": 1, "player_id": "d1"}]
+    position_by_player_id = {"d1": "DEF"}
+
+    assert sales_to_cancel(assessment, open_sales, position_by_player_id) == []
+
+
+def test_sales_to_cancel_picks_oldest_first_up_to_the_deficit():
+    """Con déficit=1 y dos ventas abiertas en esa posición, solo se cancela la más antigua (menor id)."""
+    assessment = {"DEF": {"deficit": 1}}
+    open_sales = [{"id": 5, "player_id": "newer"}, {"id": 2, "player_id": "older"}]
+    position_by_player_id = {"newer": "DEF", "older": "DEF"}
+
+    to_cancel = sales_to_cancel(assessment, open_sales, position_by_player_id)
+    assert [s["id"] for s in to_cancel] == [2]
+
+
+def test_sales_to_cancel_ignores_sale_for_player_no_longer_in_squad():
+    """
+    Si el jugador de la venta ya no aparece en la plantilla (p.ej.
+    `_reconcile_sales()` ya lo marcó 'sold' en esta misma pasada), no hay
+    nada que cancelar -- se ignora sin más.
+    """
+    assessment = {"DEF": {"deficit": 1}}
+    open_sales = [{"id": 1, "player_id": "gone"}]
+    position_by_player_id = {}  # "gone" ya no está en la plantilla
+
+    assert sales_to_cancel(assessment, open_sales, position_by_player_id) == []
+
+
+def test_sales_to_cancel_end_to_end_with_assess_squad_depth():
+    """
+    Escenario real completo: 5 DEF sanos (margen 1) -> se lista la venta
+    del suplente sobrante -> bench cae a 0 (at_risk, pero deficit=0: nada
+    que rescatar todavía). Si DESPUÉS otro DEF distinto desaparece de la
+    plantilla entera (cláusula, venta, lesión...), el margen se vuelve
+    NEGATIVO -- ahí sí hay que cancelar la venta ya listada.
+    """
+    squad_after_listing = [{"id": "def_listed", "position": "DEF", "status": "", "market": True}] + [
+        {"id": f"def{i}", "position": "DEF", "status": ""} for i in range(4)
+    ]
+    assessment = assess_squad_depth(squad_after_listing, formation="4-4-2")
+    assert assessment["DEF"]["at_risk"] is True
+    assert assessment["DEF"]["deficit"] == 0
+
+    open_sales = [{"id": 1, "player_id": "def_listed"}]
+    position_by_player_id = {p["id"]: p["position"] for p in squad_after_listing}
+    assert sales_to_cancel(assessment, open_sales, position_by_player_id) == []
+
+    # Un DEF distinto desaparece por completo de la plantilla (p.ej. clausulado).
+    squad_after_loss = squad_after_listing[:-1]
+    assessment2 = assess_squad_depth(squad_after_loss, formation="4-4-2")
+    assert assessment2["DEF"]["deficit"] == 1
+
+    position_by_player_id2 = {p["id"]: p["position"] for p in squad_after_loss}
+    to_cancel = sales_to_cancel(assessment2, open_sales, position_by_player_id2)
+    assert [s["id"] for s in to_cancel] == [1]
 
 
 def test_weakest_starter_scores_returns_score_of_last_starter_picked():

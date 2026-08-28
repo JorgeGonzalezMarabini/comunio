@@ -549,6 +549,27 @@ misma vigilancia de todos modos, por precaución conservadora: quedarte
 sin poder alinear a nadie en una posición nunca es deseable, confirmada o
 no la penalización exacta.
 
+El bot no puede detectar un clausulazo como evento propio (Futmondo no
+distingue esa causa de una venta aceptada, una retirada manual o una
+lesión — ver docstring de `jobs/sync_data.py`), pero sí reacciona a su
+EFECTO sobre la plantilla: si mientras un jugador nuestro sigue puesto en
+venta, otro jugador de esa misma posición desaparece del todo del roster
+(clausulado por un tercero, vendido, lo que sea) y eso deja la posición
+con margen NEGATIVO (`assess_squad_depth()[...]["deficit"] > 0` — ni
+siquiera contando de vuelta al que está en venta llegaríamos a los
+titulares requeridos), `jobs/sync_data._rescue_sales_at_risk()` cancela
+esa venta (`FutmondoClient.cancel_sale()`) para recuperar el cuerpo antes
+de que se cierre sola y nos deje cortos. Vive en `sync_data` (corre cada
+hora) y no en `run_sales` (cada 2h) para reaccionar lo antes posible.
+
+Deliberadamente NO se usa el `at_risk` de más arriba (margen CERO) para
+decidir la cancelación, solo `deficit` (margen NEGATIVO,
+`engine.squad_risk.sales_to_cancel`): poner un jugador en venta ya resta
+uno de "disponible" por diseño, así que `at_risk` sin margen es el estado
+normal justo después de listar cualquier venta — usarlo aquí deshacería
+la venta en la primera pasada tras crearla. Solo actúa cuando el margen
+se ha vuelto de verdad insuficiente.
+
 ## Fichajes que mejoran el once, no solo tapan huecos (`engine/squad_risk.weakest_starter_scores`)
 
 `assess_squad_depth()` (arriba) solo mira CANTIDAD: si una posición tiene

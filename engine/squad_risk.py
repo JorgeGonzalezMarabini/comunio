@@ -46,14 +46,20 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
     Devuelve un dict por posición:
         {
             "POR": {"total": int, "available": int, "required": int,
-                     "bench": int, "at_risk": bool},
+                     "bench": int, "at_risk": bool, "deficit": int},
             "DEF": {...}, "MED": {...}, "DEL": {...},
         }
     `available` cuenta solo jugadores SIN lesión/sanción y que no estén ya
     puestos en venta (ni uno ni otro protege de verdad). `bench` =
     available - required; si `bench <= 0`, perder a un solo jugador más de
     esa posición (cláusula, lesión...) ya deja un hueco en la alineación
-    -> `at_risk = True`.
+    -> `at_risk = True`. `deficit = max(0, -bench)`: a diferencia de
+    `at_risk` (dispara con margen CERO, ya usado para bloquear NUEVAS
+    ventas en `engine.selling_strategy.decide_sales()`), `deficit` solo es
+    positivo con margen NEGATIVO -- ni siquiera contando de vuelta como
+    disponibles a los jugadores ya puestos en venta llegaríamos a los
+    titulares requeridos. Ver `sales_to_cancel()`: es el umbral que sí
+    justifica cancelar una venta YA LISTADA, no solo bloquear una nueva.
     """
     formation = formation or config.DEFAULT_FORMATION
     slots = FORMATIONS.get(formation)
@@ -75,8 +81,58 @@ def assess_squad_depth(squad: list[dict], formation: str = None) -> dict:
             "required": required,
             "bench": bench,
             "at_risk": bench <= 0,
+            "deficit": max(0, -bench),
         }
     return assessment
+
+
+def sales_to_cancel(
+    assessment: dict, open_sales: list[dict], position_by_player_id: dict[str, str]
+) -> list[dict]:
+    """
+    A partir de un `assessment` de `assess_squad_depth()` y las ventas que
+    seguimos creyendo listadas (`db.models.get_open_sales()`), decide
+    cuáles hay que cancelar para no quedarnos sin jugadores suficientes
+    para cubrir el once en alguna posición -- típicamente porque OTRO
+    jugador de esa misma posición desapareció de la plantilla entre medias
+    (cláusula pagada por otro manager, venta aceptada, lesión...; Futmondo
+    no distingue la causa, ver docstring de jobs/sync_data.py).
+
+    Deliberadamente se actúa solo sobre `deficit > 0` (margen NEGATIVO),
+    NUNCA sobre `at_risk` a secas (margen cero): un jugador recién puesto
+    en venta YA resta uno de "disponible" (ver docstring de
+    `assess_squad_depth`), así que "sin margen" es el estado normal nada
+    más listarlo -- usar `at_risk` aquí deshacería cualquier venta en la
+    primera pasada después de crearla. `deficit` solo es positivo cuando
+    ni siquiera contando de vuelta a estos jugadores como disponibles se
+    llegaría a los titulares requeridos: ahí sí hace falta recuperar
+    alguno de verdad, no solo dejar de crear más riesgo.
+
+    Devuelve la sublista de `open_sales` a cancelar -- como mucho
+    `deficit` por posición, las más antiguas primero (menor `id`, orden de
+    creación) dentro de cada una: cancelar de más no hace daño real (el
+    jugador solo vuelve a la plantilla), pero cancelar solo lo necesario
+    evita renunciar a más plusvalía potencial de la imprescindible.
+    Ventas de jugadores que ya no aparecen en `position_by_player_id`
+    (típicamente porque `jobs.sync_data._reconcile_sales()` ya los marcó
+    'sold' en esta misma pasada, o el sync aún no ha corrido) se ignoran:
+    no hay nada que cancelar si el jugador ya no está en la plantilla.
+    """
+    sales_by_position: dict[str, list[dict]] = {}
+    for sale in open_sales:
+        position = position_by_player_id.get(str(sale["player_id"]))
+        if position is None:
+            continue
+        sales_by_position.setdefault(position, []).append(sale)
+
+    to_cancel = []
+    for position, info in assessment.items():
+        deficit = info["deficit"]
+        if not deficit:
+            continue
+        candidates = sorted(sales_by_position.get(position, []), key=lambda s: s["id"])
+        to_cancel.extend(candidates[:deficit])
+    return to_cancel
 
 
 def depth_warnings(assessment: dict) -> list[str]:

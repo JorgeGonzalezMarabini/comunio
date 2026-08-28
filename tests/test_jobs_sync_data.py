@@ -129,6 +129,89 @@ def test_reconcile_sales_leaves_still_owned_players_listed(tmp_db):
     assert sold == 0
 
 
+def test_rescue_sales_at_risk_cancels_listing_when_position_left_understaffed(tmp_db, roster_player_factory):
+    """
+    Escenario real (clausulazo u otra baja de un jugador de la misma
+    posición mientras una venta sigue listada): con formación 4-4-2 por
+    defecto, DEF necesita 4 titulares. Aquí solo quedan 3 DEF sanos en
+    plantilla + el propio DEF puesto en venta (que ya no cuenta como
+    disponible) -- margen NEGATIVO (`deficit=1`), así que la venta debe
+    cancelarse para recuperar el cuerpo antes de que se cierre sola.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+            ("2001", 1_000_000, "listed", NOW),
+        )
+
+    roster_items = [roster_player_factory(id=2001, role="defensa", on_market=True)] + [
+        roster_player_factory(id=2000 + i, role="defensa") for i in range(2, 5)
+    ]
+
+    cancelled = []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": roster_items}
+
+        def get_market(self):
+            return {"answer": []}
+
+        def cancel_sale(self, player_id):
+            cancelled.append(player_id)
+            return {"answer": {"code": "api.general.ok"}}
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", {})):
+        sync_data.run()
+
+    assert cancelled == ["2001"]
+    with get_connection() as conn:
+        row = conn.execute("SELECT status FROM sales WHERE player_id = ?", ("2001",)).fetchone()
+    assert row["status"] == "delisted"
+    assert any("riesgo de plantilla" in m for m in captured)
+
+
+def test_rescue_sales_at_risk_leaves_fresh_listing_alone(tmp_db, roster_player_factory):
+    """
+    Justo tras listar una venta con margen exacto (bench=0, `at_risk` pero
+    SIN déficit), no hay que cancelar nada -- eso deshacería cualquier
+    venta en la primera pasada después de crearla (ver docstring de
+    `engine.squad_risk.sales_to_cancel`).
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+            ("2001", 1_000_000, "listed", NOW),
+        )
+
+    # 4 DEF sanos en plantilla (justo lo requerido) + el propio DEF en venta.
+    roster_items = [roster_player_factory(id=2001, role="defensa", on_market=True)] + [
+        roster_player_factory(id=2000 + i, role="defensa") for i in range(2, 6)
+    ]
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": roster_items}
+
+        def get_market(self):
+            return {"answer": []}
+
+        def cancel_sale(self, player_id):
+            raise AssertionError("no debería cancelarse ninguna venta con déficit 0")
+
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify"), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", {})):
+        sync_data.run()
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT status FROM sales WHERE player_id = ?", ("2001",)).fetchone()
+    assert row["status"] == "listed"
+
+
 def test_backfill_initial_squad_bids_adds_won_bid_at_current_value(tmp_db, roster_player_factory):
     """
     Un jugador de la plantilla inicial (nunca comprado por el bot, cero

@@ -25,13 +25,28 @@ actual, porque ese VM sí se descontó del presupuesto inicial -- sin esto,
 `engine.selling_strategy.decide_sales()` los descarta como candidatos a
 venta sin mirar su lesión/pérdida de valor (no aparecían en
 `get_won_bid_prices()`).
+
+Rescate de ventas por riesgo de plantilla (ver `_rescue_sales_at_risk` /
+`engine.squad_risk.sales_to_cancel`): si mientras una venta propia sigue
+listada, otro jugador de esa misma posición desaparece de la plantilla
+(cláusula pagada por otro manager, venta aceptada, lesión...) y eso deja la
+posición con margen NEGATIVO (`assess_squad_depth().deficit > 0` -- ni
+siquiera contando de vuelta al jugador en venta llegaríamos a los
+titulares requeridos), este sync cancela esa venta (`cancel_sale()`) para
+recuperar el cuerpo antes de que se cierre sola y nos deje cortos. Vive
+aquí (corre cada hora) y no en jobs/run_sales.py (cada 2h) para reaccionar
+lo antes posible -- cancelar tarde no deshace el riesgo si la venta ya se
+resolvió sola para entonces.
 """
 from datetime import datetime, timezone
 
+import requests
+
 import config
-from clients.futmondo_client import FutmondoClient, FUTMONDO_POSITION_MAP
+from clients.futmondo_client import FutmondoClient, FutmondoOfferError, FUTMONDO_POSITION_MAP
 from clients.laliga_stats_client import build_player_index, get_league_data_with_fallback, match_player
 from db.models import init_db, get_connection, get_open_bids, update_bid_status, get_open_sales, update_sale_status
+from engine.squad_risk import assess_squad_depth, sales_to_cancel
 from notifier import notify, track_job_run
 
 
@@ -73,6 +88,51 @@ def _reconcile_bids(roster_player_ids: set, market_player_ids: set) -> dict:
             update_bid_status(bid["id"], "lost")
             counts["lost"] += 1
     return counts
+
+
+def _rescue_sales_at_risk(client: FutmondoClient, roster_players: list) -> list[dict]:
+    """
+    Cancela ventas propias YA LISTADAS (`sales.status='listed'`) cuya
+    posición se ha quedado con margen NEGATIVO desde que se listaron (ver
+    `engine.squad_risk.sales_to_cancel`) -- típicamente porque OTRO
+    jugador de esa misma posición desapareció de la plantilla entre medias
+    (cláusula pagada por otro manager, venta aceptada, lesión...; Futmondo
+    no distingue la causa, ver docstring del módulo).
+
+    Deliberadamente NO usa `at_risk` (margen cero) para decidir, solo
+    `deficit` (margen negativo) -- con `at_risk` a secas, CUALQUIER venta
+    recién listada se cancelaría en la primera pasada (listar ya resta uno
+    de "disponible" por diseño, ver docstring de `assess_squad_depth`).
+
+    Un fallo al cancelar una venta concreta (red, o el listado ya no
+    existe porque se vendió/canceló mientras tanto -- Futmondo no
+    documenta qué código devuelve en ese caso, ver docstring de
+    `FutmondoClient.cancel_sale`) no aborta el resto: se ignora sin más y
+    se reintentará solo si sigue detectado como déficit en el próximo
+    sync.
+
+    Devuelve las ventas canceladas con éxito (id, player_id, position)
+    para la notificación.
+    """
+    open_sales = get_open_sales()
+    if not open_sales:
+        return []
+
+    normalized_squad = [
+        {**p, "position": FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))} for p in roster_players
+    ]
+    depth = assess_squad_depth(normalized_squad, formation=config.DEFAULT_FORMATION)
+    position_by_player_id = {str(p["id"]): p["position"] for p in normalized_squad}
+
+    rescued = []
+    for sale in sales_to_cancel(depth, open_sales, position_by_player_id):
+        try:
+            client.cancel_sale(str(sale["player_id"]))
+        except (requests.RequestException, FutmondoOfferError):
+            continue
+        update_sale_status(sale["id"], "delisted")
+        rescued.append({**sale, "position": position_by_player_id.get(str(sale["player_id"]))})
+    return rescued
 
 
 def _backfill_initial_squad_bids(conn, roster_players: list, now: str) -> int:
@@ -347,6 +407,7 @@ def run():
     market_player_ids = {str(p["id"]) for p in market_players}
     reconciled = _reconcile_bids(roster_player_ids, market_player_ids)
     sold = _reconcile_sales(roster_player_ids)
+    rescued = _rescue_sales_at_risk(client, roster_players)
 
     total = len(roster_players) + len(market_players)
     matched = total - match_counts.get("sin_match", 0) - match_counts.get("sin_nombre", 0)
@@ -361,6 +422,9 @@ def run():
         message.append(f"Pujas 'won' sintéticas añadidas para plantilla inicial: {backfilled}.")
     if sold:
         message.append(f"Ventas completadas desde el último sync: {sold}.")
+    if rescued:
+        detail = ", ".join(f"{r['position']} #{r['player_id']}" for r in rescued)
+        message.append(f"Venta(s) cancelada(s) por riesgo de plantilla ({detail}).")
     notify(" ".join(message))
 
 
