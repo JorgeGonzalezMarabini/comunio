@@ -446,6 +446,15 @@ SELLING_REVALUATION_PROJECTION_FRACTION = float(os.getenv("SELLING_REVALUATION_P
 # Tope duro de la prima aplicable, pase lo que pase con el cálculo de arriba.
 SELLING_REVALUATION_MAX_PREMIUM_PCT = float(os.getenv("SELLING_REVALUATION_MAX_PREMIUM_PCT", "0.15"))
 
+# Margen de tolerancia para aceptar una oferta recibida de Futmondo
+# (jobs/run_sales.py, _process_received_offers) aunque NO llegue al precio
+# de salida pedido -- a petición del usuario, 2026-08-28: una puja "muy
+# cercana" al precio pedido (p.ej. a un 5% o menos por debajo) se acepta
+# igual, en vez de dejar el listado esperando indefinidamente a que alguien
+# iguale o supere la cifra exacta pedida. Se acepta la mejor oferta de
+# Futmondo si offer_price >= listing_price * (1 - SELLING_OFFER_ACCEPTANCE_MARGIN).
+SELLING_OFFER_ACCEPTANCE_MARGIN = float(os.getenv("SELLING_OFFER_ACCEPTANCE_MARGIN", "0.05"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real de Futmondo (confirmado por captura, campo "strategy" de
 # /1/userteam/lineup): CON guiones, ej. "4-4-2" — a diferencia de Comunio,

@@ -325,14 +325,69 @@ def test_run_sales_ignores_offer_from_another_manager_even_if_above_asking_price
     assert row["bidder_name"] == "Javier Mediavilla"  # se registra para auditoría igualmente
 
 
-def test_run_sales_does_not_accept_offer_at_or_below_asking_price(tmp_db):
-    """Una oferta que SOLO IGUALA el precio pedido (no lo supera) no se acepta -- ver docstring de _process_received_offers."""
+def test_run_sales_accepts_offer_at_asking_price(tmp_db):
+    """Una oferta que IGUALA el precio pedido se acepta (supera o iguala, ver docstring de _process_received_offers)."""
+    accept_calls = []
+
     class FakeClient(_BaseFakeClient):
         def get_my_players_in_market(self):
             return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid2", offer_price=1_000_000)]}
 
         def accept_sale_offer(self, bid_id, player_id):
-            raise AssertionError("no debería intentar aceptar una oferta que no supera el precio pedido")
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_roster(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid2", "25")]
+    with get_connection() as conn:
+        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid2'").fetchone()
+    assert row["accepted"] == 1
+
+
+def test_run_sales_accepts_offer_within_acceptance_margin_below_asking_price(tmp_db):
+    """
+    Criterio del usuario (2026-08-28): una oferta que NO llega al precio pedido pero
+    queda dentro del margen de tolerancia (config.SELLING_OFFER_ACCEPTANCE_MARGIN,
+    5% por defecto) se acepta igual -- listing_price=1_000_000, margen 5% ->
+    umbral 950_000, oferta de 960_000 queda dentro y se acepta.
+    """
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid_close", offer_price=960_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_roster(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid_close", "25")]
+    with get_connection() as conn:
+        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid_close'").fetchone()
+    assert row["accepted"] == 1
+
+
+def test_run_sales_does_not_accept_offer_below_acceptance_margin(tmp_db):
+    """Una oferta que queda POR DEBAJO del margen de tolerancia (umbral 950_000 con 5%) no se acepta."""
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid_far", offer_price=940_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            raise AssertionError("no debería intentar aceptar una oferta por debajo del margen de tolerancia")
 
         def get_roster(self):
             return {"answer": []}
@@ -343,7 +398,7 @@ def test_run_sales_does_not_accept_offer_at_or_below_asking_price(tmp_db):
 
     assert "ACEPTADA" not in captured[0]
     with get_connection() as conn:
-        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid2'").fetchone()
+        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid_far'").fetchone()
     assert row["accepted"] == 0
 
 

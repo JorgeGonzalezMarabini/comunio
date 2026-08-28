@@ -16,11 +16,13 @@ para completar la venta (confirmado en vivo, dos veces, con
 `FutmondoClient.accept_sale_offer()` -- ver su docstring). Por eso, ANTES
 de decidir nuevos listados, este job llama a `_process_received_offers()`:
 lee `get_my_players_in_market()[].bids` y acepta SIEMPRE la oferta más
-alta que SUPERE el precio de salida pedido (criterio del usuario,
-2026-08-22 -- ningún otro margen todavía, simple "la mejor si es mejor
-que lo pedido"). Si ninguna oferta supera el precio pedido, el listado se
-deja tal cual esperando una mejor -- Futmondo no vende solo al precio
-pedido, hace falta que alguien iguale o supere esa cifra.
+alta que SUPERE el precio de salida pedido, o que quede dentro de un
+margen de tolerancia por debajo de ese precio (criterio del usuario,
+2026-08-22, ampliado 2026-08-28 -- ver `config.SELLING_OFFER_ACCEPTANCE_MARGIN`:
+una puja "muy cercana" al precio pedido se acepta igual, en vez de dejar
+el listado esperando indefinidamente a que alguien iguale o supere la
+cifra exacta pedida). Si ni siquiera la mejor oferta entra dentro de ese
+margen, el listado se deja tal cual esperando una mejor.
 
 Solo ofertas de Futmondo, nunca de otro manager (a petición del usuario,
 2026-08-28): de las ofertas anteriores, se ignoran por completo las que
@@ -155,10 +157,14 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
     venta NORMAL (`client.get_my_players_in_market()[].bids`) y acepta
     SIEMPRE la oferta más alta -- SOLO entre las de Futmondo
     (`_is_futmondo_offer()`, ver docstring del módulo) -- que SUPERE el
-    precio de salida pedido. Si no hay ninguna oferta de Futmondo, o
-    ninguna supera el precio pedido, el listado se deja tal cual; las
-    ofertas de otro manager real nunca se aceptan automáticamente, por
-    alta que sea su cuantía.
+    precio de salida pedido, o que quede dentro del margen de tolerancia
+    `config.SELLING_OFFER_ACCEPTANCE_MARGIN` por debajo de ese precio (a
+    petición del usuario, 2026-08-28: una puja muy cercana al precio
+    pedido se acepta igual, en vez de dejar el listado esperando
+    indefinidamente a que alguien lo iguale o supere exactamente). Si no
+    hay ninguna oferta de Futmondo, o ninguna entra dentro de ese margen,
+    el listado se deja tal cual; las ofertas de otro manager real nunca se
+    aceptan automáticamente, por alta que sea su cuantía.
 
     Ignora listados de CLÁUSULA (`isClause: true`) -- fuera del alcance
     confirmado de `accept_sale_offer()` (ver su docstring): esos usan un
@@ -204,8 +210,9 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
             continue  # ninguna oferta es de Futmondo -- se ignoran las de otro manager
 
         best = max(futmondo_bids, key=lambda b: b["price"])
-        if best["price"] <= listing_price:
-            continue  # ninguna oferta supera lo pedido -- se deja listado tal cual
+        acceptance_threshold = listing_price * (1 - config.SELLING_OFFER_ACCEPTANCE_MARGIN)
+        if best["price"] < acceptance_threshold:
+            continue  # ni supera lo pedido ni queda dentro del margen de tolerancia -- se deja listado tal cual
 
         try:
             client.accept_sale_offer(str(best["id"]), str(item["id"]))
