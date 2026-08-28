@@ -153,6 +153,9 @@ _LEAGUE_DATA = {
         {"player_name": "Iker Solano", "team_title": "Getafe", "id": "u7"},  # apellido único, sin "position" -- para probar que el filtro no bloquea sin dato
         {"player_name": "Robin Le Normand", "team_title": "Atletico Madrid", "id": "u8", "position": "D"},  # apellido compuesto, dos palabras
         {"player_name": "Alex Baena", "team_title": "Atletico Madrid", "id": "u9", "position": "S"},  # posición SOLO "S" (suplente, sin F/M/D/GK) -- ver test de _position_is_compatible
+        {"player_name": "Trent Alexander-Arnold", "team_title": "Real Madrid", "id": "u10", "position": "D"},  # apodo = nombre de pila, no apellido
+        {"player_name": "Trent Otro", "team_title": "Sevilla", "id": "u11"},  # mismo nombre de pila "Trent" en otro equipo -- para forzar ambigüedad sin equipo
+        {"player_name": "Vinicius Junior", "team_title": "Real Madrid", "id": "u12", "position": "F"},  # nombre de pila único en la liga
     ]
 }
 
@@ -291,6 +294,64 @@ def test_match_player_surname_unique_accepts_unrecognized_position_code():
     player, strategy = match_player("Baena", "Atleti", index, position="MED")
     assert strategy == "surname_unique"
     assert player["id"] == "u9"
+
+
+def test_match_player_firstname_with_matching_team():
+    """
+    Caso real (jugadores conocidos por su nombre de pila, no su apellido):
+    "Trent" no coincide como apellido con nada ("alexander-arnold" es la
+    última palabra de "Trent Alexander-Arnold"), pero sí como NOMBRE DE
+    PILA de un jugador del mismo equipo -- ambigüedad resuelta por equipo,
+    como "surname+team" pero para nombre de pila.
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Trent", "Real Madrid", index)
+    assert strategy == "firstname+team"
+    assert player["id"] == "u10"
+
+
+def test_match_player_firstname_ambiguous_without_team_gives_up():
+    """
+    Dos jugadores distintos se llaman "Trent" (equipos distintos) -- sin
+    poder confirmar equipo, no hay forma fiable de saber cuál es. Mejor no
+    cruzar que cruzar mal (mismo criterio que con apellidos ambiguos).
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Trent", "Equipo Desconocido", index)
+    assert player is None
+    assert strategy == "sin_match"
+
+
+def test_match_player_firstname_unique_when_team_names_dont_align():
+    """
+    "Vinícius" no es apellido de nadie ("junior" es la última palabra de
+    "Vinicius Junior"), pero como nombre de pila es único en toda la liga
+    -- se acepta igual que "surname_unique" acepta un apellido único
+    cuando el equipo no se puede confirmar.
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Vinícius", "Real Madrid FC", index, position="DEL")  # nombre de equipo no coincide
+    assert strategy == "firstname_unique"
+    assert player["id"] == "u12"
+
+
+def test_match_player_firstname_unique_rejects_when_position_conflicts():
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Vinícius", "Real Madrid FC", index, position="DEF")
+    assert player is None
+    assert strategy == "sin_match"
+
+
+def test_match_player_firstname_not_tried_for_multi_word_name():
+    """
+    Si Futmondo ya muestra varias palabras, no tiene sentido tratar la
+    primera como apodo -- ya se probó como nombre completo y como apellido
+    (compuesto incluido). "Trent Desconocido" no es ningún jugador real.
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Trent Desconocido", "Real Madrid", index)
+    assert player is None
+    assert strategy == "sin_match"
 
 
 def test_match_player_position_missing_on_understat_side_does_not_block():

@@ -214,11 +214,21 @@ def build_player_index(league_data: dict) -> dict:
     compuestos tipo "Van Dijk" o "De Jong", que quedarían como "dijk"/
     "jong"), pero es exactamente el mismo criterio que ya usa Futmondo para
     mostrar el nombre corto en esos casos en la práctica.
+
+    También indexa por (equipo, NOMBRE DE PILA) y por nombre de pila a
+    secas — "nombre de pila" es la PRIMERA palabra del nombre completo
+    normalizado — para el caso de jugadores conocidos por su apodo/nombre
+    de pila en vez de su apellido (ej. "Trent" -> Trent Alexander-Arnold,
+    "Vinícius" -> Vinícius Júnior, "Fermín" -> Fermín López): sin esto,
+    ninguna de las estrategias basadas en apellido de match_player() los
+    alcanza (ver docstring de esa función).
     """
     players = league_data.get("players", [])
     by_full_name: dict[str, dict] = {}
     by_team_and_surname: dict[tuple[str, str], list[dict]] = {}
     by_surname: dict[str, list[dict]] = {}
+    by_team_and_first_name: dict[tuple[str, str], list[dict]] = {}
+    by_first_name: dict[str, list[dict]] = {}
 
     for p in players:
         full_name = _normalize(p.get("player_name", ""))
@@ -226,12 +236,24 @@ def build_player_index(league_data: dict) -> dict:
             continue
         by_full_name.setdefault(full_name, p)
 
-        surname = full_name.split(" ")[-1]
+        words = full_name.split(" ")
+        surname = words[-1]
         team = _normalize_team(p.get("team_title", ""))
         by_team_and_surname.setdefault((team, surname), []).append(p)
         by_surname.setdefault(surname, []).append(p)
 
-    return {"by_full_name": by_full_name, "by_team_and_surname": by_team_and_surname, "by_surname": by_surname, "all": players}
+        first_name = words[0]
+        by_team_and_first_name.setdefault((team, first_name), []).append(p)
+        by_first_name.setdefault(first_name, []).append(p)
+
+    return {
+        "by_full_name": by_full_name,
+        "by_team_and_surname": by_team_and_surname,
+        "by_surname": by_surname,
+        "by_team_and_first_name": by_team_and_first_name,
+        "by_first_name": by_first_name,
+        "all": players,
+    }
 
 
 # Understat combina varios códigos de posición separados por espacio para
@@ -285,12 +307,13 @@ def match_player(
 
     `position` (opcional, POR/DEF/MED/DEL): si se pasa, se exige además que
     sea compatible con la posición de Understat (ver
-    `_position_is_compatible()`) en las DOS estrategias menos fiables
-    ("surname_unique" y "fuzzy") — un desempate barato que no necesita
-    ningún dato nuevo (ya se calcula la posición corta al ingerir cada
-    jugador, ver jobs/sync_data.py). No se aplica a "exact"/"surname+team"
-    porque esas dos ya son suficientemente fiables por sí solas y un dato
-    de posición desactualizado en cualquiera de las dos fuentes podría
+    `_position_is_compatible()`) en las estrategias menos fiables
+    ("surname_unique", "firstname_unique" y "fuzzy") — un desempate barato
+    que no necesita ningún dato nuevo (ya se calcula la posición corta al
+    ingerir cada jugador, ver jobs/sync_data.py). No se aplica a
+    "exact"/"surname+team"/"firstname+team" porque esas ya son
+    suficientemente fiables por sí solas (equipo confirmado) y un dato de
+    posición desactualizado en cualquiera de las dos fuentes podría
     rechazar un cruce bueno sin necesidad.
 
     Devuelve `(jugador_o_None, estrategia)` — la estrategia es solo para
@@ -318,7 +341,18 @@ def match_player(
          (si se pasó `position`) la posición es compatible, para no
          arriesgarse a mezclar a dos jugadores homónimos de equipos
          distintos.
-      4. "fuzzy": similitud de texto (`difflib.SequenceMatcher`) contra los
+      4. "firstname+team"/"firstname_unique": si ninguna estrategia de
+         apellido dio resultado y `name` es una sola palabra, se repiten los
+         mismos dos niveles anteriores pero comparando contra el NOMBRE DE
+         PILA (primera palabra del nombre completo de Understat) en vez del
+         apellido — cubre a los jugadores conocidos por su nombre de pila o
+         apodo, no su apellido (ej. "Trent" -> Trent Alexander-Arnold,
+         "Vinícius" -> Vinícius Júnior, "Fermín" -> Fermín López). Va
+         DESPUÉS de las estrategias de apellido a propósito: un apellido es
+         normalmente más distintivo que un nombre de pila, así que si el
+         nombre corto de Futmondo cruza por apellido no hace falta ni
+         probar esto.
+      5. "fuzzy": similitud de texto (`difflib.SequenceMatcher`) contra los
          jugadores del MISMO equipo — aceptado solo si el mejor candidato
          supera `fuzzy_threshold`, saca claramente más nota que el segundo
          mejor candidato (margen >= 0.15) Y (si se pasó `position`) la
@@ -364,6 +398,26 @@ def match_player(
             candidate = same_surname_anywhere[0]
             if _position_is_compatible(position, candidate.get("position")):
                 return candidate, "surname_unique"
+
+    # Ninguna estrategia de apellido dio resultado -- probar `name` como
+    # NOMBRE DE PILA/apodo (ej. "Trent" -> Trent Alexander-Arnold,
+    # "Vinícius" -> Vinícius Júnior, "Fermín" -> Fermín López): algunos
+    # jugadores son conocidos así, no por su apellido, y Futmondo los
+    # muestra igual de corto que a los del caso más común. Solo tiene
+    # sentido si `name` es UNA sola palabra -- si Futmondo ya mostró varias
+    # palabras, ya se probó como nombre completo ("exact") y como apellido
+    # (compuesto incluido) arriba, y tratar la primera palabra de una frase
+    # más larga como apodo no aportaría nada fiable.
+    if " " not in normalized_name:
+        same_team_same_first_name = index["by_team_and_first_name"].get((normalized_team, normalized_name), [])
+        if len(same_team_same_first_name) == 1:
+            return same_team_same_first_name[0], "firstname+team"
+        if not same_team_same_first_name:
+            same_first_name_anywhere = index["by_first_name"].get(normalized_name, [])
+            if len(same_first_name_anywhere) == 1:
+                candidate = same_first_name_anywhere[0]
+                if _position_is_compatible(position, candidate.get("position")):
+                    return candidate, "firstname_unique"
 
     if normalized_team:
         same_team_players = [p for p in index["all"] if _normalize_team(p.get("team_title", "")) == normalized_team]
