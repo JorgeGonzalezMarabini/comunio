@@ -6,6 +6,7 @@ from engine.bidding_strategy import (
     decide_bids_for_market,
     dynamic_player_cap,
     find_cancel_swap_candidates,
+    find_deficit_rescue_swaps,
     find_reprice_down_candidates,
     is_price_worth_bidding,
     max_biddable_amount,
@@ -306,7 +307,7 @@ def test_is_price_worth_bidding_uses_config_default(monkeypatch):
     assert is_price_worth_bidding({"score": 0.6, "price": 1_000_000}) is True
 
 
-def _open_bid(player_id, score, bid_id, hours_to_expiry=48, amount=1_000_000):
+def _open_bid(player_id, score, bid_id, hours_to_expiry=48, amount=1_000_000, position=None):
     now = datetime(2026, 8, 18, tzinfo=timezone.utc)
     return {
         "local_row_id": 1,
@@ -315,6 +316,7 @@ def _open_bid(player_id, score, bid_id, hours_to_expiry=48, amount=1_000_000):
         "amount": amount,
         "bid_id": bid_id,
         "expires_at": None if hours_to_expiry is None else now + timedelta(hours=hours_to_expiry),
+        "position": position,
     }
 
 
@@ -406,6 +408,95 @@ def test_find_cancel_swap_candidates_uses_config_defaults(monkeypatch):
     open_bid = _open_bid("old", score=0.40, bid_id="bid-old")
 
     assert find_cancel_swap_candidates([candidate], [open_bid], now=NOW) == []
+
+
+# --- find_deficit_rescue_swaps (rescatar déficit de plantilla sacrificando una puja de compra) ---
+
+
+def _candidate(id_, position, score=0.5, price=1_000_000):
+    return {"id": id_, "position": position, "score": score, "price": price}
+
+
+def test_find_deficit_rescue_swaps_proposes_rescue_without_any_score_margin():
+    """
+    A diferencia del swap normal, aquí NO hace falta ningún margen de
+    score: el candidato de la posición en déficit puede tener PEOR score
+    que la puja sacrificada -- lo urgente es el cuerpo, no la mejora.
+    """
+    candidate = _candidate("new", "DEF", score=0.20)  # por encima del umbral mínimo, pero peor que el sacrificio
+    sacrifice = _open_bid("old", score=0.90, bid_id="bid-old", position="MED")
+
+    proposals = find_deficit_rescue_swaps(
+        {"DEF"}, [candidate], decided_ids=set(), sacrificable_bids=[sacrifice], now=NOW
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["candidate"]["id"] == "new"
+    assert proposals[0]["sacrifice"]["bid_id"] == "bid-old"
+
+
+def test_find_deficit_rescue_swaps_never_sacrifices_a_bid_in_another_deficit_position():
+    """No tiene sentido tapar un hueco (DEF) abriendo otro (MED, también en déficit)."""
+    candidate = _candidate("new", "DEF")
+    only_sacrifice_available = _open_bid("old", score=0.10, bid_id="bid-old", position="MED")
+
+    proposals = find_deficit_rescue_swaps(
+        {"DEF", "MED"}, [candidate], decided_ids=set(), sacrificable_bids=[only_sacrifice_available], now=NOW
+    )
+
+    assert proposals == []
+
+
+def test_find_deficit_rescue_swaps_skips_candidates_already_decided_this_run():
+    """Un candidato que ya tiene una puja normal esta misma pasada no se rescata dos veces."""
+    already_decided = _candidate("new", "DEF")
+    sacrifice = _open_bid("old", score=0.10, bid_id="bid-old", position="MED")
+
+    proposals = find_deficit_rescue_swaps(
+        {"DEF"}, [already_decided], decided_ids={"new"}, sacrificable_bids=[sacrifice], now=NOW
+    )
+
+    assert proposals == []
+
+
+def test_find_deficit_rescue_swaps_excludes_bids_expiring_soon():
+    candidate = _candidate("new", "DEF")
+    about_to_expire = _open_bid("old", score=0.10, bid_id="bid-old", position="MED", hours_to_expiry=2)
+
+    proposals = find_deficit_rescue_swaps(
+        {"DEF"},
+        [candidate],
+        decided_ids=set(),
+        sacrificable_bids=[about_to_expire],
+        now=NOW,
+        min_hours_before_expiry=6,
+    )
+
+    assert proposals == []
+
+
+def test_find_deficit_rescue_swaps_respects_max_swaps_and_never_reuses_a_bid():
+    candidates = [_candidate("def_new", "DEF"), _candidate("med_new", "MED")]
+    sacrifices = [
+        _open_bid("x", score=0.10, bid_id="bid-x", position="DEL"),
+        _open_bid("y", score=0.20, bid_id="bid-y", position="DEL"),
+    ]
+
+    proposals = find_deficit_rescue_swaps(
+        {"DEF", "MED"}, candidates, decided_ids=set(), sacrificable_bids=sacrifices, now=NOW, max_swaps=1
+    )
+
+    assert len(proposals) == 1  # tope respetado aunque las dos posiciones tuvieran candidato y sacrificio
+
+
+def test_find_deficit_rescue_swaps_no_candidate_for_position_leaves_it_unrescued():
+    sacrifice = _open_bid("old", score=0.10, bid_id="bid-old", position="MED")
+
+    proposals = find_deficit_rescue_swaps(
+        {"DEF"}, [], decided_ids=set(), sacrificable_bids=[sacrifice], now=NOW
+    )
+
+    assert proposals == []
 
 
 # --- find_reprice_down_candidates (reajustar pujas a la baja si el VM cae) ---

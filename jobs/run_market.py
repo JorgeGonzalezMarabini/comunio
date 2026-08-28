@@ -199,6 +199,27 @@ que el swap: nunca toca una puja sin id real de Futmondo confirmado en el
 `config.BIDDING_MAX_REPRICE_DOWNS_PER_RUN` por ejecución — y un fallo a
 medias (cancela pero no llega a repujar) queda auditado como
 `'cancelled'`+`'failed'`, igual que el swap.
+
+Rescate de déficit de plantilla en pujas de COMPRA (a petición del usuario:
+dos clausulazos -u otra baja- sobre la misma posición sin ninguna venta
+propia pendiente ahí, ver `engine.bidding_strategy.
+find_deficit_rescue_swaps`): `jobs.sync_data._rescue_sales_at_risk()` ya
+cancela una VENTA propia listada cuando su posición se queda con margen
+NEGATIVO (`deficit>0`, ver `engine/squad_risk.py`), pero esa vía no sirve
+si no había ninguna venta pendiente en esa posición -- ahí la única forma
+de recuperar un cuerpo es una puja de COMPRA nueva. Fase APARTE, tras el
+swap normal de arriba: para cada posición con `deficit>0` que NINGUNA puja
+cubre todavía (ni de esta pasada, ni ya abierta antes, ni del swap
+normal), sacrifica una puja de compra en OTRA posición (nunca otra
+también en déficit) para poder pujar por el mejor candidato disponible de
+la posición en déficit -- SIN exigir el margen de score del swap normal
+(`config.BIDDING_CANCEL_SWAP_MIN_MARGIN`): lo urgente es recuperar un
+cuerpo, no encontrar una mejora. Mismas precauciones que el resto de fases
+de cancelar+pujar (nunca toca una puja sin id real de Futmondo confirmado
+en el `get_market()` de esta pasada, ni una a punto de expirar
+`config.BIDDING_DEFICIT_RESCUE_MIN_HOURS_BEFORE_EXPIRY`, ni más de
+`config.BIDDING_MAX_DEFICIT_RESCUES_PER_RUN` por ejecución) y mismo
+patrón de auditoría ante un fallo a medias (`'cancelled'`+`'failed'`).
 """
 from datetime import datetime, timezone
 
@@ -206,6 +227,7 @@ import requests
 
 import config
 from clients.futmondo_client import (
+    FUTMONDO_POSITION_MAP,
     FutmondoClient,
     FutmondoOfferError,
     is_confirmed_injured_status,
@@ -227,6 +249,7 @@ from engine.bidding_strategy import (
     decide_bids_for_market,
     dynamic_player_cap,
     find_cancel_swap_candidates,
+    find_deficit_rescue_swaps,
     find_reprice_down_candidates,
     is_price_worth_bidding,
 )
@@ -523,46 +546,57 @@ def run():
     # ajustados que nada nuevo entra por la vía normal -- ver TODO.md #13.
     decided_ids = {d["player_id"] for d in decisions}
     blocked_candidates = [c for c in prioritized if c["id"] not in decided_ids and is_price_worth_bidding(c)]
-    swap_proposals = []
-    if blocked_candidates:
-        sacrificable_bids = []
-        for b in get_open_bids():
-            market_item = market_by_id.get(str(b["player_id"]))
-            bid_info = market_item.get("bid") if market_item else None
-            if not bid_info:
-                # Sin id de oferta CONFIRMADO en este snapshot de mercado --
-                # puede haberse resuelto ya, o ser una puja colocada en este
-                # mismo run (su market_item viene del fetch de arriba,
-                # HECHO ANTES de pujar nada esta pasada) -- nunca cancelar
-                # sin el id real de Futmondo confirmado (ver
-                # clients.futmondo_client.cancel_bid).
-                continue
-            expires_at = None
-            raw_expiration = market_item.get("expirationDate")
-            if raw_expiration:
-                try:
-                    expires_at = datetime.fromisoformat(raw_expiration.replace("Z", "+00:00"))
-                except ValueError:
-                    expires_at = None
-            sacrificable_bids.append(
-                {
-                    "local_row_id": b["id"],
-                    "player_id": b["player_id"],
-                    # Fresco si se pudo recalcular con los datos de hoy
-                    # (ver fresh_score_by_player_id arriba); si no --
-                    # jugador ya no en la BD como "on_market", desajuste
-                    # puntual con sync_data -- cae al score congelado que
-                    # ya traía la fila local, más seguro que descartar
-                    # sin más una puja sacrificable de verdad.
-                    "score": fresh_score_by_player_id.get(b["player_id"], b["score"]),
-                    "amount": b["amount"],
-                    "bid_id": bid_info["id"],
-                    "expires_at": expires_at,
-                }
-            )
-        swap_proposals = find_cancel_swap_candidates(
-            blocked_candidates, sacrificable_bids, now=datetime.now(timezone.utc)
+
+    # Pujas propias abiertas "sacrificables" -- se construye SIEMPRE (no
+    # solo si hay `blocked_candidates`), porque la reusan dos fases: el
+    # swap normal de abajo (candidato mejor bloqueado) y el rescate de
+    # déficit de plantilla de más abajo (engine.bidding_strategy.
+    # find_deficit_rescue_swaps), que puede hacer falta aunque no haya
+    # ningún `blocked_candidates` todavía evaluado. "position" (nuevo aquí)
+    # solo lo usa el rescate de déficit, para no sacrificar nunca una puja
+    # de una posición TAMBIÉN en déficit.
+    sacrificable_bids = []
+    for b in get_open_bids():
+        market_item = market_by_id.get(str(b["player_id"]))
+        bid_info = market_item.get("bid") if market_item else None
+        if not bid_info:
+            # Sin id de oferta CONFIRMADO en este snapshot de mercado --
+            # puede haberse resuelto ya, o ser una puja colocada en este
+            # mismo run (su market_item viene del fetch de arriba,
+            # HECHO ANTES de pujar nada esta pasada) -- nunca cancelar
+            # sin el id real de Futmondo confirmado (ver
+            # clients.futmondo_client.cancel_bid).
+            continue
+        expires_at = None
+        raw_expiration = market_item.get("expirationDate")
+        if raw_expiration:
+            try:
+                expires_at = datetime.fromisoformat(raw_expiration.replace("Z", "+00:00"))
+            except ValueError:
+                expires_at = None
+        sacrificable_bids.append(
+            {
+                "local_row_id": b["id"],
+                "player_id": b["player_id"],
+                # Fresco si se pudo recalcular con los datos de hoy
+                # (ver fresh_score_by_player_id arriba); si no --
+                # jugador ya no en la BD como "on_market", desajuste
+                # puntual con sync_data -- cae al score congelado que
+                # ya traía la fila local, más seguro que descartar
+                # sin más una puja sacrificable de verdad.
+                "score": fresh_score_by_player_id.get(b["player_id"], b["score"]),
+                "amount": b["amount"],
+                "bid_id": bid_info["id"],
+                "expires_at": expires_at,
+                "position": FUTMONDO_POSITION_MAP.get(market_item.get("role"), market_item.get("role")),
+            }
         )
+
+    swap_proposals = (
+        find_cancel_swap_candidates(blocked_candidates, sacrificable_bids, now=datetime.now(timezone.utc))
+        if blocked_candidates
+        else []
+    )
 
     # Reajustar a la baja pujas ya abiertas cuyo VM ha caído (ver docstring
     # del módulo/engine.bidding_strategy.find_reprice_down_candidates). Se
@@ -585,6 +619,41 @@ def run():
     # (la segunda cancelación fallaría sobre una oferta que ya no existe).
     swap_sacrificed_bid_ids = {p["sacrifice"]["bid_id"] for p in swap_proposals}
 
+    # --- Rescate de déficit de plantilla (ver docstring del módulo /
+    # engine.bidding_strategy.find_deficit_rescue_swaps): posiciones con
+    # margen NEGATIVO de verdad (`deficit>0`, no solo `at_risk` -- margen
+    # CERO, ya usado arriba solo para PRIORIZAR, ver `at_risk_positions`)
+    # que ninguna puja cubre todavía -- ni de esta pasada (`decisions`),
+    # ni ya abierta antes de ella (`skipped_already_bid`), ni del swap
+    # normal de arriba. Caso real que lo motiva: dos bajas (clausulazo u
+    # otra) de la misma posición sin ninguna venta propia pendiente ahí
+    # que jobs.sync_data._rescue_sales_at_risk() pueda cancelar (esa vía
+    # solo actúa sobre VENTAS ya listadas, no sobre pujas de COMPRA).
+    covered_positions = (
+        {c.get("position") for c in prioritized if c["id"] in decided_ids}
+        | {p["candidate"].get("position") for p in swap_proposals}
+        | {p.get("position") for p in skipped_already_bid}
+    )
+    deficit_positions = (
+        {pos for pos, info in depth.items() if info["deficit"] > 0} - covered_positions if squad_raw else set()
+    )
+    deficit_rescue_proposals = (
+        find_deficit_rescue_swaps(
+            deficit_positions,
+            prioritized,
+            decided_ids,
+            [b for b in sacrificable_bids if b["bid_id"] not in swap_sacrificed_bid_ids],
+            now=datetime.now(timezone.utc),
+        )
+        if deficit_positions
+        else []
+    )
+    # Ninguna de las dos fases de swap debe ofrecer la misma puja abierta
+    # dos veces (ni al reajuste a la baja de más abajo, ni entre sí).
+    sacrificed_bid_ids_this_run = swap_sacrificed_bid_ids | {
+        p["sacrifice"]["bid_id"] for p in deficit_rescue_proposals
+    }
+
     fresh_already_bid_by_id = {p["id"]: p for p in fresh_already_bid}
     reprice_inputs = []
     for b in get_open_bids():
@@ -600,7 +669,7 @@ def run():
             # Sin id de oferta CONFIRMADO en este snapshot -- mismo criterio
             # de precaución que el swap de arriba, nunca cancelar a ciegas.
             continue
-        if bid_info["id"] in swap_sacrificed_bid_ids:
+        if bid_info["id"] in sacrificed_bid_ids_this_run:
             continue
         expires_at = None
         raw_expiration = market_item.get("expirationDate")
@@ -632,7 +701,7 @@ def run():
         else []
     )
 
-    if not decisions and not swap_proposals and not reprice_proposals:
+    if not decisions and not swap_proposals and not deficit_rescue_proposals and not reprice_proposals:
         # Contexto de por qué no hubo candidatos NUEVOS que evaluar (ver
         # los filtros de arriba, ninguno corta ya la ejecución por sí
         # solo) -- informativo, no cambia que aquí no hay nada que hacer.
@@ -765,11 +834,75 @@ def run():
                         )
                     )
 
+    # --- Ejecutar los rescates de déficit de plantilla calculados arriba
+    # (ver docstring del módulo/engine.bidding_strategy.
+    # find_deficit_rescue_swaps): mismo mecanismo cancelar+pujar que el
+    # swap normal de arriba, pero el gatillo es un déficit REAL de
+    # plantilla (posición sin cuerpos suficientes), no un candidato mejor
+    # bloqueado por presupuesto/tope -- por eso `decide_bid()` de abajo NO
+    # exige ningún margen de score frente al sacrificio, a diferencia del
+    # swap normal. Fase APARTE, tras el swap normal -- `deficit_rescue_
+    # proposals` ya excluyó cualquier puja que ese swap fuera a sacrificar
+    # en esta misma pasada (ver `swap_sacrificed_bid_ids` de arriba).
+    deficit_rescued, deficit_rescue_failed = [], []
+    if deficit_rescue_proposals:
+        with get_connection() as conn:
+            for proposal in deficit_rescue_proposals:
+                candidate, sacrifice = proposal["candidate"], proposal["sacrifice"]
+                try:
+                    client.cancel_bid(sacrifice["bid_id"])
+                except (requests.RequestException, FutmondoOfferError) as e:
+                    deficit_rescue_failed.append(
+                        (candidate, sacrifice, f"cancelación fallida: {e} -- nada más tocado")
+                    )
+                    continue
+
+                # Cancelación confirmada -- a partir de aquí ya no hay
+                # vuelta atrás sobre la puja vieja, pase lo que pase abajo.
+                update_bid_status(sacrifice["local_row_id"], "cancelled")
+                pending_after_rescue = max(0, pending_after_decisions - sacrifice["amount"])
+
+                new_decision = decide_bid(
+                    candidate,
+                    remaining_budget,
+                    risked_after_decisions,
+                    pending_committed=pending_after_rescue,
+                    player_cap=player_cap,
+                )
+                market_player = market_by_id.get(str(candidate["id"]))
+                if new_decision is None or market_player is None:
+                    reason = (
+                        "ya no cupo dentro de los límites tras liberar presupuesto"
+                        if new_decision is None
+                        else "ya no está en el mercado"
+                    )
+                    deficit_rescue_failed.append(
+                        (candidate, sacrifice, f"puja cancelada pero el candidato {reason} -- rescate a medias")
+                    )
+                    continue
+
+                try:
+                    client.place_bid(candidate["id"], market_player["slug"], new_decision["amount"])
+                    _persist_bid(conn, new_decision, "placed", now)
+                    deficit_rescued.append(
+                        {"decision": new_decision, "sacrificed_player_id": sacrifice["player_id"]}
+                    )
+                except (requests.RequestException, FutmondoOfferError) as e:
+                    _persist_bid(conn, new_decision, "failed", now, error=str(e))
+                    deficit_rescue_failed.append(
+                        (
+                            candidate,
+                            sacrifice,
+                            f"puja cancelada pero el place_bid posterior falló: {e} -- "
+                            "queda auditado como cancelled+failed",
+                        )
+                    )
+
     # --- Ejecutar los reajustes a la baja calculados arriba (ver docstring
     # del módulo/engine.bidding_strategy.find_reprice_down_candidates):
     # cancelar+repujar más barato una puja abierta cuyo VM ha caído. Fase
-    # APARTE, tras el swap de arriba -- `swap_sacrificed_bid_ids` ya
-    # descarta cualquier solape entre las dos fases.
+    # APARTE, tras las dos fases de swap de arriba -- `sacrificed_bid_ids_
+    # this_run` ya descarta cualquier solape con cualquiera de las dos.
     reprice_downs, reprice_down_failed = [], []
     if reprice_proposals:
         with get_connection() as conn:
@@ -843,6 +976,18 @@ def run():
     if swap_failed:
         summary.append(f"⚠️ {len(swap_failed)} swap(s) fallido(s) o a medias:")
         for candidate, sacrifice, err in swap_failed:
+            summary.append(f"  - candidato {candidate['id']} / sacrificio {sacrifice['player_id']}: {err}")
+    if deficit_rescued:
+        summary.append(f"🚨 {len(deficit_rescued)} rescate(s) de déficit de plantilla (cancelar+pujar sin margen):")
+        for s in deficit_rescued:
+            d = s["decision"]
+            summary.append(
+                f"  - jugador {d['player_id']}: {format_number(d['amount'])} (score={d['score']:.3f}) "
+                f"en vez de la puja cancelada sobre {s['sacrificed_player_id']}"
+            )
+    if deficit_rescue_failed:
+        summary.append(f"⚠️ {len(deficit_rescue_failed)} rescate(s) de déficit fallido(s) o a medias:")
+        for candidate, sacrifice, err in deficit_rescue_failed:
             summary.append(f"  - candidato {candidate['id']} / sacrificio {sacrifice['player_id']}: {err}")
     if reprice_downs:
         summary.append(f"📉 {len(reprice_downs)} puja(s) reajustada(s) a la baja (VM caído):")

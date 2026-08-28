@@ -491,6 +491,124 @@ def find_cancel_swap_candidates(
     return proposals
 
 
+def find_deficit_rescue_swaps(
+    deficit_positions: set,
+    prioritized: list[dict],
+    decided_ids: set,
+    sacrificable_bids: list[dict],
+    now,
+    min_hours_before_expiry: float = None,
+    max_swaps: int = None,
+) -> list[dict]:
+    """
+    Rescata un déficit REAL de plantilla (`engine.squad_risk.
+    assess_squad_depth()[...]["deficit"] > 0` -- margen NEGATIVO, ni
+    siquiera contando de vuelta a los jugadores ya puestos en venta
+    llegaríamos a los titulares requeridos) sacrificando una puja de
+    COMPRA ya abierta en OTRA posición para poder pujar YA por el mejor
+    candidato disponible de la posición en déficit -- caso real: dos
+    clausulazos (o cualquier otra baja) sobre la misma posición sin
+    ninguna venta propia pendiente ahí que `jobs.sync_data.
+    _rescue_sales_at_risk()` pueda cancelar (esa vía solo actúa sobre
+    VENTAS ya listadas, ver su docstring). Función pura: no llama a
+    Futmondo ni toca la BD -- jobs/run_market.py ejecuta las propuestas,
+    igual que find_cancel_swap_candidates()/find_reprice_down_candidates().
+
+    Deliberadamente distinta de `find_cancel_swap_candidates()` (swap
+    normal, candidato MEJOR bloqueado por presupuesto/tope): aquí NO se
+    exige ningún margen de score entre candidato y sacrificio -- lo urgente
+    es recuperar un cuerpo en una posición sin cobertura real, no encontrar
+    una mejora. `apply_position_priority()` ya sube el score de estos
+    candidatos (`config.BIDDING_POSITION_RISK_BOOST`), pero un boost
+    puntual puede no bastar para ganarle sitio a otros candidatos dentro
+    del presupuesto normal -- este rescate no depende de eso.
+
+    `deficit_positions`: posiciones con `deficit > 0` que ninguna puja de
+    esta pasada ni ninguna puja ya abierta antes de ella cubre todavía
+    (jobs/run_market.py descarta las ya cubiertas antes de llamar aquí).
+
+    `prioritized`: candidatos ya rankeados con `apply_position_priority()`
+    (mismo orden que `decide_bids_for_market`), cada uno con "position".
+
+    `decided_ids`: ids de candidatos que YA tienen una decisión de puja
+    normal en esta pasada (`decide_bids_for_market`) -- se descartan como
+    candidato a rescatar (ya cubiertos), aunque su posición siga en
+    `deficit_positions` por otro motivo.
+
+    `sacrificable_bids`: mismo formato que `find_cancel_swap_candidates()`
+    ("player_id"/"score"/"bid_id"/"expires_at"), con un campo extra
+    "position" -- nunca se sacrifica una puja de una posición TAMBIÉN en
+    déficit (no tiene sentido tapar un hueco abriendo otro).
+
+    `now`: hora actual INYECTADA, igual que en el resto de funciones de
+    este módulo -- función pura y testeable sin reloj real.
+
+    Como mucho una propuesta por posición en déficit, hasta `max_swaps`
+    en total (`config.BIDDING_MAX_DEFICIT_RESCUES_PER_RUN`, deliberadamente
+    conservador mientras esta feature no tiene histórico real) -- posiciones
+    procesadas en orden alfabético para que el resultado sea determinista.
+    Si no hay ningún candidato de mercado utilizable para una posición
+    (`is_price_worth_bidding()`), o ninguna puja sacrificable elegible que
+    no proteja otra posición en déficit, esa posición se queda sin
+    rescatar esta pasada -- no hay nada seguro que hacer todavía.
+
+    Devuelve una lista de `{"candidate": ..., "sacrifice": ..., "reason": ...}`,
+    mismo formato que `find_cancel_swap_candidates()` -- jobs/run_market.py
+    reusa la misma ejecución (cancelar + pujar) para ambas.
+    """
+    min_hours_before_expiry = (
+        config.BIDDING_DEFICIT_RESCUE_MIN_HOURS_BEFORE_EXPIRY
+        if min_hours_before_expiry is None
+        else min_hours_before_expiry
+    )
+    max_swaps = config.BIDDING_MAX_DEFICIT_RESCUES_PER_RUN if max_swaps is None else max_swaps
+
+    min_remaining = timedelta(hours=min_hours_before_expiry)
+    eligible = [
+        b
+        for b in sacrificable_bids
+        if b.get("expires_at") is not None
+        and (b["expires_at"] - now) >= min_remaining
+        and b.get("position") not in deficit_positions
+    ]
+    eligible.sort(key=lambda b: b["score"])  # la más floja primero
+
+    proposals = []
+    used_bid_ids = set()
+    for position in sorted(deficit_positions):
+        if len(proposals) >= max_swaps:
+            break
+        candidate = next(
+            (
+                c
+                for c in prioritized
+                if c.get("position") == position and c["id"] not in decided_ids and is_price_worth_bidding(c)
+            ),
+            None,
+        )
+        if candidate is None:
+            continue  # ningún candidato de mercado utilizable en esta posición ahora mismo
+        sacrifice = next((b for b in eligible if b["bid_id"] not in used_bid_ids), None)
+        if sacrifice is None:
+            continue  # nada sacrificable sin proteger otra posición en déficit, o todo a punto de expirar
+        proposals.append(
+            {
+                "candidate": candidate,
+                "sacrifice": sacrifice,
+                "reason": (
+                    f"posición {position} con déficit real de plantilla (margen negativo, ver "
+                    f"engine.squad_risk.assess_squad_depth) -- se sacrifica la puja abierta sobre "
+                    f"{sacrifice['player_id']} (posición {sacrifice.get('position')}, "
+                    f"score={sacrifice['score']:.3f}) para pujar por {candidate.get('id')} "
+                    f"(score={candidate.get('score', 0):.3f}) sin exigir margen: lo urgente es recuperar "
+                    "un cuerpo en la posición, no una mejora"
+                ),
+            }
+        )
+        used_bid_ids.add(sacrifice["bid_id"])
+    return proposals
+
+
 def find_reprice_down_candidates(
     open_bids: list[dict],
     remaining_budget: int,

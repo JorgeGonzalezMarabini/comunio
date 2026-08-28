@@ -570,6 +570,21 @@ normal justo después de listar cualquier venta — usarlo aquí deshacería
 la venta en la primera pasada tras crearla. Solo actúa cuando el margen
 se ha vuelto de verdad insuficiente.
 
+`_rescue_sales_at_risk()` solo puede actuar si hay una VENTA propia
+listada en la posición afectada. Caso real que se le escapa: dos bajas
+(clausulazo u otra) de la misma posición sin ninguna venta pendiente ahí
+— nada que cancelar por ese lado, así que la única forma de recuperar un
+cuerpo es una puja de COMPRA nueva. Para eso, `jobs/run_market.py` tiene
+una fase aparte (`engine.bidding_strategy.find_deficit_rescue_swaps`,
+tras el swap normal de "candidato mejor bloqueado"): para cada posición
+con `deficit > 0` que ninguna puja cubre todavía (ni de la pasada actual,
+ni ya abierta antes, ni del swap normal), sacrifica una puja de compra en
+OTRA posición (nunca otra también en déficit) para poder pujar por el
+mejor candidato disponible de la posición en déficit — sin exigir el
+margen de score que sí exige el swap normal (`config.
+BIDDING_CANCEL_SWAP_MIN_MARGIN`): aquí lo urgente es recuperar un cuerpo,
+no encontrar una mejora.
+
 ## Fichajes que mejoran el once, no solo tapan huecos (`engine/squad_risk.weakest_starter_scores`)
 
 `assess_squad_depth()` (arriba) solo mira CANTIDAD: si una posición tiene

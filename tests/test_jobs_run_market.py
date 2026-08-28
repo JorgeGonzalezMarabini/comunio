@@ -1142,6 +1142,163 @@ def test_run_market_cancel_swap_aborts_cleanly_when_cancel_bid_fails(tmp_db):
     assert any("cancelación fallida" in m for m in captured)
 
 
+# --- Rescate de déficit de plantilla en pujas de compra (a petición del
+# usuario: dos clausulazos -u otra baja- sobre la misma posición sin
+# ninguna venta propia pendiente ahí) ---
+#
+# La lógica pura de cuándo rescatar ya se prueba a fondo en
+# test_bidding_strategy.py (find_deficit_rescue_swaps) -- aquí solo se
+# comprueba que run_market.py EJECUTA bien una propuesta ya decidida
+# (cancela la puja sacrificada, audita 'cancelled', puja el candidato de
+# la posición en déficit, audita 'placed'), igual que el swap normal de
+# arriba. Por eso se mockea find_deficit_rescue_swaps (y find_cancel_swap_
+# candidates, para aislar la fase) en vez de depender de que el mercado
+# real ofrezca un candidato con el score exacto que dispare la propuesta.
+
+
+def test_run_market_executes_deficit_rescue_swap_end_to_end(tmp_db):
+    """
+    Plantilla con un solo MED (formación 4-4-2 por defecto exige 4) -> el
+    margen de esa posición es NEGATIVO de verdad (deficit>0, ver
+    engine/squad_risk.py), no solo "sin margen" -- necesario para que
+    run_market.py llegue a llamar a find_deficit_rescue_swaps() en
+    absoluto (mockeado aquí para no depender del score real del mercado).
+    """
+    _seed_player("med1", "MED", price=1_000_000, points=10, on_market=0)  # único MED propio -> deficit real
+    _seed_player("filler", "DEL", price=1_000_000, points=1)  # solo para no salir por "sin candidatos en BD"
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("old_def", 4_500_000, "placed", 0.10, NOW),
+        )
+        old_row_id = cur.lastrowid
+
+    fake_proposal = [
+        {
+            "candidate": {"id": "med_new", "score": 0.20, "price": 500_000},
+            "sacrifice": {
+                "local_row_id": old_row_id,
+                "player_id": "old_def",
+                "score": 0.10,
+                "amount": 4_500_000,
+                "bid_id": "futmondo-bid-old-def",
+                "position": "DEF",
+            },
+            "reason": "test",
+        }
+    ]
+
+    cancel_calls, place_calls = [], []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": "med1"}]}
+
+        def get_information(self):
+            return {"answer": {"budget": 5_000_000, "configuration": {"maxPlayersInRoster": 999}}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {"id": "filler", "slug": "jugador-filler", "value": 1_000_000, "computer": True},
+                    {"id": "med_new", "slug": "jugador-med-new", "value": 500_000, "computer": True},
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            cancel_calls.append(bid_id)
+            return {"code": "api.general.ok"}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            place_calls.append((player_id, amount))
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with (
+        patch("jobs.run_market.FutmondoClient", FakeClient),
+        patch("jobs.run_market.find_cancel_swap_candidates", return_value=[]),
+        patch("jobs.run_market.find_deficit_rescue_swaps", return_value=fake_proposal),
+        patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)),
+    ):
+        run_market.run()
+
+    assert cancel_calls == ["futmondo-bid-old-def"]
+    assert len(place_calls) == 1
+    assert place_calls[0][0] == "med_new"
+    assert place_calls[0][1] >= 500_000  # nunca por debajo del precio real
+
+    with get_connection() as conn:
+        rows = {r["player_id"]: r["status"] for r in conn.execute("SELECT player_id, status FROM bids")}
+    assert rows["old_def"] == "cancelled"
+    assert rows["med_new"] == "placed"
+    assert any("déficit" in m.lower() for m in captured)
+
+
+def test_run_market_deficit_rescue_aborts_cleanly_when_cancel_bid_fails(tmp_db):
+    """Igual que el swap normal: si cancel_bid() falla, nunca se llega a pujar por el candidato."""
+    _seed_player("med1", "MED", price=1_000_000, points=10, on_market=0)
+    _seed_player("filler", "DEL", price=1_000_000, points=1)
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("old_def", 4_500_000, "placed", 0.10, NOW),
+        )
+        old_row_id = cur.lastrowid
+
+    fake_proposal = [
+        {
+            "candidate": {"id": "med_new", "score": 0.20, "price": 500_000},
+            "sacrifice": {
+                "local_row_id": old_row_id,
+                "player_id": "old_def",
+                "score": 0.10,
+                "amount": 4_500_000,
+                "bid_id": "futmondo-bid-old-def",
+                "position": "DEF",
+            },
+            "reason": "test",
+        }
+    ]
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": "med1"}]}
+
+        def get_information(self):
+            return {"answer": {"budget": 5_000_000, "configuration": {"maxPlayersInRoster": 999}}}
+
+        def get_market(self):
+            return {
+                "answer": [
+                    {"id": "filler", "slug": "jugador-filler", "value": 1_000_000, "computer": True},
+                    {"id": "med_new", "slug": "jugador-med-new", "value": 500_000, "computer": True},
+                ]
+            }
+
+        def cancel_bid(self, bid_id):
+            raise FutmondoOfferError("api.market.bid_already_resolved")
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            raise AssertionError("no debería llegar a pujar si cancel_bid() falló")
+
+    captured = []
+    with (
+        patch("jobs.run_market.FutmondoClient", FakeClient),
+        patch("jobs.run_market.find_cancel_swap_candidates", return_value=[]),
+        patch("jobs.run_market.find_deficit_rescue_swaps", return_value=fake_proposal),
+        patch("jobs.run_market.notify", side_effect=lambda m: captured.append(m)),
+    ):
+        run_market.run()  # no debe lanzar
+
+    with get_connection() as conn:
+        rows = {r["player_id"]: r["status"] for r in conn.execute("SELECT player_id, status FROM bids")}
+    assert rows["old_def"] == "placed"  # sigue igual, nunca se marcó 'cancelled'
+    assert "med_new" not in rows
+    assert any("cancelación fallida" in m for m in captured)
+
+
 # --- Reajustar a la baja pujas abiertas cuyo VM ha caído (a petición del
 # usuario, 2026-08-22) ---
 #

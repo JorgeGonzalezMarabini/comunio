@@ -298,6 +298,30 @@ BIDDING_MAX_REPRICE_DOWNS_PER_RUN = int(os.getenv("BIDDING_MAX_REPRICE_DOWNS_PER
 # Máximo de reajustes a la baja por ejecución de run_market -- mismo
 # razonamiento conservador que BIDDING_MAX_CANCEL_SWAPS_PER_RUN.
 
+# Rescate de déficit de plantilla en pujas de COMPRA (a petición del
+# usuario: 2 clausulazos sobre la misma posición sin ninguna venta
+# pendiente que jobs.sync_data._rescue_sales_at_risk() pueda cancelar --
+# esa vía solo actúa sobre VENTAS propias ya listadas, ver README). Ver
+# engine.bidding_strategy.find_deficit_rescue_swaps: a diferencia del swap
+# normal de arriba (candidato MEJOR bloqueado por presupuesto/tope), aquí
+# el gatillo es una posición con margen NEGATIVO de verdad (`deficit > 0`,
+# ver engine.squad_risk.assess_squad_depth) que ninguna puja ya en marcha
+# cubre todavía -- se sacrifica una puja de compra en OTRA posición (nunca
+# una también en déficit) sin exigir ningún margen de score: lo urgente es
+# recuperar un cuerpo en la posición, no encontrar una mejora. Sin
+# histórico real todavía -- valores deliberadamente conservadores.
+BIDDING_DEFICIT_RESCUE_MIN_HOURS_BEFORE_EXPIRY = float(
+    os.getenv("BIDDING_DEFICIT_RESCUE_MIN_HOURS_BEFORE_EXPIRY", "6")
+)
+# Igual razonamiento que BIDDING_CANCEL_SWAP_MIN_HOURS_BEFORE_EXPIRY -- si
+# la puja sacrificable está a punto de resolverse, mejor dejarla terminar.
+
+BIDDING_MAX_DEFICIT_RESCUES_PER_RUN = int(os.getenv("BIDDING_MAX_DEFICIT_RESCUES_PER_RUN", "1"))
+# Máximo de rescates de déficit por ejecución de run_market -- 1 a
+# propósito (igual que empezó BIDDING_MAX_CANCEL_SWAPS_PER_RUN) mientras
+# esta feature no tiene histórico real: sin margen de score que la acote,
+# conviene subirlo con más cautela que los otros dos swaps.
+
 # --- Venta de jugadores (engine/selling_strategy.py) ---
 # % mínimo de plusvalía (precio actual vs. precio de referencia,
 # "buyPrice" de roster) para considerar vender un jugador. Vender es la
