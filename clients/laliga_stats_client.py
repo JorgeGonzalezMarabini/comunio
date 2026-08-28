@@ -162,6 +162,33 @@ def _normalize(text: str) -> str:
     return " ".join(stripped.lower().split())
 
 
+# Variantes de nombre de equipo que Futmondo y Understat usan para el MISMO
+# club pero que _normalize() por sí sola no unifica (no es acento/mayúscula,
+# es una palabra distinta de verdad) -- comprobado en vivo contra
+# getLeagueData/La_liga/2026 (temporada 2026-27, jornada 2): sin esto,
+# "surname+team" y "fuzzy" en match_player() NUNCA disparan para estos 6
+# equipos (comparan team_title normalizado tal cual), quedando solo "exact"
+# y "surname_unique" -- mucho más restrictivas -- para cualquiera de sus
+# jugadores. Claves ya pasadas por _normalize(); valor = forma canónica
+# (la que usa Understat) a la que se colapsan todas las variantes.
+_TEAM_ALIASES = {
+    "atletico de madrid": "atletico madrid",
+    "athletic de bilbao": "athletic club",
+    "celta de vigo": "celta vigo",
+    "deportivo de la coruna": "deportivo la coruna",
+    "racing": "racing santander",
+    "betis": "real betis",
+}
+
+
+def _normalize_team(text: str) -> str:
+    """Como _normalize(), pero además canonicaliza las variantes de nombre
+    de equipo de _TEAM_ALIASES -- usar SIEMPRE para comparar/indexar
+    team_title, nunca _normalize() a secas (ver docstring de esa tabla)."""
+    normalized = _normalize(text)
+    return _TEAM_ALIASES.get(normalized, normalized)
+
+
 def index_players_by_name(league_data: dict) -> dict:
     """
     Indexa `league_data["players"]` por NOMBRE COMPLETO normalizado
@@ -200,7 +227,7 @@ def build_player_index(league_data: dict) -> dict:
         by_full_name.setdefault(full_name, p)
 
         surname = full_name.split(" ")[-1]
-        team = _normalize(p.get("team_title", ""))
+        team = _normalize_team(p.get("team_title", ""))
         by_team_and_surname.setdefault((team, surname), []).append(p)
         by_surname.setdefault(surname, []).append(p)
 
@@ -230,7 +257,18 @@ def _position_is_compatible(short_position: str | None, understat_position: str 
     """
     if not short_position or not understat_position:
         return True
-    codes = {_UNDERSTAT_POSITION_TO_SHORT.get(tok) for tok in understat_position.split()}
+    codes = {_UNDERSTAT_POSITION_TO_SHORT[tok] for tok in understat_position.split() if tok in _UNDERSTAT_POSITION_TO_SHORT}
+    if not codes:
+        # Ninguno de los códigos de Understat es reconocido (ej. "S" a
+        # secas, sin F/M/D/GK -- típico en jornadas tempranas de un
+        # jugador que solo ha entrado de cambio): no hay dato real con el
+        # que comparar, así que no se bloquea el match por esto (mismo
+        # criterio que "falta el dato" más abajo). Antes de este fix,
+        # `codes` quedaba como `{None}` y `short_position in {None}` daba
+        # SIEMPRE False, rechazando cruces por lo demás inequívocos (ej.
+        # apellido único en toda la liga) solo por no tener aún una
+        # posición reconocible.
+        return True
     return short_position in codes
 
 
@@ -296,7 +334,7 @@ def match_player(
     import difflib
 
     normalized_name = _normalize(name)
-    normalized_team = _normalize(team or "")
+    normalized_team = _normalize_team(team or "")
     if not normalized_name:
         return None, "sin_nombre"
 
@@ -328,7 +366,7 @@ def match_player(
                 return candidate, "surname_unique"
 
     if normalized_team:
-        same_team_players = [p for p in index["all"] if _normalize(p.get("team_title", "")) == normalized_team]
+        same_team_players = [p for p in index["all"] if _normalize_team(p.get("team_title", "")) == normalized_team]
         if same_team_players:
             def ratio(p: dict) -> float:
                 return difflib.SequenceMatcher(None, normalized_name, _normalize(p.get("player_name", ""))).ratio()

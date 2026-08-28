@@ -152,6 +152,7 @@ _LEAGUE_DATA = {
         {"player_name": "Marc Bola", "team_title": "Watford", "id": "u6", "position": "D"},  # apellido único en la liga, para probar el filtro de posición
         {"player_name": "Iker Solano", "team_title": "Getafe", "id": "u7"},  # apellido único, sin "position" -- para probar que el filtro no bloquea sin dato
         {"player_name": "Robin Le Normand", "team_title": "Atletico Madrid", "id": "u8", "position": "D"},  # apellido compuesto, dos palabras
+        {"player_name": "Alex Baena", "team_title": "Atletico Madrid", "id": "u9", "position": "S"},  # posición SOLO "S" (suplente, sin F/M/D/GK) -- ver test de _position_is_compatible
     ]
 }
 
@@ -249,13 +250,47 @@ def test_match_player_compound_surname_matches_via_last_word():
     solo indexa por la ÚLTIMA palabra del nombre completo de Understat
     ("normand") -- sin el reintento por última palabra, este jugador nunca
     cruzaría aunque sí esté en el índice. Aquí el nombre de equipo tampoco
-    coincide en texto ("Atlético de Madrid" vs "Atletico Madrid"), así que
-    debe resolverse por "surname_unique", no por "surname+team".
+    coincide en texto ("Atleti", abreviatura coloquial no cubierta por
+    _TEAM_ALIASES, vs "Atletico Madrid"), así que debe resolverse por
+    "surname_unique", no por "surname+team".
     """
     index = build_player_index(_LEAGUE_DATA)
-    player, strategy = match_player("Le Normand", "Atlético de Madrid", index, position="DEF")
+    player, strategy = match_player("Le Normand", "Atleti", index, position="DEF")
     assert strategy == "surname_unique"
     assert player["id"] == "u8"
+
+
+def test_match_player_team_alias_normalizes_known_name_variants():
+    """
+    Caso real detectado en producción (temporada 2026-27, jornada 2):
+    Futmondo y Understat nombran a "Atlético de Madrid" de forma distinta
+    ("Atlético de Madrid" vs "Atletico Madrid") -- sin canonicalizar ambos
+    lados vía _normalize_team()/_TEAM_ALIASES, "surname+team" nunca
+    disparaba para ninguno de los 6 equipos afectados (ver
+    _TEAM_ALIASES), degradando el cruce a "surname_unique" (o a
+    "sin_match" si el apellido no era único en toda la liga).
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Baena", "Atlético de Madrid", index, position="MED")
+    assert strategy == "surname+team"
+    assert player["id"] == "u9"
+
+
+def test_match_player_surname_unique_accepts_unrecognized_position_code():
+    """
+    Caso real detectado en producción (temporada 2026-27, jornada 2):
+    Understat a veces solo etiqueta a un jugador con "S" (suplente, sin
+    F/M/D/GK) en sus primeras jornadas con minutos -- ninguno de esos
+    tokens está en _UNDERSTAT_POSITION_TO_SHORT. Antes del fix,
+    `_position_is_compatible` convertía eso en `{None}` y rechazaba
+    SIEMPRE, aunque el docstring diga que sin dato de posición no debe
+    bloquear el match. Aquí, sin equipo con el que confirmar (nombre de
+    equipo sin alias), debe seguir resolviéndose por "surname_unique".
+    """
+    index = build_player_index(_LEAGUE_DATA)
+    player, strategy = match_player("Baena", "Atleti", index, position="MED")
+    assert strategy == "surname_unique"
+    assert player["id"] == "u9"
 
 
 def test_match_player_position_missing_on_understat_side_does_not_block():
