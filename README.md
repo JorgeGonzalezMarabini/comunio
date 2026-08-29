@@ -1167,6 +1167,78 @@ a tocar el cron. Ver `tests/test_scheduling.py` para los casos límite
 `manage_substitutes` si su margen (hoy generoso en ambos DST, ver
 "Banquillo/suplentes") se llegara a estrechar.
 
+## Disparo externo de los 5 cron con cron-job.org (2026-08-29)
+
+**Hallazgo real (2026-08-29)**: comparando el cron declarado en cada `.yml`
+contra los timestamps reales de ejecución en la pestaña Actions de GitHub,
+los huecos entre pasadas `Scheduled` crecieron muy por encima de lo
+esperado y de forma progresiva: `sync_data` (cron horario, `6 * * * *`)
+pasó de gaps de ~1.5h el 26-08 a 5-7h el 29-08; `run_market` (cron cada 2h)
+pasó de ~2h a 8-10h en el mismo periodo. Sin ningún run fallido ni
+cancelado que lo explique (`is:failure`/`is:cancelled` en Actions no
+muestran nada correspondiente a esos huecos) — el evento `schedule`
+simplemente nunca llegó a crear un run, sin dejar rastro de error.
+Confirmado en la documentación oficial de GitHub Actions: *"The schedule
+event can be delayed during periods of high loads... some queued jobs may
+be dropped."* Es decir, el trigger `schedule` de Actions es best-effort,
+sin SLA ni reintento, y bajo carga puede descartar el disparo en
+silencio. La degradación observada coincide en el tiempo con el aumento de
+frecuencia de cron hecho el 2026-08-22/23 (ver "Delay de GitHub Actions y
+horas críticas" arriba) en una cuenta GitHub Free — más disparos
+solicitados, más probabilidad de descarte.
+
+**Solución adoptada**: un disparador externo ([cron-job.org](https://cron-job.org),
+gratuito, sin coste relevante para esta frecuencia — mínimo 1 min) que
+llama al endpoint `workflow_dispatch` de la API de GitHub para cada uno de
+los 5 workflows, en vez de depender solo del `schedule:` interno de
+Actions. No hace falta tocar ningún `.yml` — los 5 ya tenían
+`workflow_dispatch: {}` declarado desde el principio. El `schedule:`
+interno se deja tal cual como red de refuerzo: si algún día sí dispara, no
+hace daño — el `concurrency.group: db-futmondo-write` compartido y el
+`git diff --staged --quiet` del commit ya evitan colisiones/duplicados
+entre un disparo interno y uno externo que coincidan.
+
+**Configuración** (cuenta personal de cron-job.org, fuera de este
+repo — no hay nada que versionar ni ningún Secret nuevo en GitHub): 5
+jobs, uno por workflow, todos con:
+
+- Method: `POST` a
+  `https://api.github.com/repos/JorgeGonzalezMarabini/comunio/actions/workflows/<archivo>.yml/dispatches`
+- Headers: `Authorization: Bearer <token>` (fine-grained PAT, scope
+  "Actions: Read and write" limitado solo a este repo, expiración 1 año —
+  hay que renovarlo antes de que caduque o los 5 disparos externos dejan
+  de funcionar sin aviso, ver nota de token más abajo), `Accept:
+  application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`,
+  `Content-Type: application/json`
+- Body: `{"ref":"main"}`
+- Cron: el mismo campo de 5 valores que cada `.yml` (cron-job.org acepta
+  sintaxis crontab estándar, se pega literal)
+
+| Job | cron (UTC) | archivo |
+|---|---|---|
+| sync_data | `6 * * * *` | `sync_data.yml` |
+| run_market | `16 0,2,4,6,8,10,12,14,16,18,20,22 * * *` | `run_market.yml` |
+| run_sales | `36 1,3,5,7,9,11,13,15,17,19,21,23 * * *` | `run_sales.yml` |
+| manage_substitutes | `13,33,53 10-23 * * 5,6,0,1` | `manage_substitutes.yml` |
+| set_lineup | `3,23,43 15-20 * * 5` | `set_lineup.yml` |
+
+**Importante — zona horaria del job explícita en UTC**: cron-job.org, a
+diferencia de GitHub Actions (siempre UTC), aplica por defecto la zona
+horaria de la cuenta (p. ej. `Europe/Madrid`) al evaluar el cron de cada
+job, salvo que se fije explícitamente en `UTC`. Con la zona horaria por
+defecto, el cron de `manage_substitutes` (10-23 UTC) y sobre todo el de
+`set_lineup` (15-20 UTC, solo viernes) dispararían desplazados 1-2h
+(CET/CEST) frente a la ventana real que calcula
+`scheduling.is_within_local_window()` — el job llegaría a ejecutarse pero
+fuera de la ventana local esperada, autoexcluyéndose sin avisar (ver "El
+problema del cambio de hora" arriba). Los 5 jobs de cron-job.org se
+configuraron con zona horaria `UTC` explícita para evitar este desfase.
+
+**El token vive fuera del repo**: es un secreto de la cuenta de
+cron-job.org, nunca un GitHub Secret ni una entrada de `.env` — no hay que
+añadirlo a `Settings → Secrets` de este repo porque ningún workflow lo
+usa, solo el servicio externo que los dispara desde fuera.
+
 ## Estructura
 
 Ver el detalle de cada módulo en su propio docstring. Resumen:
