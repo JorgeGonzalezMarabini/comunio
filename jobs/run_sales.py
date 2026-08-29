@@ -32,6 +32,38 @@ identifique como puesta por el propio Futmondo/"Computer" (ver
 `received_sale_offers` (para auditoría/análisis), pero una oferta de otro
 manager nunca se acepta automáticamente, por alta que sea.
 
+Riesgo de plantilla conjunto AL ACEPTAR, no solo al listar (a petición del
+usuario, 2026-08-29, caso real: Musso y Ionuț Radu, los dos únicos
+porteros con plusvalía/oportunidad, listados el mismo día por DOS vías
+independientes de `decide_sales()` -- corte de pérdidas y oportunidad de
+mercado, ver docstring de `engine/selling_strategy.py`, que no se limitan
+entre sí). `decide_sales()` ya evita crear un NUEVO listado que deje una
+posición sin margen de suplentes sanos, pero eso protege solo el momento
+de LISTAR -- el paso que de verdad concreta la venta es ACEPTAR una
+oferta (TODO.md #15), y hasta ahora `_process_received_offers()` evaluaba
+cada listado de forma aislada: si dos listados de la MISMA posición
+tenían ambos una oferta cualificada en la misma pasada, se aceptaban los
+dos sin que ninguno supiera del otro, pudiendo dejar la posición sin
+margen real (o peor, por debajo de los titulares requeridos) de golpe.
+
+Por eso, antes de aceptar nada, se agrupan TODOS los candidatos con
+oferta cualificada por posición (misma `FUTMONDO_POSITION_MAP` que
+`engine/selling_strategy.py`) y se calcula el margen de banquillo REAL de
+la plantilla ahora mismo (`engine.squad_risk.assess_squad_depth()`, pero
+sin excluir a los ya puestos en venta -- aquí SÍ cuentan como
+"disponibles": siguen físicamente en la plantilla hasta que se acepte de
+verdad una oferta sobre ellos). Dentro de cada posición se ordena a los
+candidatos por rentabilidad (más rentable primero, mismo criterio que
+`decide_sales()`; sin referencia de compra local, al final) y se van
+aceptando mientras quede margen ANTES de cada aceptación (bench > 0,
+mismo bloqueo que usa `decide_sales()` para nuevos listados) -- el resto
+se deja listado tal cual, esperando otra pasada (no se cancela nada, la
+oferta sigue ahí por si la plantilla cambia mientras tanto). Sin
+`get_roster()` (vacío, o jugador sin posición reconocible en la
+plantilla actual), este chequeo queda desactivado para ese candidato,
+permisivo por defecto -- igual que el resto de refinamientos opcionales
+de este módulo.
+
 Cada oferta vista (aceptada o no) se registra en `db.models.
 received_sale_offers` -- pensado para analizar más adelante, con datos
 reales acumulados, si el `asking_price` que calcula
@@ -96,7 +128,7 @@ from datetime import datetime, timezone
 import requests
 
 import config
-from clients.futmondo_client import FutmondoClient, FutmondoOfferError
+from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, FutmondoOfferError
 from db.models import (
     get_connection,
     get_player_features,
@@ -105,6 +137,7 @@ from db.models import (
     record_received_offer,
 )
 from engine.selling_strategy import apply_revaluation_premium, decide_sales
+from engine.squad_risk import assess_squad_depth
 from notifier import notify, track_job_run, format_number
 
 
@@ -151,7 +184,42 @@ def _is_futmondo_offer(bid: dict) -> bool:
     return not (user_team.get("name") or "").strip() and not (user_team.get("slug") or "").strip()
 
 
-def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list[dict], list[tuple[dict, str]]]:
+def _position_by_player_id(roster_items: list[dict]) -> dict[str, str]:
+    """Mapa id (string) -> posición normalizada (POR/DEF/MED/DEL) a partir de `get_roster()`."""
+    return {str(p["id"]): FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role")) for p in roster_items}
+
+
+def _bench_by_position_now(roster_items: list[dict]) -> dict[str, int]:
+    """
+    Margen de banquillo REAL de la plantilla ahora mismo, por posición (ver
+    docstring del módulo, "Riesgo de plantilla conjunto AL ACEPTAR").
+    Reutiliza `engine.squad_risk.assess_squad_depth()`, pero forzando
+    `market`/`on_market` a False para TODOS los jugadores: a diferencia de
+    su uso en `decide_sales()` (donde un jugador ya listado no cuenta como
+    "disponible", porque ahí se está decidiendo si crear un listado NUEVO),
+    aquí un jugador ya listado SIGUE físicamente en la plantilla hasta que
+    se acepte de verdad una oferta sobre él, así que sí debe contar.
+
+    Vacío si `roster_items` viene vacío -- sin plantilla que evaluar, este
+    chequeo queda desactivado (permisivo) para quien llame.
+    """
+    if not roster_items:
+        return {}
+    normalized = [
+        {**p, "position": FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role")), "market": False, "on_market": False}
+        for p in roster_items
+    ]
+    depth = assess_squad_depth(normalized)
+    return {position: info["bench"] for position, info in depth.items()}
+
+
+def _process_received_offers(
+    client: FutmondoClient,
+    seen_at: str,
+    position_by_player_id: dict[str, str],
+    bench_by_position: dict[str, int],
+    bought_by_bot: dict[str, int],
+) -> tuple[list[dict], list[tuple[dict, str]], list[dict]]:
     """
     Lee las ofertas de compra recibidas sobre jugadores propios puestos en
     venta NORMAL (`client.get_my_players_in_market()[].bids`) y acepta
@@ -177,13 +245,27 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
     nunca antes (si la llamada falla, la oferta queda registrada pero sin
     marcar).
 
-    Devuelve (aceptadas, fallidas) para el resumen de notificación de
-    `run()`. Un fallo al aceptar una oferta concreta (red o rechazo de
-    negocio) no aborta el resto -- se audita en `fallidas` y se sigue con
-    el resto de listados.
+    Riesgo de plantilla conjunto por posición (a petición del usuario,
+    2026-08-29, ver docstring del módulo): las ofertas que cualifican para
+    aceptarse (de Futmondo, dentro de precio/margen) NO se aceptan una a
+    una según se recorren los listados -- primero se juntan TODAS, se
+    ordenan dentro de cada posición por rentabilidad (más rentable
+    primero; sin referencia de compra local, al final) y solo se acepta
+    mientras `bench_by_position` siga por encima de cero ANTES de esa
+    aceptación concreta (se decrementa según se aprueba cada una, para que
+    la siguiente de la misma posición ya vea el margen real que quedaría).
+    `position_by_player_id`/`bench_by_position` vacíos o sin la posición
+    de un candidato concreto -> ese candidato no se bloquea (permisivo,
+    sin dato para evaluar el riesgo).
+
+    Devuelve (aceptadas, fallidas, omitidas_por_riesgo) para el resumen de
+    notificación de `run()`. Un fallo al aceptar una oferta concreta (red
+    o rechazo de negocio) no aborta el resto -- se audita en `fallidas` y
+    se sigue con el resto de listados.
     """
     listings = client.get_my_players_in_market().get("answer", [])
     accepted, failed = [], []
+    qualifying = []  # (item, best_bid) -- pendientes del chequeo de riesgo por posición
 
     for item in listings:
         if item.get("isClause"):
@@ -214,14 +296,35 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
         if best["price"] < acceptance_threshold:
             continue  # ni supera lo pedido ni queda dentro del margen de tolerancia -- se deja listado tal cual
 
+        qualifying.append((item, best))
+
+    def _sort_key(entry):
+        item, best = entry
+        purchase_price = bought_by_bot.get(str(item["id"])) or 0
+        if purchase_price <= 0:
+            return (1, 0.0)  # sin referencia de compra local -- se procesa al final
+        return (0, -((best["price"] - purchase_price) / purchase_price))  # más rentable primero
+
+    qualifying.sort(key=_sort_key)
+
+    skipped_for_risk = []
+    for item, best in qualifying:
+        position = position_by_player_id.get(str(item["id"]))
+        bench = bench_by_position.get(position) if position is not None else None
+        if bench is not None and bench <= 0:
+            skipped_for_risk.append(item)
+            continue  # aceptar dejaría esta posición sin margen de suplentes sanos -- se deja listado
+
         try:
             client.accept_sale_offer(str(best["id"]), str(item["id"]))
             mark_offer_accepted(best["id"])
+            if position is not None and position in bench_by_position:
+                bench_by_position[position] -= 1  # para que el siguiente candidato de la misma posición lo vea
             accepted.append(
                 {
                     "player_id": item["id"],
                     "name": item.get("name"),
-                    "listing_price": listing_price,
+                    "listing_price": item["price"],
                     "offer_price": best["price"],
                     "bidder": (best.get("userTeam") or {}).get("name"),
                 }
@@ -229,7 +332,7 @@ def _process_received_offers(client: FutmondoClient, seen_at: str) -> tuple[list
         except (requests.RequestException, FutmondoOfferError) as e:
             failed.append((item, str(e)))
 
-    return accepted, failed
+    return accepted, failed, skipped_for_risk
 
 
 def run():
@@ -241,7 +344,24 @@ def run():
     now = datetime.now(timezone.utc).isoformat()
     report_lines = []
 
-    offers_accepted, offers_failed = _process_received_offers(client, now)
+    # Roster y precios de compra del bot ANTES de procesar ofertas (a
+    # diferencia de antes, que se procesaban las ofertas primero): hacen
+    # falta ambos para el chequeo de riesgo de plantilla conjunto por
+    # posición al ACEPTAR (ver docstring del módulo y de
+    # `_process_received_offers()`). Si el roster viene vacío, ambos mapas
+    # quedan vacíos -- ese chequeo se desactiva (permisivo), igual que
+    # antes de este cambio.
+    roster = client.get_roster()
+    roster_items = roster.get("answer", [])
+    bought_by_bot = get_won_bid_prices()
+
+    offers_accepted, offers_failed, offers_skipped_for_risk = _process_received_offers(
+        client,
+        now,
+        _position_by_player_id(roster_items),
+        _bench_by_position_now(roster_items),
+        bought_by_bot,
+    )
     if offers_accepted:
         report_lines.append(f"{len(offers_accepted)} oferta(s) recibida(s) ACEPTADA(S):")
         for o in offers_accepted:
@@ -253,9 +373,14 @@ def run():
         report_lines.append(f"{len(offers_failed)} oferta(s) recibida(s) fallida(s) al aceptar:")
         for item, err in offers_failed:
             report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')}): {err}")
+    if offers_skipped_for_risk:
+        report_lines.append(
+            f"{len(offers_skipped_for_risk)} oferta(s) recibida(s) NO aceptada(s) para no dejar su posición sin "
+            "margen de suplentes sanos (se deja el listado, se reevalúa en la próxima pasada):"
+        )
+        for item in offers_skipped_for_risk:
+            report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')})")
 
-    roster = client.get_roster()
-    roster_items = roster.get("answer", [])
     if not roster_items:
         report_lines.append("run_sales: la plantilla vino vacía, nada más que evaluar.")
         notify("\n".join(report_lines))
@@ -322,7 +447,7 @@ def run():
 
     decisions = decide_sales(
         roster_items,
-        bought_by_bot=get_won_bid_prices(),
+        bought_by_bot=bought_by_bot,
         budget=budget,
         own_squad_features=own_squad_features,
         market_candidates=market_candidates,

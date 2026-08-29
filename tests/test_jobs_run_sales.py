@@ -19,13 +19,19 @@ ROSTER_442_BASE = (
 
 class _BaseFakeClient(FutmondoClient):
     """
-    Base común de los `FakeClient` de este módulo: `_process_received_offers()`
-    (TODO.md #15) llama a `get_my_players_in_market()` ANTES que a
-    `get_roster()` en cada `run()` -- sin este override por defecto (sin
-    ofertas pendientes), cada test que no le interese este paso heredaría
-    la implementación real y lanzaría FutmondoAuthError contra credenciales
-    None (ver `no_real_futmondo_network` en conftest.py). Los tests que sí
-    quieren ejercitar ofertas recibidas sobrescriben este método aparte.
+    Base común de los `FakeClient` de este módulo: `run()` llama a
+    `get_my_players_in_market()` (TODO.md #15) en cada pasada -- sin este
+    override por defecto (sin ofertas pendientes), cada test que no le
+    interese este paso heredaría la implementación real y lanzaría
+    FutmondoAuthError contra credenciales None (ver
+    `no_real_futmondo_network` en conftest.py). Los tests que sí quieren
+    ejercitar ofertas recibidas sobrescriben este método aparte.
+
+    Desde 2026-08-29 (riesgo de plantilla conjunto al ACEPTAR ofertas, ver
+    docstring de jobs/run_sales.py), `run()` llama primero a `get_roster()`
+    y luego a `get_my_players_in_market()` -- al revés que antes -- porque
+    el chequeo de riesgo por posición necesita la plantilla actual antes
+    de decidir qué ofertas aceptar.
 
     Mismo motivo para `get_market()`/`get_lineup()` (añadidas 2026-08-23,
     ver docstring del módulo de jobs/run_sales.py -- expirationDate de
@@ -459,6 +465,131 @@ def test_run_sales_does_not_duplicate_offer_seen_across_two_runs(tmp_db):
     with get_connection() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM received_sale_offers WHERE futmondo_bid_id = 'bid5'").fetchone()
     assert row["n"] == 1
+
+
+def test_run_sales_accepts_only_the_safe_offers_per_position_leaving_bench_at_zero(tmp_db):
+    """
+    Regresión (2026-08-29, a petición del usuario, caso real: Musso y
+    Ionuț Radu, los dos únicos porteros con oferta cualificada listados a
+    la vez, uno por corte de pérdidas y otro por oportunidad de mercado --
+    ver docstring de engine/selling_strategy.py, vías independientes que
+    no se limitan entre sí). Con 3 porteros en plantilla (bench=2, ver
+    engine.squad_risk) y DOS listados con oferta cualificada de Futmondo,
+    aceptar los dos dejaría el margen en 0 -- todavía permitido por el
+    mismo criterio que ya usa decide_sales() para nuevos listados (bloquea
+    solo con bench <= 0 ANTES de la operación) -- así que ambos se
+    aceptan, pero SOLO tras evaluarlos juntos por posición: se prioriza el
+    más rentable primero (aquí el jugador 1, comprado por 500_000 y
+    listado con oferta a 1_000_000, +100%) y el otro llega justo al
+    límite. Con una TERCERA oferta cualificada de un cuarto portero
+    hipotético, esa sí debería quedar fuera por falta de margen -- pero
+    aquí basta con demostrar que la agrupación por posición reemplaza la
+    aceptación aislada de antes de este cambio.
+    """
+    roster = (
+        [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
+        + [{"id": 2, "role": "portero", "status": "", "value": 300_000}]
+        + [{"id": 3, "role": "portero", "status": "", "value": 300_000}]
+        + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+    )
+    _mark_won(1, 500_000)  # +100% -- más rentable, se procesa primero
+    _mark_won(2, 300_000)  # sin plusvalía, pero también cualifica por precio de oferta
+
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_my_players_in_market(self):
+            return {
+                "answer": [
+                    _offer_listing(player_id=1, name="Portero1", listing_price=1_000_000, bid_id="bid_por1", offer_price=1_000_000),
+                    _offer_listing(player_id=2, name="Portero2", listing_price=300_000, bid_id="bid_por2", offer_price=300_000),
+                ]
+            }
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}  # sin histórico -- ENABLE_SELLING_REVALUATION_PREMIUM activo por defecto, sin prima aquí
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    # Ambas ofertas caben (bench de partida = 2, con 3 porteros y 1 titular
+    # requerido) -- la más rentable (jugador 1) se acepta primero.
+    assert accept_calls == [("bid_por1", "1"), ("bid_por2", "2")]
+    assert "2 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+    assert "NO aceptada" not in captured[0]
+
+
+def test_run_sales_skips_offer_that_would_leave_position_without_bench(tmp_db):
+    """
+    Con solo 2 porteros en plantilla (bench=1) y DOS ofertas cualificadas,
+    aceptar ambas dejaría la posición en bench=-1 (por debajo de los
+    titulares requeridos) -- la segunda (menos rentable) debe quedar sin
+    aceptar, listada tal cual, esperando otra pasada.
+    """
+    roster = (
+        [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
+        + [{"id": 2, "role": "portero", "status": "", "value": 300_000}]
+        + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+    )
+    _mark_won(1, 500_000)  # +100% -- más rentable, se acepta
+    _mark_won(2, 300_000)  # sin plusvalía -- se queda sin margen, no se acepta
+
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_my_players_in_market(self):
+            return {
+                "answer": [
+                    _offer_listing(player_id=1, name="Portero1", listing_price=1_000_000, bid_id="bid_por1", offer_price=1_000_000),
+                    _offer_listing(player_id=2, name="Portero2", listing_price=300_000, bid_id="bid_por2", offer_price=300_000),
+                ]
+            }
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}  # sin histórico -- ENABLE_SELLING_REVALUATION_PREMIUM activo por defecto, sin prima aquí
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid_por1", "1")]
+    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+    assert "1 oferta(s) recibida(s) NO aceptada(s)" in captured[0]
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid_por2'").fetchone()
+    assert row["accepted"] == 0
 
 
 def test_run_sales_does_not_call_get_player_summary_when_premium_flag_is_off(tmp_db, monkeypatch):
