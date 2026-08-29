@@ -150,6 +150,30 @@ CREATE TABLE IF NOT EXISTS sales (
     created_at      TEXT NOT NULL
 );
 
+-- "Swap" (a petición del usuario, 2026-08-29, ver docstring de
+-- jobs/run_sales.py y config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT): una
+-- fila por venta que calificó ÚNICAMENTE por la vía "oportunidad de
+-- mercado" de engine/selling_strategy.py -- guarda qué candidato de
+-- mercado la motivó, para poder comprobar al ACEPTAR una oferta si ese
+-- reemplazo (o uno equivalente, si hubo que retargetear -- ver
+-- jobs.run_sales._resolve_swap_target()) sigue realmente disponible antes
+-- de permitir quedarse temporalmente sin ningún suplente sano en esa
+-- posición. Una fila por `sale_id` (PK, no autoincrement -- referencia
+-- directa a la fila de `sales` que este swap justificó); `target_player_id`
+-- es el candidato VIGENTE ahora mismo (se sobreescribe al retargetear,
+-- ver retarget_swap_target()), mientras que `original_target_player_id`
+-- nunca cambia, guardado solo para auditoría de qué motivó la venta el
+-- día que se listó.
+CREATE TABLE IF NOT EXISTS sale_swap_targets (
+    sale_id                    INTEGER PRIMARY KEY REFERENCES sales(id),
+    player_id                  TEXT NOT NULL REFERENCES players(id),  -- el propio, puesto en venta
+    target_player_id           TEXT NOT NULL REFERENCES players(id),  -- candidato de mercado objetivo VIGENTE
+    target_price               INTEGER,
+    original_target_player_id  TEXT NOT NULL,
+    retargeted                 INTEGER NOT NULL DEFAULT 0,  -- 0/1: si target_player_id ya no es el original
+    updated_at                 TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS lineup_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     matchday        INTEGER,                -- NULL de momento: no hay endpoint de jornada actual implementado todavía
@@ -490,6 +514,78 @@ def mark_offer_accepted(futmondo_bid_id) -> None:
         conn.execute(
             "UPDATE received_sale_offers SET accepted = 1 WHERE futmondo_bid_id = ?",
             (str(futmondo_bid_id),),
+        )
+
+
+def save_swap_target(sale_id: int, player_id, target_player_id, target_price: int, now: str) -> None:
+    """
+    Registra el candidato de mercado que motivó una venta por "oportunidad
+    de mercado" (ver docstring de `sale_swap_targets` más arriba) -- llamar
+    solo tras persistir la fila de `sales` correspondiente (necesita su
+    `sale_id` real), y solo para decisiones con `swap_target_player_id`
+    (ver engine.selling_strategy.decide_sales()). `original_target_player_id`
+    se fija aquí, una única vez, al valor inicial de `target_player_id` --
+    ver retarget_swap_target() para cuando cambia más adelante.
+
+    INSERT OR IGNORE por `sale_id` (PK): no debería llamarse dos veces para
+    el mismo `sale_id`, pero si ocurriera (reintento), no pisa la fila ya
+    existente.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sale_swap_targets
+                (sale_id, player_id, target_player_id, target_price, original_target_player_id, retargeted, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
+            """,
+            (sale_id, str(player_id), str(target_player_id), target_price, str(target_player_id), now),
+        )
+
+
+def get_swap_target_for_player(player_id) -> dict | None:
+    """
+    Swap en marcha (si lo hay) para el listado ABIERTO ahora mismo de
+    `player_id` -- cruza con `sales.status = 'listed'` para la fila MÁS
+    RECIENTE (mayor `id`), por si el jugador se vendió/recompró/volvió a
+    listar más de una vez en su historia. None si esa venta no calificó por
+    "oportunidad de mercado" (nunca se guardó fila para ella) o si no hay
+    ningún listado abierto para ese jugador.
+
+    Pensado para `jobs.run_sales._resolve_swap_target()`, llamado justo
+    antes de aceptar una oferta que dejaría su posición en bench=0 (ver
+    config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT).
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT t.sale_id, t.player_id, t.target_player_id, t.target_price, t.original_target_player_id
+            FROM sale_swap_targets t
+            JOIN sales s ON s.id = t.sale_id
+            WHERE t.player_id = ? AND s.status = 'listed'
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (str(player_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def retarget_swap_target(sale_id: int, new_target_player_id, new_target_price: int, now: str) -> None:
+    """
+    Actualiza el candidato VIGENTE de un swap ya registrado (el original ya
+    no está disponible -- ver `jobs.run_sales._resolve_swap_target()`) a un
+    equivalente encontrado ahora mismo en el mercado. `original_target_player_id`
+    NUNCA se toca aquí -- sigue siendo el candidato que motivó la venta el
+    día que se listó, solo de auditoría.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE sale_swap_targets
+            SET target_player_id = ?, target_price = ?, retargeted = 1, updated_at = ?
+            WHERE sale_id = ?
+            """,
+            (str(new_target_player_id), new_target_price, now, sale_id),
         )
 
 

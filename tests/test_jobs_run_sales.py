@@ -467,24 +467,20 @@ def test_run_sales_does_not_duplicate_offer_seen_across_two_runs(tmp_db):
     assert row["n"] == 1
 
 
-def test_run_sales_accepts_only_the_safe_offers_per_position_leaving_bench_at_zero(tmp_db):
+def test_run_sales_accepts_down_to_bench_one_but_needs_swap_for_the_second(tmp_db):
     """
     Regresión (2026-08-29, a petición del usuario, caso real: Musso y
     Ionuț Radu, los dos únicos porteros con oferta cualificada listados a
     la vez, uno por corte de pérdidas y otro por oportunidad de mercado --
     ver docstring de engine/selling_strategy.py, vías independientes que
     no se limitan entre sí). Con 3 porteros en plantilla (bench=2, ver
-    engine.squad_risk) y DOS listados con oferta cualificada de Futmondo,
-    aceptar los dos dejaría el margen en 0 -- todavía permitido por el
-    mismo criterio que ya usa decide_sales() para nuevos listados (bloquea
-    solo con bench <= 0 ANTES de la operación) -- así que ambos se
-    aceptan, pero SOLO tras evaluarlos juntos por posición: se prioriza el
-    más rentable primero (aquí el jugador 1, comprado por 500_000 y
-    listado con oferta a 1_000_000, +100%) y el otro llega justo al
-    límite. Con una TERCERA oferta cualificada de un cuarto portero
-    hipotético, esa sí debería quedar fuera por falta de margen -- pero
-    aquí basta con demostrar que la agrupación por posición reemplaza la
-    aceptación aislada de antes de este cambio.
+    engine.squad_risk) y DOS listados con oferta cualificada de Futmondo:
+    el umbral de ACEPTAR es más estricto que el de listar (a petición del
+    usuario, 2026-08-29, segunda vuelta) -- exige bench_después >= 1, así
+    que la primera oferta (más rentable, jugador 1) se acepta (bench 2->1,
+    sigue quedando un suplente), pero la segunda ya vería bench=1 antes de
+    aceptar -- dejaría la posición en bench=0, y sin ningún swap
+    registrado para ese jugador, se queda sin aceptar.
     """
     roster = (
         [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
@@ -528,19 +524,17 @@ def test_run_sales_accepts_only_the_safe_offers_per_position_leaving_bench_at_ze
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
         run_sales.run()
 
-    # Ambas ofertas caben (bench de partida = 2, con 3 porteros y 1 titular
-    # requerido) -- la más rentable (jugador 1) se acepta primero.
-    assert accept_calls == [("bid_por1", "1"), ("bid_por2", "2")]
-    assert "2 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
-    assert "NO aceptada" not in captured[0]
+    assert accept_calls == [("bid_por1", "1")]
+    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+    assert "1 oferta(s) recibida(s) NO aceptada(s)" in captured[0]
 
 
-def test_run_sales_skips_offer_that_would_leave_position_without_bench(tmp_db):
+def test_run_sales_skips_offer_that_would_leave_position_in_real_deficit(tmp_db):
     """
     Con solo 2 porteros en plantilla (bench=1) y DOS ofertas cualificadas,
-    aceptar ambas dejaría la posición en bench=-1 (por debajo de los
-    titulares requeridos) -- la segunda (menos rentable) debe quedar sin
-    aceptar, listada tal cual, esperando otra pasada.
+    aceptar la primera YA dejaría bench=0 (sin swap, no vale, ver test de
+    arriba) -- ninguna de las dos se acepta, ni siquiera con el criterio de
+    rentabilidad, porque ninguna tiene swap registrado.
     """
     roster = (
         [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
@@ -549,8 +543,8 @@ def test_run_sales_skips_offer_that_would_leave_position_without_bench(tmp_db):
         + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
         + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
     )
-    _mark_won(1, 500_000)  # +100% -- más rentable, se acepta
-    _mark_won(2, 300_000)  # sin plusvalía -- se queda sin margen, no se acepta
+    _mark_won(1, 500_000)
+    _mark_won(2, 300_000)
 
     accept_calls = []
 
@@ -583,13 +577,141 @@ def test_run_sales_skips_offer_that_would_leave_position_without_bench(tmp_db):
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
         run_sales.run()
 
-    assert accept_calls == [("bid_por1", "1")]
-    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
-    assert "1 oferta(s) recibida(s) NO aceptada(s)" in captured[0]
+    assert accept_calls == []
+    assert "ACEPTADA" not in captured[0]
+    assert "2 oferta(s) recibida(s) NO aceptada(s)" in captured[0]
 
     with get_connection() as conn:
         row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid_por2'").fetchone()
     assert row["accepted"] == 0
+
+
+def _future_iso(hours):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+
+def _seed_swap_target(sale_player_id, target_player_id, target_price=800_000):
+    """
+    Crea una venta 'listed' + su fila de swap (ver db.models.sale_swap_targets)
+    -- como si `run()` ya hubiera listado a `sale_player_id` motivado por
+    `target_player_id` en una pasada anterior (mismo flujo que `decide_sales()`
+    + `save_swap_target()` en `run()`, pero sin pasar por decide_sales aquí:
+    estos tests solo ejercitan `_process_received_offers()`/
+    `_resolve_swap_target()`, no la decisión de listar).
+    """
+    from db.models import save_swap_target
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?, ?, 'listed', ?)",
+            (str(sale_player_id), 1_000_000, "2026-08-29T00:00:00+00:00"),
+        )
+        sale_id = cur.lastrowid
+    save_swap_target(sale_id, sale_player_id, target_player_id, target_price, "2026-08-29T00:00:00+00:00")
+    return sale_id
+
+
+def test_run_sales_accepts_offer_leaving_bench_at_zero_when_swap_still_live(tmp_db):
+    """
+    Con solo 2 porteros en plantilla (bench=1), aceptar la única oferta
+    dejaría bench=0 -- pero hay un swap registrado (jugador 1 -> candidato
+    999) y el candidato 999 SIGUE listado en vivo (get_market()) con de
+    sobra más de 1h antes de expirar (config.SELLING_SWAP_MIN_HOURS_
+    BEFORE_ACCEPT) -- el swap está "en marcha", se acepta igualmente.
+    """
+    roster = (
+        [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
+        + [{"id": 2, "role": "portero", "status": "", "value": 300_000}]
+        + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+    )
+    _mark_won(1, 500_000)
+    _seed_swap_target(sale_player_id=1, target_player_id=999)
+
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(player_id=1, name="Portero1", listing_price=1_000_000, bid_id="bid_por1", offer_price=1_000_000)]}
+
+        def get_market(self):
+            return {"answer": [{"id": 999, "expirationDate": _future_iso(72)}]}  # +72h -- de sobra
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}  # decide_sales() también listaría al jugador 1 por plusvalía -- sin histórico, sin prima
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid_por1", "1")]
+    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+
+
+def test_run_sales_skips_offer_when_swap_target_expired_without_equivalent(tmp_db):
+    """
+    Mismo caso, pero el candidato 999 del swap ya no aparece en el mercado
+    en vivo (vendido/caducado) y no hay ningún equivalente en `market_
+    candidates` (BD sin features de mercado) -- el swap se da por muerto,
+    se aplica el umbral estricto normal y la oferta se deja sin aceptar.
+    """
+    roster = (
+        [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
+        + [{"id": 2, "role": "portero", "status": "", "value": 300_000}]
+        + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+    )
+    _mark_won(1, 500_000)
+    _seed_swap_target(sale_player_id=1, target_player_id=999)
+
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(player_id=1, name="Portero1", listing_price=1_000_000, bid_id="bid_por1", offer_price=1_000_000)]}
+
+        def get_market(self):
+            return {"answer": []}  # 999 ya no está listado -- swap agotado, sin equivalente que buscar
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}  # decide_sales() también listaría al jugador 1 por plusvalía -- sin histórico, sin prima
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == []
+    assert "1 oferta(s) recibida(s) NO aceptada(s)" in captured[0]
 
 
 def test_run_sales_does_not_call_get_player_summary_when_premium_flag_is_off(tmp_db, monkeypatch):

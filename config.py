@@ -479,6 +479,30 @@ SELLING_REVALUATION_MAX_PREMIUM_PCT = float(os.getenv("SELLING_REVALUATION_MAX_P
 # Futmondo si offer_price >= listing_price * (1 - SELLING_OFFER_ACCEPTANCE_MARGIN).
 SELLING_OFFER_ACCEPTANCE_MARGIN = float(os.getenv("SELLING_OFFER_ACCEPTANCE_MARGIN", "0.05"))
 
+# Umbral MÁS ESTRICTO que el de listar, exclusivo del momento de ACEPTAR
+# una oferta recibida (a petición del usuario, 2026-08-29, ver docstring
+# de jobs/run_sales.py): decide_sales() permite listar hasta dejar una
+# posición en bench=0 (justo los titulares que exige la alineación, sin
+# margen), pero aceptar es lo que de verdad concreta la venta -- por eso
+# aceptar exige bench_después >= 1 (al menos un suplente sano), salvo que
+# sea un "swap" verificado en marcha (ver más abajo), el único caso en que
+# se permite bajar a bench=0 al aceptar. Nunca se acepta si eso creara un
+# déficit real (bench_antes <= 0), swap o no.
+#
+# "Swap": una venta que calificó ÚNICAMENTE por la vía "oportunidad de
+# mercado" (ver engine/selling_strategy.py) ya identifica, al listar, un
+# candidato de mercado concreto que la motivó -- se persiste en
+# `db.models.sale_swap_targets` (ver save_swap_target()). Al aceptar, si
+# ese candidato (o uno equivalente, si hubo que retargetear, ver
+# `jobs.run_sales._resolve_swap_target()`) sigue realmente listado en el
+# mercado AHORA MISMO con más de esta cantidad de horas antes de expirar,
+# el swap se considera "en marcha" y se permite bajar a bench=0 -- da
+# tiempo a que corra jobs/run_market.py y pueda pujar de verdad por él
+# antes de que el listado desaparezca. Sin ese margen (o sin ningún
+# candidato equivalente disponible), el swap se da por muerto y se aplica
+# el umbral estricto de arriba, como cualquier otra venta.
+SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT = float(os.getenv("SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT", "1"))
+
 # --- Alineación (engine/lineup_optimizer.py) ---
 # Formato real de Futmondo (confirmado por captura, campo "strategy" de
 # /1/userteam/lineup): CON guiones, ej. "4-4-2" — a diferencia de Comunio,

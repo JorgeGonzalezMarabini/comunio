@@ -54,15 +54,52 @@ sin excluir a los ya puestos en venta -- aquí SÍ cuentan como
 "disponibles": siguen físicamente en la plantilla hasta que se acepte de
 verdad una oferta sobre ellos). Dentro de cada posición se ordena a los
 candidatos por rentabilidad (más rentable primero, mismo criterio que
-`decide_sales()`; sin referencia de compra local, al final) y se van
-aceptando mientras quede margen ANTES de cada aceptación (bench > 0,
-mismo bloqueo que usa `decide_sales()` para nuevos listados) -- el resto
-se deja listado tal cual, esperando otra pasada (no se cancela nada, la
-oferta sigue ahí por si la plantilla cambia mientras tanto). Sin
+`decide_sales()`; sin referencia de compra local, al final). Sin
 `get_roster()` (vacío, o jugador sin posición reconocible en la
 plantilla actual), este chequeo queda desactivado para ese candidato,
 permisivo por defecto -- igual que el resto de refinamientos opcionales
 de este módulo.
+
+Umbral MÁS ESTRICTO que el de listar, y excepción de "swap" (a petición
+del usuario, 2026-08-29, ver docstring de `config.
+SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT`): `decide_sales()` permite LISTAR
+hasta dejar una posición en bench=0 (justo los titulares que exige la
+alineación, sin margen) -- pero aceptar es lo que de verdad concreta la
+venta, así que aquí el umbral es más conservador: se exige bench > 1
+ANTES de aceptar (bench_después >= 1, al menos un suplente sano) salvo
+que sea un "swap" verificado en marcha, el ÚNICO caso en que se permite
+bajar a bench=0 al aceptar -- nunca se acepta si eso dejara la posición
+en déficit real (bench <= 0 antes de aceptar), swap o no, eso NUNCA se
+permite.
+
+"Swap": una venta que calificó ÚNICAMENTE por "oportunidad de mercado"
+(`only_market_reason` en `engine/selling_strategy.py`) ya identifica, al
+listar, un candidato de mercado concreto que la motivó -- desde este
+cambio se persiste en `db.models.sale_swap_targets` (ver
+`save_swap_target()`, llamado justo después de listar con éxito). Al
+aceptar, si ese candidato (o uno equivalente, ver `_resolve_swap_target()`
+más abajo) sigue realmente listado en el mercado AHORA MISMO
+(`FutmondoClient.get_market()`, en vivo -- un swap nunca se fía del
+snapshot local, que puede llevar horas sin sincronizar) con más de
+`config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT` (1h por defecto) antes de
+expirar, el swap se considera "en marcha" y se permite aceptar aunque
+deje bench=0 -- ese margen de tiempo da hueco a que corra
+`jobs/run_market.py` (cron aparte) y pueda pujar de verdad por él antes
+de que el listado desaparezca.
+
+Si el candidato original YA NO tiene ese margen (vendido, expirado, o a
+punto de expirar), `_resolve_swap_target()` no da el swap por muerto sin
+más: reevalúa el mercado abierto AHORA MISMO buscando un equivalente en
+la misma posición (misma comparación de score que decidió el swap
+original, `engine.selling_strategy.score_market_upgrade_candidates()`,
+pero restringida a candidatos que SÍ siguen listados en vivo con margen
+de tiempo suficiente) -- si lo encuentra, retargetea el swap
+(`db.models.retarget_swap_target()`, guarda el nuevo objetivo sin perder
+el original para auditoría) y se sigue aceptando: a todos los efectos, el
+swap sigue en marcha, solo cambió de objetivo concreto. Si no encuentra
+ningún equivalente, el swap se da por muerto y se aplica el umbral
+estricto de arriba como a cualquier otra venta -- la oferta se deja sin
+aceptar esta pasada.
 
 Cada oferta vista (aceptada o no) se registra en `db.models.
 received_sale_offers` -- pensado para analizar más adelante, con datos
@@ -123,7 +160,7 @@ dos NO bloquea el resto del job -- ese refinamiento concreto queda
 desactivado dentro de `decide_sales()`, igual que el resto de datos
 opcionales de este módulo.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -132,17 +169,21 @@ from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, Futmo
 from db.models import (
     get_connection,
     get_player_features,
+    get_swap_target_for_player,
     get_won_bid_prices,
     mark_offer_accepted,
     record_received_offer,
+    retarget_swap_target,
+    save_swap_target,
 )
-from engine.selling_strategy import apply_revaluation_premium, decide_sales
+from engine.selling_strategy import apply_revaluation_premium, decide_sales, parse_iso_datetime, score_market_upgrade_candidates
 from engine.squad_risk import assess_squad_depth
 from notifier import notify, track_job_run, format_number
 
 
-def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
-    conn.execute(
+def _persist_sale(conn, decision: dict, status: str, now: str) -> int:
+    """Devuelve el `id` real de la fila insertada -- hace falta para `save_swap_target()` (ver `run()`)."""
+    cur = conn.execute(
         """
         INSERT INTO sales (player_id, asking_price, purchase_price, profit, profit_pct, status, reason, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -158,6 +199,7 @@ def _persist_sale(conn, decision: dict, status: str, now: str) -> None:
             now,
         ),
     )
+    return cur.lastrowid
 
 
 def _is_futmondo_offer(bid: dict) -> bool:
@@ -213,12 +255,95 @@ def _bench_by_position_now(roster_items: list[dict]) -> dict[str, int]:
     return {position: info["bench"] for position, info in depth.items()}
 
 
+def _has_enough_runway(player_id, live_market_expirations: dict[str, str], now: datetime, min_hours: float) -> bool:
+    """
+    True si `player_id` sigue listado AHORA MISMO en el mercado
+    (`live_market_expirations`, de `FutmondoClient.get_market()` en vivo --
+    nunca el snapshot local, que puede llevar horas sin sincronizar) con
+    más de `min_hours` antes de expirar. Sin dato real de vigencia (no
+    aparece en el mercado en vivo, o `expirationDate` no parseable) ->
+    False: un swap nunca se da por vigente sobre un dato que no se puede
+    confirmar.
+    """
+    expiration = parse_iso_datetime(live_market_expirations.get(str(player_id)))
+    if expiration is None:
+        return False
+    return (expiration - now) > timedelta(hours=min_hours)
+
+
+def _resolve_swap_target(
+    swap_target: dict,
+    position: str,
+    own_squad_features: list[dict],
+    market_candidates: list[dict],
+    live_market_expirations: dict[str, str],
+    now: datetime,
+) -> bool:
+    """
+    Comprueba si un swap sigue "en marcha" para poder aceptar una oferta
+    que dejaría su posición en bench=0 (ver docstring del módulo,
+    "Umbral MÁS ESTRICTO... y excepción de swap"). `swap_target`: fila de
+    `db.models.get_swap_target_for_player()` (sale_id/player_id/
+    target_player_id/target_price/original_target_player_id).
+
+    1. Si el candidato VIGENTE (`target_player_id`, el original o uno ya
+       retargeteado antes) sigue listado en vivo con margen de tiempo
+       suficiente (`_has_enough_runway()`, `config.
+       SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT`) -> swap en marcha, True.
+    2. Si no, se reevalúa el mercado ABIERTO AHORA MISMO buscando un
+       equivalente en la misma posición: mismo score de alineación que
+       decidió el swap original (`engine.selling_strategy.
+       score_market_upgrade_candidates()`), pero restringido a candidatos
+       que SÍ siguen listados en vivo con margen de tiempo suficiente (para
+       no proponer un retargeteo sobre un candidato igual de agotado). Si
+       aparece uno que además supera `config.
+       SELLING_UPGRADE_AVAILABLE_MIN_MARGIN` sobre el score propio (mismo
+       umbral que exigió el swap original) y no es el mismo candidato ya
+       descartado, se persiste (`db.models.retarget_swap_target()`) y se
+       devuelve True -- a todos los efectos, el swap sigue en marcha, solo
+       cambió de objetivo concreto.
+    3. Si tampoco hay equivalente, el swap se da por muerto -- False.
+
+    Sin `own_squad_features`/`market_candidates` (DB no sincronizada), no
+    se puede confirmar ningún equivalente -- se prefiere el swap muerto
+    (False) antes que aceptar a ciegas, a diferencia del resto de
+    refinamientos "opcionales" de este módulo (aquí sí es el propio
+    chequeo de riesgo, no un extra).
+    """
+    min_hours = config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT
+    if _has_enough_runway(swap_target["target_player_id"], live_market_expirations, now, min_hours):
+        return True  # el objetivo (original o ya retargeteado antes) sigue vigente
+
+    live_candidates = [
+        c for c in market_candidates if _has_enough_runway(c["id"], live_market_expirations, now, min_hours)
+    ]
+    own_scores, best_by_position = score_market_upgrade_candidates(own_squad_features, live_candidates)
+    own_score = own_scores.get(str(swap_target["player_id"]))
+    replacement = best_by_position.get(position)
+    if (
+        own_score is None
+        or replacement is None
+        or str(replacement["id"]) == str(swap_target["target_player_id"])  # el mismo agotado, no vale
+        or (replacement["score"] - own_score) < config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN
+    ):
+        return False  # ningún equivalente disponible con margen suficiente -- el swap se da por muerto
+
+    retarget_swap_target(
+        swap_target["sale_id"], str(replacement["id"]), replacement.get("price") or 0, now.isoformat()
+    )
+    return True
+
+
 def _process_received_offers(
     client: FutmondoClient,
     seen_at: str,
     position_by_player_id: dict[str, str],
     bench_by_position: dict[str, int],
     bought_by_bot: dict[str, int],
+    own_squad_features: list[dict],
+    market_candidates: list[dict],
+    live_market_expirations: dict[str, str],
+    now: datetime,
 ) -> tuple[list[dict], list[tuple[dict, str]], list[dict]]:
     """
     Lee las ofertas de compra recibidas sobre jugadores propios puestos en
@@ -245,15 +370,23 @@ def _process_received_offers(
     nunca antes (si la llamada falla, la oferta queda registrada pero sin
     marcar).
 
-    Riesgo de plantilla conjunto por posición (a petición del usuario,
-    2026-08-29, ver docstring del módulo): las ofertas que cualifican para
-    aceptarse (de Futmondo, dentro de precio/margen) NO se aceptan una a
-    una según se recorren los listados -- primero se juntan TODAS, se
-    ordenan dentro de cada posición por rentabilidad (más rentable
-    primero; sin referencia de compra local, al final) y solo se acepta
-    mientras `bench_by_position` siga por encima de cero ANTES de esa
-    aceptación concreta (se decrementa según se aprueba cada una, para que
-    la siguiente de la misma posición ya vea el margen real que quedaría).
+    Riesgo de plantilla conjunto por posición, umbral estricto y excepción
+    de swap (a petición del usuario, 2026-08-29, ver docstring del
+    módulo): las ofertas que cualifican para aceptarse (de Futmondo, dentro
+    de precio/margen) NO se aceptan una a una según se recorren los
+    listados -- primero se juntan TODAS, se ordenan dentro de cada
+    posición por rentabilidad (más rentable primero; sin referencia de
+    compra local, al final) y se evalúan en ese orden contra
+    `bench_by_position` (se decrementa según se aprueba cada una, para que
+    la siguiente de la misma posición ya vea el margen real que
+    quedaría):
+      - bench <= 0 (déficit real si se acepta) -> NUNCA se acepta, swap o
+        no.
+      - bench == 1 (dejaría la posición en bench=0, sin ningún suplente
+        sano) -> solo se acepta si hay un swap verificado en marcha para
+        ESE jugador (`db.models.get_swap_target_for_player()` +
+        `_resolve_swap_target()`).
+      - bench >= 2 -> se acepta sin más, queda al menos un suplente.
     `position_by_player_id`/`bench_by_position` vacíos o sin la posición
     de un candidato concreto -> ese candidato no se bloquea (permisivo,
     sin dato para evaluar el riesgo).
@@ -311,9 +444,15 @@ def _process_received_offers(
     for item, best in qualifying:
         position = position_by_player_id.get(str(item["id"]))
         bench = bench_by_position.get(position) if position is not None else None
-        if bench is not None and bench <= 0:
-            skipped_for_risk.append(item)
-            continue  # aceptar dejaría esta posición sin margen de suplentes sanos -- se deja listado
+
+        if bench is not None and bench <= 1:
+            swap_target = None if bench <= 0 else get_swap_target_for_player(str(item["id"]))
+            swap_in_progress = swap_target is not None and _resolve_swap_target(
+                swap_target, position, own_squad_features, market_candidates, live_market_expirations, now
+            )
+            if not swap_in_progress:
+                skipped_for_risk.append(item)
+                continue  # dejaría la posición sin margen (o en déficit real) y no hay swap que lo justifique
 
         try:
             client.accept_sale_offer(str(best["id"]), str(item["id"]))
@@ -341,19 +480,48 @@ def run():
         return
 
     client = FutmondoClient()
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     report_lines = []
 
-    # Roster y precios de compra del bot ANTES de procesar ofertas (a
-    # diferencia de antes, que se procesaban las ofertas primero): hacen
-    # falta ambos para el chequeo de riesgo de plantilla conjunto por
-    # posición al ACEPTAR (ver docstring del módulo y de
-    # `_process_received_offers()`). Si el roster viene vacío, ambos mapas
-    # quedan vacíos -- ese chequeo se desactiva (permisivo), igual que
-    # antes de este cambio.
+    # Roster, precios de compra del bot, features de plantilla/mercado y
+    # vigencia en vivo del mercado -- TODO esto ANTES de procesar ofertas
+    # (a diferencia de antes, que se procesaban las ofertas primero): hace
+    # falta para el chequeo de riesgo de plantilla conjunto por posición al
+    # ACEPTAR, swaps incluidos (ver docstring del módulo y de
+    # `_process_received_offers()`/`_resolve_swap_target()`). Si el roster
+    # viene vacío, los mapas de posición/banquillo quedan vacíos -- ese
+    # chequeo se desactiva (permisivo), igual que antes de este cambio.
     roster = client.get_roster()
     roster_items = roster.get("answer", [])
     bought_by_bot = get_won_bid_prices()
+
+    # Oportunidad de mercado / swaps (a petición del usuario, 2026-08-22 y
+    # 2026-08-29, ver docstring de engine/selling_strategy.py) -- features
+    # CRUDAS de la plantilla propia y del mercado abierto AHORA MISMO
+    # (mismo formato que usa jobs/run_market.py). Si algo falla o viene
+    # vacío, esta vía/el retargeteo de swaps quedan desactivados sin más --
+    # nunca bloquean el resto del job.
+    roster_ids = {str(p["id"]) for p in roster_items}
+    all_players = get_player_features(only_on_market=False)
+    own_squad_features = [p for p in all_players if p["id"] in roster_ids]
+    market_candidates = get_player_features(only_on_market=True)
+
+    # Vigencia EN VIVO de cada listado de mercado (para el refinamiento
+    # "ventana de tiempo" de la vía 5 de decide_sales(), y para comprobar
+    # si un swap sigue en marcha al aceptar, ver `_resolve_swap_target()`)
+    # -- llamada en vivo aparte de get_player_features(): ese snapshot
+    # local (futmondo_snapshots) NO guarda `expirationDate`, solo la
+    # llamada real a get_market() lo trae. Un fallo de red aquí no bloquea
+    # nada -- decide_sales()/_resolve_swap_target() tratan un player_id sin
+    # entrada aquí como "sin dato", esos refinamientos quedan desactivados
+    # para ese candidato.
+    try:
+        market_listing_expirations = {
+            str(p["id"]): p.get("expirationDate") for p in client.get_market().get("answer", [])
+        }
+    except requests.RequestException:
+        market_listing_expirations = {}
 
     offers_accepted, offers_failed, offers_skipped_for_risk = _process_received_offers(
         client,
@@ -361,6 +529,10 @@ def run():
         _position_by_player_id(roster_items),
         _bench_by_position_now(roster_items),
         bought_by_bot,
+        own_squad_features,
+        market_candidates,
+        market_listing_expirations,
+        now_dt,
     )
     if offers_accepted:
         report_lines.append(f"{len(offers_accepted)} oferta(s) recibida(s) ACEPTADA(S):")
@@ -405,34 +577,6 @@ def run():
     # de plazas.
     max_roster_size = information.get("answer", {}).get("configuration", {}).get("maxPlayersInRoster")
     occupancy = f"{len(roster_items)}/{max_roster_size}" if max_roster_size is not None else str(len(roster_items))
-
-    # Oportunidad de mercado (a petición del usuario, 2026-08-22, ver
-    # docstring de engine/selling_strategy.py) -- features CRUDAS de la
-    # plantilla propia y del mercado abierto AHORA MISMO (mismo formato
-    # que usa jobs/run_market.py), para que decide_sales() pueda comparar
-    # el score de alineación de un suplente contra lo mejor disponible en
-    # el mercado en su misma posición. Si algo falla o viene vacío, esta
-    # vía queda desactivada sin más dentro de decide_sales() -- nunca
-    # bloquea las otras tres vías (rentabilidad/pérdida/concentración).
-    roster_ids = {str(p["id"]) for p in roster_items}
-    all_players = get_player_features(only_on_market=False)
-    own_squad_features = [p for p in all_players if p["id"] in roster_ids]
-    market_candidates = get_player_features(only_on_market=True)
-
-    # Tiempo restante de cada listado de mercado (para el refinamiento
-    # "ventana de tiempo" de la vía 5, ver docstring de
-    # engine/selling_strategy.py) -- llamada en vivo aparte de
-    # get_player_features(): ese snapshot local (futmondo_snapshots) NO
-    # guarda `expirationDate`, solo la llamada real a get_market() lo
-    # trae. Un fallo de red aquí no bloquea nada -- decide_sales() trata
-    # un player_id sin entrada aquí como "sin dato", ese refinamiento
-    # simplemente queda desactivado para ese candidato.
-    try:
-        market_listing_expirations = {
-            str(p["id"]): p.get("expirationDate") for p in client.get_market().get("answer", [])
-        }
-    except requests.RequestException:
-        market_listing_expirations = {}
 
     # Alineación TITULAR guardada ahora mismo (para el bloqueo de fin de
     # semana de decide_sales(), ver su docstring) -- un fallo de red aquí
@@ -484,7 +628,19 @@ def run():
         for decision in decisions:
             try:
                 client.list_for_sale(decision["player_id"], decision["asking_price"])
-                _persist_sale(conn, decision, "listed", now)
+                sale_id = _persist_sale(conn, decision, "listed", now)
+                # Registro del swap (ver docstring del módulo) -- solo si
+                # decide_sales() identificó un candidato concreto (venta
+                # que calificó ÚNICAMENTE por oportunidad de mercado, ver
+                # engine/selling_strategy.py); None en el resto de vías.
+                if decision.get("swap_target_player_id"):
+                    save_swap_target(
+                        sale_id,
+                        decision["player_id"],
+                        decision["swap_target_player_id"],
+                        decision.get("swap_target_price") or 0,
+                        now,
+                    )
                 listed.append(decision)
             except (requests.RequestException, FutmondoOfferError) as e:
                 _persist_sale(conn, decision, "failed", now)

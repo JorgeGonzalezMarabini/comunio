@@ -186,6 +186,61 @@ from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth
 
 
+def score_market_upgrade_candidates(
+    own_squad_features: list[dict], market_candidates: list[dict]
+) -> tuple[dict[str, float], dict[str, dict]]:
+    """
+    Score de alineación (`config.LINEUP_EVALUATOR_WEIGHTS`, calidad pura,
+    sin precio) de la plantilla propia y del mercado abierto, en la MISMA
+    llamada a `evaluate_players()` (`engine.evaluator.normalize_pool`
+    normaliza dentro del pool que se le pasa, así que hace falta la misma
+    llamada para que sean comparables entre sí) -- extraído de
+    `decide_sales()` ("oportunidad de mercado / plaza escasa", ver
+    docstring del módulo) para poder reutilizarlo también al ACEPTAR una
+    oferta de venta (`jobs.run_sales._resolve_swap_target()`, ver
+    config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT): si el candidato que
+    motivó un swap ya no está disponible, hace falta repetir esta misma
+    comparación para buscar un equivalente.
+
+    Devuelve (`lineup_score_by_id`, `best_market_candidate_by_position`):
+      - `lineup_score_by_id`: {id (str): score} de TODOS los jugadores
+        pasados (propios y de mercado).
+      - `best_market_candidate_by_position`: {position: {"id", "score",
+        "price"}} -- el candidato de MERCADO (nunca uno propio) con mejor
+        score por posición; hace falta su precio real y su id para los
+        refinamientos de la vía 5 de `decide_sales()` (eficiencia de
+        precio, asequibilidad, tiempo del listado) y para el retargeteo de
+        swaps.
+
+    Ambos vacíos si falta `own_squad_features` o `market_candidates` -- la
+    vía/comparación queda desactivada sin más para quien llame.
+    """
+    lineup_score_by_id: dict[str, float] = {}
+    best_market_candidate_by_position: dict[str, dict] = {}
+    if not own_squad_features or not market_candidates:
+        return lineup_score_by_id, best_market_candidate_by_position
+
+    lineup_scored = evaluate_players(
+        list(own_squad_features) + list(market_candidates), weights=config.LINEUP_EVALUATOR_WEIGHTS
+    )
+    own_ids = {str(p["id"]) for p in own_squad_features}
+    for p in lineup_scored:
+        lineup_score_by_id[str(p["id"])] = p["score"]
+        if str(p["id"]) in own_ids:
+            continue  # es plantilla propia, no un candidato de mercado -- no cuenta como "disponible"
+        position_key = p.get("position")
+        if position_key is None:
+            continue
+        existing = best_market_candidate_by_position.get(position_key)
+        if existing is None or p["score"] > existing["score"]:
+            best_market_candidate_by_position[position_key] = {
+                "id": str(p["id"]),
+                "score": p["score"],
+                "price": p.get("price") or 0,
+            }
+    return lineup_score_by_id, best_market_candidate_by_position
+
+
 def decide_sales(
     squad: list[dict],
     min_profit_pct: float = None,
@@ -383,37 +438,13 @@ def decide_sales(
     total_capital = sum(p.get("value", 0) or 0 for p in squad) + max(0, budget)
 
     # Oportunidad de mercado (ver docstring): score de alineación de
-    # plantilla propia y mercado EN LA MISMA llamada a evaluate_players()
-    # (normalize_pool normaliza dentro del pool que se le pasa, así que
-    # hace falta la misma llamada para que sean comparables entre sí). Si
-    # falta cualquiera de los dos, esta vía queda desactivada (diccionarios
-    # vacíos -> ningún candidato la activa más abajo).
-    lineup_score_by_id = {}
-    # Antes solo se guardaba el score float del mejor candidato por
-    # posición; ahora se guarda el candidato completo (id/score/price) --
-    # hace falta su precio real y su id para los refinamientos de la vía 5
-    # (eficiencia de precio, asequibilidad, tiempo del listado, ver
-    # docstring del módulo).
-    best_market_candidate_by_position = {}
-    if own_squad_features and market_candidates:
-        lineup_scored = evaluate_players(
-            list(own_squad_features) + list(market_candidates), weights=config.LINEUP_EVALUATOR_WEIGHTS
-        )
-        own_ids = {str(p["id"]) for p in own_squad_features}
-        for p in lineup_scored:
-            lineup_score_by_id[str(p["id"])] = p["score"]
-            if str(p["id"]) in own_ids:
-                continue  # es plantilla propia, no un candidato de mercado -- no cuenta como "disponible"
-            position_key = p.get("position")
-            if position_key is None:
-                continue
-            existing = best_market_candidate_by_position.get(position_key)
-            if existing is None or p["score"] > existing["score"]:
-                best_market_candidate_by_position[position_key] = {
-                    "id": str(p["id"]),
-                    "score": p["score"],
-                    "price": p.get("price") or 0,
-                }
+    # plantilla propia y mercado, y mejor candidato por posición -- ver
+    # score_market_upgrade_candidates(). Si falta cualquiera de los dos,
+    # esta vía queda desactivada (diccionarios vacíos -> ningún candidato
+    # la activa más abajo).
+    lineup_score_by_id, best_market_candidate_by_position = score_market_upgrade_candidates(
+        own_squad_features, market_candidates
+    )
 
     candidates = []
     for player in squad:
@@ -568,7 +599,7 @@ def decide_sales(
             if efficiency < upgrade_min_score_per_extra_million:
                 continue  # (b) el margen de score no compensa lo mucho más caro que es el objetivo
 
-        target_expiration = _parse_iso_datetime(market_listing_expirations.get(best_candidate.get("id")))
+        target_expiration = parse_iso_datetime(market_listing_expirations.get(best_candidate.get("id")))
         if target_expiration is not None:
             time_left = target_expiration - now
             if time_left < timedelta(hours=assumed_sale_resolution_hours):
@@ -669,6 +700,13 @@ def decide_sales(
                 "libera la plaza de cara a esa oportunidad, aunque hoy no compense económicamente"
             )
 
+        # Candidato "swap" (a petición del usuario, 2026-08-29, ver
+        # config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT): solo se persiste
+        # para un candidato que cualifica ÚNICAMENTE por oportunidad de
+        # mercado (`only_market_reason`) -- las otras cuatro vías no tienen
+        # un reemplazo concreto identificado, así que no hay swap que
+        # registrar. None en el resto de casos; jobs/run_sales.py solo
+        # guarda el swap en `db.models.sale_swap_targets` si viene relleno.
         decisions.append(
             {
                 "player_id": player["id"],
@@ -677,12 +715,14 @@ def decide_sales(
                 "profit": profit,
                 "profit_pct": profit_pct,
                 "reason": reason,
+                "swap_target_player_id": (best_market_candidate or {}).get("id") if only_market_reason else None,
+                "swap_target_price": (best_market_candidate or {}).get("price") if only_market_reason else None,
             }
         )
     return decisions
 
 
-def _parse_iso_datetime(value) -> datetime | None:
+def parse_iso_datetime(value) -> datetime | None:
     """
     Parsea una fecha ISO-8601 con milisegundos y `Z` -- formato CONFIRMADO
     en vivo tanto para `FutmondoClient.get_player_summary()["answer"]
@@ -736,7 +776,7 @@ def compute_revaluation_premium_pct(
     `get_player_summary()` -- `date` ISO-8601, `price` es el VM diario
     real). Esta función se mantiene igualmente defensiva más allá de esa
     confirmación (nunca revienta con datos inesperados, ver
-    `_parse_iso_datetime()`): entradas sin "date"/"price" parseables (o con
+    `parse_iso_datetime()`): entradas sin "date"/"price" parseables (o con
     precio <= 0) se descartan sin más, no cuentan como dato.
 
     Condiciones, TODAS necesarias para proponer una prima > 0 (si falla
@@ -781,7 +821,7 @@ def compute_revaluation_premium_pct(
 
     parsed = []
     for entry in prices or []:
-        date = _parse_iso_datetime(entry.get("date"))
+        date = parse_iso_datetime(entry.get("date"))
         price = entry.get("price")
         if date is None or not isinstance(price, (int, float)) or price <= 0:
             continue
