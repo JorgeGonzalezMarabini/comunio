@@ -194,6 +194,53 @@ def test_manage_substitutes_uses_real_lineup_check_when_enabled(tmp_db, monkeypa
     assert row["substitute_id"] == "def_suplente"
 
 
+def test_manage_substitutes_checks_bench_players_too_against_real_lineup(tmp_db, monkeypatch):
+    """
+    Regresión del bug 2026-09-01: sustitución en bucle Guillén <-> Yangel
+    Herrera cada pasada entre el 29 y 30 de agosto (ver substitution_
+    decisions de esas fechas). Si el suplente que entraría TAMBIÉN está
+    confirmado fuera de su once real, no debe entrar -- para eso, la
+    consulta a find_players_confirmed_out_of_real_lineup() tiene que cubrir
+    también al banquillo actual, no solo a los titulares (ver comentario en
+    jobs/manage_substitutes.py). Antes del fix, esta llamada solo recibía
+    los titulares: el suplente nunca se comprobaba, entraba igual, y en la
+    siguiente pasada -ya como titular- salía "confirmado fuera" mientras el
+    excompañero (ahora en el banquillo) volvía a colarse sin comprobar.
+    """
+    monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", False)
+    monkeypatch.setattr(config, "ENABLE_REAL_LINEUP_CHECK", True)
+    with get_connection() as conn:
+        _seed_player(conn, "def_titular", "DEF", status="")  # sano según Futmondo
+        _seed_player(conn, "def_suplente", "DEF", status="")  # también sano
+
+    class FakeClient(FutmondoClient):
+        def get_lineup(self):
+            return _lineup_answer([(6, "def_titular")], [(3, "def_suplente")])
+
+    captured_players_by_id = {}
+
+    def fake_find_confirmed_out(players_by_id, *args, **kwargs):
+        captured_players_by_id.update(players_by_id)
+        # Los dos, titular Y suplente, confirmados fuera de su once real --
+        # ninguno debería poder entrar.
+        return {"def_titular", "def_suplente"}
+
+    captured = []
+    with patch("jobs.manage_substitutes.FutmondoClient", FakeClient), \
+         patch("clients.football_lineups_client.find_players_confirmed_out_of_real_lineup", side_effect=fake_find_confirmed_out), \
+         patch("jobs.manage_substitutes.notify", side_effect=lambda m: captured.append(m)):
+        manage_substitutes.run()
+
+    # La llamada debe haber recibido el banquillo, no solo los titulares --
+    # si no, este test no estaría probando nada.
+    assert "def_suplente" in captured_players_by_id
+
+    # Sin nadie válido al que meter, no se decide ninguna sustitución.
+    assert captured == []
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM substitution_decisions").fetchone()["n"] == 0
+
+
 def test_manage_substitutes_real_lineup_check_failure_falls_back_without_crashing(tmp_db, monkeypatch):
     """Un fallo consultando API-Football no debe tumbar la comprobación por lesión -- solo se pierde esa señal extra."""
     monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", False)

@@ -87,13 +87,32 @@ def run():
 
     confirmed_out_ids = set()
     if config.ENABLE_REAL_LINEUP_CHECK:
-        # Solo hace falta comprobar los equipos de nuestros TITULARES actuales,
-        # no toda la plantilla -- menos llamadas a Fotmob de las necesarias.
+        # IMPORTANTE: hay que pasar TITULARES + BANQUILLO, no solo los
+        # titulares actuales -- ver bug 2026-09-01, sustitución en bucle
+        # Guillén <-> Yangel Herrera cada pasada entre el 29 y 30 de agosto
+        # (ver substitution_decisions de esas fechas). build_substitution_
+        # changes() aplica la misma señal de "confirmado fuera" también al
+        # SUPLENTE que entraría (ver su docstring), pero si aquí solo se
+        # comprueban los titulares, `confirmed_out_ids` nunca puede contener
+        # el id de alguien que hoy está en el banquillo -- ese chequeo del
+        # suplente queda ciego para esta señal. Con dos jugadores en la
+        # misma posición confirmados fuera de su respectivo once real
+        # (Guillén de Sevilla, Yangel Herrera de Real Sociedad, ambos
+        # cacheados con once real vacío ese día en real_lineup_checks), el
+        # job metía al que en ese momento estaba en el banquillo sin
+        # comprobarlo; en la siguiente pasada ese jugador YA era titular, se
+        # comprobaba, salía confirmado fuera otra vez, y el compañero
+        # -ahora en el banquillo- volvía a entrar sin comprobar. Bucle
+        # infinito, una sustitución por pasada (~20 min, ver
+        # manage_substitutes.yml). Comprobar también el banquillo actual
+        # (no toda la plantilla, sigue acotado a quien está en juego ahora
+        # mismo en Futmondo) cierra el hueco.
         from clients.football_lineups_client import find_players_confirmed_out_of_real_lineup
 
-        starters_by_id = {pid: players_by_id[pid] for pid in current_lineup_by_position.values() if pid in players_by_id}
+        lineup_and_bench_ids = set(current_lineup_by_position.values()) | set(current_bench_by_position.values())
+        players_in_play_by_id = {pid: players_by_id[pid] for pid in lineup_and_bench_ids if pid in players_by_id}
         try:
-            confirmed_out_ids = find_players_confirmed_out_of_real_lineup(starters_by_id)
+            confirmed_out_ids = find_players_confirmed_out_of_real_lineup(players_in_play_by_id)
         except Exception as e:  # noqa: BLE001 -- un fallo de esta fuente extra no debe tumbar la comprobación por lesión
             notify(f"manage_substitutes: fallo consultando alineaciones reales (Fotmob), sigo solo con is_injury_status: {e}")
 
