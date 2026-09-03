@@ -940,6 +940,26 @@ solo un `print` visible en el log de Actions si alguien lo revisa a mano.
 Volver a poner `ENABLE_BOT=true` (o borrar la variable) reactiva todo tal
 cual estaba.
 
+## Forzar `set_lineup` fuera de su ventana horaria (`FORCE_RUN`)
+
+`jobs/set_lineup.py` solo se ejecuta de verdad dentro de la ventana local
+17:23-21:43 Europe/Madrid (ver `LOCAL_WINDOW_START`/`LOCAL_WINDOW_END` en
+el propio archivo y `scheduling.py`) — pensada para el caso normal de
+LaLiga, jornada de viernes por la tarde/noche. Si una jornada se adelanta
+(entre semana, o un primer partido antes de lo habitual) y hace falta
+fijar alineación fuera de esa ventana, `FORCE_RUN=true` salta SOLO ese
+filtro (no el de `ENABLE_BOT`, que sigue mandando si está en `false`):
+
+```
+FORCE_RUN=true python -m jobs.set_lineup
+```
+
+También vale como variable de entorno (`env:`) en un `workflow_dispatch`
+manual del workflow `set_lineup` si se lanza desde la pestaña `Actions`
+en vez de en local. El cron automático de `set_lineup.yml` no la pasa, así
+que las ejecuciones programadas siguen respetando la ventana como hasta
+ahora.
+
 ## Activar el cron en GitHub Actions
 
 `.env` es SOLO para ejecuciones locales — GitHub Actions no lo lee. El cron

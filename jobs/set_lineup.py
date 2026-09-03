@@ -96,6 +96,7 @@ engañosa, cada vez que tocaba este tipo de intercambio (probablemente el
 caso más común de cambio de alineación semana a semana).
 """
 import json
+import os
 from datetime import datetime, timezone
 
 import config
@@ -279,10 +280,19 @@ if __name__ == "__main__":
     # el porqué: el cron de GitHub Actions cubre, en UTC, un rango más
     # ancho que la ventana local real para no depender de si hay cambio de
     # hora o no).
+    #
+    # `FORCE_RUN=true` salta este filtro (pero NO el de ENABLE_BOT) --
+    # pensado para lanzar el job a mano (terminal o `workflow_dispatch`
+    # manual) cuando una jornada se adelanta y el momento real en que hace
+    # falta fijar alineación cae fuera de la ventana 17:23-21:43 local
+    # (p. ej. jornada entre semana, o un primer partido antes de lo
+    # habitual un viernes). El cron automático de set_lineup.yml no pasa
+    # esta variable, así que sigue respetando la ventana como hasta ahora.
+    force_run = os.getenv("FORCE_RUN", "false").strip().lower() in ("true", "1", "yes")
     if not config.ENABLE_BOT:
         print("set_lineup: ENABLE_BOT=false, no se ejecuta.")
-    elif not is_within_local_window(datetime.now(timezone.utc), LOCAL_WINDOW_START, LOCAL_WINDOW_END):
-        print(f"set_lineup: fuera de la ventana horaria local ({LOCAL_WINDOW_START[0]:02d}:{LOCAL_WINDOW_START[1]:02d}-{LOCAL_WINDOW_END[0]:02d}:{LOCAL_WINDOW_END[1]:02d} Europe/Madrid), no se ejecuta.")
+    elif not force_run and not is_within_local_window(datetime.now(timezone.utc), LOCAL_WINDOW_START, LOCAL_WINDOW_END):
+        print(f"set_lineup: fuera de la ventana horaria local ({LOCAL_WINDOW_START[0]:02d}:{LOCAL_WINDOW_START[1]:02d}-{LOCAL_WINDOW_END[0]:02d}:{LOCAL_WINDOW_END[1]:02d} Europe/Madrid), no se ejecuta. Usa FORCE_RUN=true para saltarte este filtro.")
     else:
         with track_job_run("set_lineup"):
             run()
