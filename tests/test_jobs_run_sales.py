@@ -213,6 +213,14 @@ def test_run_sales_never_lists_player_that_would_leave_position_uncovered(tmp_db
 
 
 def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_db):
+    """
+    Regresión (2026-09-07, mismo fix que TODO.md #18 aplicó a `bids.error`
+    -- ver docstring de _persist_sale): antes solo se guardaba el `reason`
+    de NEGOCIO (por qué decide_sales() decidió vender), no el motivo por el
+    que Futmondo rechazó el listado -- un fallo repetido (caso real:
+    Galarreta, 14 intentos fallidos seguidos el 2026-09-01/02 antes de
+    resolverse) no se podía diagnosticar desde la BD después de los hechos.
+    """
     roster = [dict(p) for p in ROSTER_442_BASE]
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})
     _mark_won(25, 700_000)
@@ -235,8 +243,9 @@ def test_run_sales_business_rejection_is_audited_as_failed_without_crashing(tmp_
         run_sales.run()  # no debe lanzar
 
     with get_connection() as conn:
-        row = conn.execute("SELECT status FROM sales").fetchone()
+        row = conn.execute("SELECT status, error FROM sales").fetchone()
     assert row["status"] == "failed"
+    assert row["error"] == "algo salió mal"
 
 
 def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):

@@ -181,12 +181,24 @@ from engine.squad_risk import assess_squad_depth
 from notifier import notify, track_job_run, format_number
 
 
-def _persist_sale(conn, decision: dict, status: str, now: str) -> int:
-    """Devuelve el `id` real de la fila insertada -- hace falta para `save_swap_target()` (ver `run()`)."""
+def _persist_sale(conn, decision: dict, status: str, now: str, error: str | None = None) -> int:
+    """
+    Devuelve el `id` real de la fila insertada -- hace falta para `save_swap_target()` (ver `run()`).
+
+    `error`: mensaje real del fallo (`str(excepción)`) cuando `status` es
+    'failed' -- mismo fix que TODO.md #18 aplicó a `bids.error` (ver
+    jobs/run_market.py._persist_bid): antes solo se guardaba
+    `decision["reason"]` (la justificación de NEGOCIO de por qué
+    decide_sales() eligió vender, no el motivo por el que Futmondo rechazó
+    el listado), así que un fallo repetido (caso real: Galarreta, 14
+    intentos fallidos seguidos el 2026-09-01/02 antes de resolverse) no se
+    podía diagnosticar desde la BD después de los hechos -- solo vivía en
+    el mensaje de Telegram de esa pasada concreta.
+    """
     cur = conn.execute(
         """
-        INSERT INTO sales (player_id, asking_price, purchase_price, profit, profit_pct, status, reason, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sales (player_id, asking_price, purchase_price, profit, profit_pct, status, reason, error, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(decision["player_id"]),
@@ -196,6 +208,7 @@ def _persist_sale(conn, decision: dict, status: str, now: str) -> int:
             decision["profit_pct"],
             status,
             decision["reason"],
+            error,
             now,
         ),
     )
@@ -643,7 +656,7 @@ def run():
                     )
                 listed.append(decision)
             except (requests.RequestException, FutmondoOfferError) as e:
-                _persist_sale(conn, decision, "failed", now)
+                _persist_sale(conn, decision, "failed", now, error=str(e))
                 failed.append((decision, str(e)))
 
     report_lines.append(f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy}).")

@@ -364,6 +364,30 @@ def run():
     roster_players = roster.get("answer", [])
     market_players = market.get("answer", [])
 
+    # Reconciliar el estado de nuestras propias pujas (ver docstring de
+    # _reconcile_bids) ANTES del backfill de plantilla inicial de abajo --
+    # bug real corregido 2026-09-07: con el orden anterior (backfill
+    # primero), un jugador ganado por puja REAL el mismo día en que corre
+    # este sync todavía tenía su fila 'placed' sin resolver en el momento
+    # del backfill -- _backfill_initial_squad_bids() solo mira filas 'won'
+    # existentes, así que lo confundía con un jugador de plantilla inicial
+    # y le insertaba una fila 'won' SINTÉTICA por su VM de HOY (que puede
+    # no coincidir con lo realmente pagado). update_bid_status() actualiza
+    # la fila 'placed' original IN PLACE (mismo id), así que el resultado
+    # eran DOS filas 'won' para el mismo jugador -- y get_won_bid_prices()
+    # se queda con la de mayor `id` (la más reciente insertada), que es
+    # justo la sintética, no la real. Esto corrompía silenciosamente el
+    # "precio de compra" usado por engine.selling_strategy.decide_sales()
+    # para calcular profit/profit_pct en cualquier venta posterior de ese
+    # jugador. Reconciliando primero, la fila real ya está 'won' cuando
+    # backfill mira "¿ya tiene alguna fila 'won'?" y la salta, como debía.
+    # No depende de que las filas de `players` existan todavía (opera solo
+    # sobre `bids`, ver _reconcile_bids/update_bid_status), así que puede
+    # ir antes del upsert de roster/mercado sin problema.
+    roster_player_ids = {str(p["id"]) for p in roster_players}
+    market_player_ids = {str(p["id"]) for p in market_players}
+    reconciled = _reconcile_bids(roster_player_ids, market_player_ids)
+
     # Cuenta de cuántos cruces salieron de cada nivel de confianza (ver
     # clients.laliga_stats_client.match_player) — permite ver en la
     # notificación si el cruce se está apoyando demasiado en las
@@ -396,16 +420,19 @@ def run():
             _cross_with_understat(conn, player)
 
         # Backfill de pujas 'won' sintéticas para la plantilla inicial (ver
-        # docstring de _backfill_initial_squad_bids) -- necesita que las filas
-        # de `players` ya existan (FK), por eso va tras el upsert de roster.
+        # docstring de _backfill_initial_squad_bids) -- necesita que las
+        # filas de `players` ya existan (FK), por eso va tras el upsert de
+        # roster. Y necesita, sobre todo, que `_reconcile_bids` de arriba ya
+        # haya corrido: si una puja real de hoy siguiera en 'placed' aquí,
+        # el backfill la confundiría con plantilla inicial y crearía una
+        # fila 'won' sintética duplicada (ver comentario extenso más arriba
+        # sobre el bug real que esto corrigió, 2026-09-07).
         backfilled = _backfill_initial_squad_bids(conn, roster_players, now)
 
-    # Reconciliar el estado de nuestras propias pujas (ver docstring de
-    # _reconcile_bids): ninguna otra parte del bot actualiza 'placed' a
-    # 'won'/'lost' después de colocarlas.
-    roster_player_ids = {str(p["id"]) for p in roster_players}
-    market_player_ids = {str(p["id"]) for p in market_players}
-    reconciled = _reconcile_bids(roster_player_ids, market_player_ids)
+    # `reconciled` ya se calculó arriba, ANTES del backfill (ver comentario
+    # de más arriba) -- aquí solo quedan las reconciliaciones que sí pueden
+    # ir después sin riesgo (ventas propias / rescate por riesgo de
+    # plantilla, ninguna interactúa con el backfill de bids).
     sold = _reconcile_sales(roster_player_ids)
     rescued = _rescue_sales_at_risk(client, roster_players)
 

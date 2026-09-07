@@ -146,7 +146,13 @@ CREATE TABLE IF NOT EXISTS sales (
     profit          INTEGER,                -- asking_price - purchase_price
     profit_pct      REAL,
     status          TEXT NOT NULL,          -- 'listed' | 'sold' | 'delisted' | 'failed'
-    reason          TEXT,
+    reason          TEXT,                   -- justificación de negocio (por qué decide_sales() eligió vender)
+    error           TEXT,                   -- mensaje real del fallo (str(excepción)) si status='failed' -- ver
+                                             -- _ensure_column más abajo y _persist_sale() en jobs/run_sales.py.
+                                             -- Mismo fix que TODO.md #18 aplicó a `bids.error`: sin esto, un
+                                             -- fallo de listado repetido (caso real: Galarreta, 14 intentos
+                                             -- fallidos seguidos el 2026-09-01/02 antes de venderse) solo vivía
+                                             -- en el mensaje de Telegram de esa pasada, no en la BD.
     created_at      TEXT NOT NULL
 );
 
@@ -284,6 +290,7 @@ def init_db():
         _ensure_column(conn, "futmondo_snapshots", "listing_price", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "is_clause", "INTEGER")
         _ensure_column(conn, "bids", "error", "TEXT")
+        _ensure_column(conn, "sales", "error", "TEXT")
 
 
 # Última fila de futmondo_snapshots/external_stats por jugador (usa

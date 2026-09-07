@@ -281,6 +281,59 @@ def test_run_full_job_backfills_won_bid_for_initial_squad_player(tmp_db, roster_
     assert "Pujas 'won' sintéticas añadidas para plantilla inicial: 1" in captured[-1]
 
 
+def test_run_reconciles_todays_real_bid_before_backfill_no_duplicate_won_row(tmp_db, roster_player_factory):
+    """
+    Regresión de un bug real (corregido 2026-09-07, ver conversación: el
+    "precio de compra" registrado no coincidía con lo realmente pagado):
+    una puja REAL colocada por el bot y ganada el mismo día en que corre
+    este sync todavía está 'placed' en `bids` cuando arranca run() -- con
+    el orden antiguo (backfill de plantilla inicial ANTES de reconciliar
+    pujas), _backfill_initial_squad_bids() no veía todavía ninguna fila
+    'won' para ese jugador y lo confundía con plantilla inicial,
+    insertando una fila 'won' SINTÉTICA por su VM actual -- update_bid_
+    status() actualiza la fila 'placed' original in place (mismo id), así
+    que quedaban DOS filas 'won' para el mismo jugador, y get_won_bid_
+    prices() (ORDER BY id DESC) se quedaba con la sintética, no con el
+    precio real pagado, corrompiendo profit/profit_pct en la venta
+    posterior de ese jugador (engine.selling_strategy.decide_sales()).
+
+    Con el orden correcto (reconciliar primero), la fila real ya está
+    'won' cuando el backfill mira "¿ya tiene alguna fila 'won'?" y la
+    salta -- solo debe quedar UNA fila 'won', con el precio REAL pagado
+    (bids.amount), no el VM del roster de hoy.
+    """
+    real_price_paid = 3_200_000
+    current_vm_today = 4_603_280  # distinto a propósito -- el VM sube tras un fichaje que sale bien
+    roster_player = roster_player_factory(id=1001, name="Fichaje de Hoy", role="defensa", value=current_vm_today)
+
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, score, created_at) VALUES (?,?,?,?,?)",
+            ("1001", real_price_paid, "placed", 0.80, NOW),
+        )
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", {})):
+        sync_data.run()
+
+    from db.models import get_won_bid_prices
+
+    assert get_won_bid_prices() == {"1001": real_price_paid}
+    with get_connection() as conn:
+        won_rows = conn.execute("SELECT amount FROM bids WHERE player_id = '1001' AND status = 'won'").fetchall()
+    assert len(won_rows) == 1  # nunca una fila 'won' duplicada (real + sintética)
+    assert "Pujas 'won' sintéticas añadidas para plantilla inicial" not in captured[-1]
+
+
 def test_run_full_job_with_fake_client(tmp_db, roster_player_factory):
     roster_player = roster_player_factory(id=1001, name="Jugador Propio", role="defensa")
 
