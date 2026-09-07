@@ -223,9 +223,18 @@ def test_lineup_weights_dont_penalize_expensive_player_by_price():
     """
     Regresión del sesgo real detectado probando jobs/set_lineup.py con
     datos sintéticos (ver README): un jugador caro pero mejor en todo lo
-    demás puede salir peor puntuado que uno barato y mediocre solo por el
-    precio si se usan los pesos de PUJA para elegir alineación; con los
-    pesos de ALINEACIÓN (sin futmondo_points_per_price) no debe pasar.
+    demás no debe salir peor puntuado que uno barato y mediocre solo por
+    el precio -- ni con los pesos de ALINEACIÓN (sin
+    "futmondo_points_per_price", precio = coste hundido) ni, desde
+    2026-09-07, con los de PUJA: el peso de "futmondo_points_per_price" se
+    bajó de 0.35 a 0.10 precisamente porque, al ser una ratio puntos/precio,
+    favorecía sistemáticamente al barato mediocre sobre el caro realmente
+    mejor (ver comentario de EVALUATOR_WEIGHTS en config.py y la
+    conversación que lo motivó: fichajes de relleno mientras el
+    presupuesto se acumulaba). El residuo de peso en precio (0.10) sigue
+    ahí a propósito -- en compra el precio es dinero real todavía sin
+    gastar, a diferencia de la alineación -- pero ya no basta para tapar
+    una diferencia real de rendimiento como la de este test.
 
     Se llama a score_player() directamente con features ya normalizadas
     (no via evaluate_players/normalize_pool) para poder fijar valores
@@ -247,8 +256,8 @@ def test_lineup_weights_dont_penalize_expensive_player_by_price():
         "is_injured_or_doubtful": False,
     }
 
-    assert score_player(barato_mediocre, weights=config.EVALUATOR_WEIGHTS) > score_player(
-        caro_mejor, weights=config.EVALUATOR_WEIGHTS
+    assert score_player(caro_mejor, weights=config.EVALUATOR_WEIGHTS) > score_player(
+        barato_mediocre, weights=config.EVALUATOR_WEIGHTS
     )
     assert score_player(caro_mejor, weights=config.LINEUP_EVALUATOR_WEIGHTS) > score_player(
         barato_mediocre, weights=config.LINEUP_EVALUATOR_WEIGHTS

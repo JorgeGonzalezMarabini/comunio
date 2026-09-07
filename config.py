@@ -120,11 +120,34 @@ ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower(
 # con más peso que antes (0.10 -> 0.20, el doble) porque antes esa misma
 # penalización suave se repartía entre dos casos bien distintos (duda Y
 # lesión confirmada) sin que ninguno de los dos estuviera bien servido.
+# REBALANCEADO (2026-09-07, a petición del usuario -- ver conversación:
+# sensación de comprar/alinear jugadores de poco valor mientras el
+# presupuesto crece sin parar). Antes "futmondo_points_per_price" pesaba
+# 0.35, el más alto de los cuatro -- al ser una RATIO (puntos por millón
+# gastado, ver evaluator.normalize_pool), y dado que el precio de un
+# jugador sube más que proporcionalmente respecto a sus puntos según sube
+# de nivel, ese peso favorecía SISTEMÁTICAMENTE a jugadores baratos con
+# buena ratio frente a jugadores caros de rendimiento absoluto muy
+# superior, sea cual sea el presupuesto disponible -- confirmado con datos
+# reales de producción (16 días, 2026-08-22 a 2026-09-07): 76% de los
+# fichajes fueron al precio suelo del juego (1.0-1.6M) y la mayoría
+# acumulaban 0 goles/asistencias y xG≈0, mientras el presupuesto crecía
+# +29M netos por vender más de lo que se reinvertía. El propio código ya
+# reconocía este sesgo y lo corregía para ELEGIR ALINEACIÓN
+# (LINEUP_EVALUATOR_WEIGHTS pone este peso a 0, ver docstring de abajo),
+# pero nunca se aplicó la misma corrección a la fase de COMPRA. Bajado a
+# 0.10 (deja de ser el factor dominante, pero no desaparece del todo --
+# a diferencia de la alineación, en compra el precio SÍ es dinero real
+# todavía sin gastar) y redistribuido hacia las tres señales de
+# rendimiento que no dependen del precio (xg, trend, minutes_played) --
+# la suma de pesos positivos se mantiene en 0.90, igual que antes (ver
+# rango típico documentado en engine/evaluator.score_player). Sin
+# calibrar todavía con resultados reales tras el cambio.
 EVALUATOR_WEIGHTS = {
-    "futmondo_points_per_price": 0.35,  # rendimiento Futmondo relativo al precio
-    "futmondo_trend": 0.15,             # tendencia de puntuación reciente
-    "xg": 0.25,                         # expected goals (Understat)
-    "minutes_played": 0.15,             # continuidad / peso en su equipo
+    "futmondo_points_per_price": 0.10,  # rendimiento Futmondo relativo al precio
+    "futmondo_trend": 0.20,             # tendencia de puntuación reciente
+    "xg": 0.40,                         # expected goals (Understat)
+    "minutes_played": 0.20,             # continuidad / peso en su equipo
     "doubt_penalty": 0.20,              # penalización si en duda (no lesión confirmada, esa se descarta antes)
 }
 
@@ -222,6 +245,39 @@ BIDDING_DYNAMIC_CAP_WEIGHTS = {
 # Score mínimo (ver engine/evaluator.score_player) para considerar pujar por
 # un jugador. Punto de partida sin calibrar con datos reales todavía.
 BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.15"))
+
+# --- "Presupuesto objetivo" (a petición del usuario, 2026-09-07) ---
+# Hasta ahora el presupuesto disponible solo subía un TECHO pasivo (cuánto
+# se puede llegar a pujar por un jugador, ver dynamic_player_cap) -- nunca
+# exigía más calidad: BIDDING_MIN_SCORE_THRESHOLD era fijo pasase lo que
+# pasase con la caja acumulada. Combinado con el sesgo de EVALUATOR_WEIGHTS
+# hacia "puntos por precio" (ver comentario de arriba, corregido el mismo
+# día), esto dejaba pasar fichajes de relleno con la primera puja que
+# superase el umbral, aunque el presupuesto ya estuviera muy por encima de
+# lo que la plantilla necesitaba para funcionar -- exactamente el patrón
+# visto en producción (caja neta +29M en 16 días sin que el umbral de
+# compra se moviera ni un punto). Ver
+# engine.bidding_strategy.dynamic_min_score_threshold, usado por
+# jobs/run_market.py en vez del umbral fijo a secas.
+#
+# % del capital total del equipo (presupuesto + valor de mercado de toda la
+# plantilla) que se considera una reserva de caja SANA -- por debajo de
+# esto no sube nada el umbral, tener colchón es normal y deseable (ver
+# BIDDING_SAFETY_LIMITS["min_budget_reserve"]). Sin calibrar todavía con
+# resultados reales.
+BIDDING_IDLE_CASH_TARGET_PCT = float(os.getenv("BIDDING_IDLE_CASH_TARGET_PCT", "0.35"))
+
+# Cuánto puede llegar a subir BIDDING_MIN_SCORE_THRESHOLD (aditivo) cuando
+# TODO el capital del equipo es presupuesto sin invertir (caso extremo,
+# squad_value=0) -- escala LINEALMENTE entre BIDDING_IDLE_CASH_TARGET_PCT
+# (boost 0) y 100% caja (boost máximo), ver dynamic_min_score_threshold.
+# Con el suelo de 0.15 y este máximo, el umbral puede llegar como mucho a
+# 0.35 -- todavía por debajo del score de un jugador sano en buena forma
+# (ver test_score_player_weights_and_injury_penalty, máximo positivo
+# 0.90), así que nunca bloquea un fichaje realmente bueno, solo relleno
+# mediocre que hoy pasaría el umbral fijo solo porque hay caja de sobra.
+# Sin calibrar todavía con resultados reales.
+BIDDING_IDLE_CASH_MAX_THRESHOLD_BOOST = float(os.getenv("BIDDING_IDLE_CASH_MAX_THRESHOLD_BOOST", "0.20"))
 
 # Cuánto sube el score de un candidato de mercado si su posición tiene
 # riesgo de plantilla (ver engine.squad_risk.assess_squad_depth: sin

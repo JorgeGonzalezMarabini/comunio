@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from engine.bidding_strategy import (
     apply_position_priority,
     decide_bid,
     decide_bids_for_market,
+    dynamic_min_score_threshold,
     dynamic_player_cap,
     find_cancel_swap_candidates,
     find_deficit_rescue_swaps,
@@ -271,6 +274,95 @@ def test_dynamic_player_cap_budget_component_scales_with_remaining_budget():
     cap_low_budget = dynamic_player_cap(remaining_budget=5_000_000, squad=squad, market_candidates=market)
     cap_high_budget = dynamic_player_cap(remaining_budget=500_000_000, squad=squad, market_candidates=market)
     assert cap_high_budget > cap_low_budget
+
+
+# --- dynamic_min_score_threshold ("presupuesto objetivo", 2026-09-07) ---
+
+
+def test_dynamic_min_score_threshold_no_boost_below_target_idle_cash_pct():
+    """
+    Con caja por debajo de la reserva "sana" (target_idle_cash_pct), el
+    umbral no debe subir nada -- tener algo de colchón es normal.
+    """
+    threshold = dynamic_min_score_threshold(
+        remaining_budget=30_000_000,
+        squad_value_total=70_000_000,  # idle_ratio = 0.30 < target 0.35
+        base_threshold=0.15,
+        target_idle_cash_pct=0.35,
+        max_idle_cash_boost=0.20,
+    )
+    assert threshold == 0.15
+
+
+def test_dynamic_min_score_threshold_scales_linearly_above_target():
+    """idle_ratio a mitad de camino entre el target y el 100% -> mitad del boost máximo."""
+    # target=0.35, boost máx=0.20 -> a idle_ratio=0.675 (mitad entre 0.35 y 1.0) el boost debe ser 0.10
+    threshold = dynamic_min_score_threshold(
+        remaining_budget=675,
+        squad_value_total=325,  # idle_ratio = 675/1000 = 0.675
+        base_threshold=0.15,
+        target_idle_cash_pct=0.35,
+        max_idle_cash_boost=0.20,
+    )
+    assert threshold == pytest.approx(0.25)
+
+
+def test_dynamic_min_score_threshold_approaches_max_boost_as_squad_value_shrinks():
+    """Con casi todo el capital en caja (plantilla de valor residual, no vacía), el boost tiende al máximo."""
+    threshold = dynamic_min_score_threshold(
+        remaining_budget=100_000_000,
+        squad_value_total=1,  # residual, no 0 -- 0 es el caso degenerado (ver test de abajo)
+        base_threshold=0.15,
+        target_idle_cash_pct=0.35,
+        max_idle_cash_boost=0.20,
+    )
+    assert threshold == pytest.approx(0.35, abs=1e-6)
+
+
+def test_dynamic_min_score_threshold_empty_squad_returns_base_not_max_boost():
+    """
+    Regresión (2026-09-07): plantilla vacía (squad_value_total=0, típico al
+    empezar la temporada o justo tras un roster vaciado) NO debe disparar
+    el boost máximo -- sin plantilla previa con la que comparar, todo el
+    presupuesto es "sin invertir" por definición, pero eso no es la caja
+    OCIOSA que este umbral quiere frenar (mismo razonamiento que el suelo
+    de dynamic_player_cap ante plantilla/mercado vacíos). Detectado como
+    regresión real en jobs/run_market.py: bloqueaba TODAS las pujas de un
+    equipo recién creado, no solo el relleno.
+    """
+    threshold = dynamic_min_score_threshold(
+        remaining_budget=100_000_000,
+        squad_value_total=0,
+        base_threshold=0.15,
+        target_idle_cash_pct=0.35,
+        max_idle_cash_boost=0.20,
+    )
+    assert threshold == 0.15
+
+
+def test_dynamic_min_score_threshold_degenerate_case_returns_base():
+    """Sin presupuesto ni plantilla (caso degenerado) -> no hay capital que calificar de ocioso."""
+    threshold = dynamic_min_score_threshold(
+        remaining_budget=0, squad_value_total=0, base_threshold=0.15, target_idle_cash_pct=0.35, max_idle_cash_boost=0.20
+    )
+    assert threshold == 0.15
+
+
+def test_dynamic_min_score_threshold_raises_bar_high_enough_to_filter_real_world_filler(monkeypatch):
+    """
+    Regresión con datos reales de producción (ver conversación 2026-09-07):
+    con el presupuesto muy por encima del valor de la plantilla (caso real
+    detectado), el umbral sube lo bastante como para descartar un
+    candidato de relleno que antes sí se pujaba (score justo por encima
+    del umbral fijo 0.15), sin bloquear un candidato realmente bueno.
+    """
+    # Caso real aproximado: plantilla ~48.7M de VM, presupuesto muy por
+    # encima de eso tras varias ventas sin reinvertir (ver diagnóstico).
+    threshold = dynamic_min_score_threshold(remaining_budget=150_000_000, squad_value_total=48_748_104)
+    filler_candidate = {"score": 0.20, "price": 1_200_000}  # relleno, score apenas sobre el umbral fijo
+    good_candidate = {"score": 0.70, "price": 12_000_000}  # rendimiento alto de verdad
+    assert is_price_worth_bidding(filler_candidate, min_score_threshold=threshold) is False
+    assert is_price_worth_bidding(good_candidate, min_score_threshold=threshold) is True
 
 
 def test_decide_bid_uses_dynamic_player_cap_to_allow_bid_above_old_fixed_cap():

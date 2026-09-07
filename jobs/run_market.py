@@ -247,6 +247,7 @@ from engine.bidding_strategy import (
     apply_position_priority,
     decide_bid,
     decide_bids_for_market,
+    dynamic_min_score_threshold,
     dynamic_player_cap,
     find_cancel_swap_candidates,
     find_deficit_rescue_swaps,
@@ -528,10 +529,21 @@ def run():
     # presupuesto disponible.
     player_cap = dynamic_player_cap(remaining_budget, squad_raw, ranked)
 
+    # "Presupuesto objetivo" (ver engine.bidding_strategy.
+    # dynamic_min_score_threshold y config.py, 2026-09-07): cuanta más caja
+    # ociosa haya respecto al valor de la plantilla, más exigente el umbral
+    # mínimo de score -- así el presupuesto acumulado deja de traducirse en
+    # fichajes de relleno solo porque "hay dinero de sobra". `squad_raw`
+    # trae "price" (VM real, ver db.models.get_player_features) igual que
+    # ya consume dynamic_player_cap() arriba.
+    squad_value_total = sum(p["price"] for p in squad_raw if p.get("price"))
+    min_score_threshold = dynamic_min_score_threshold(remaining_budget, squad_value_total)
+
     decisions = decide_bids_for_market(
         prioritized,
         remaining_budget,
         already_risked,
+        min_score_threshold=min_score_threshold,
         max_bids=available_roster_slots,
         pending_committed=pending_committed,
         player_cap=player_cap,
@@ -544,8 +556,15 @@ def run():
     # calculan SIEMPRE (incluso si `decisions` está vacío) porque el caso
     # más útil del swap es justo cuando presupuesto o plazas están tan
     # ajustados que nada nuevo entra por la vía normal -- ver TODO.md #13.
+    # Mismo `min_score_threshold` dinámico que decide_bids_for_market, para
+    # que "bloqueado" siga significando "bloqueado por presupuesto/tope",
+    # no por un umbral distinto al que de verdad se aplicó arriba.
     decided_ids = {d["player_id"] for d in decisions}
-    blocked_candidates = [c for c in prioritized if c["id"] not in decided_ids and is_price_worth_bidding(c)]
+    blocked_candidates = [
+        c
+        for c in prioritized
+        if c["id"] not in decided_ids and is_price_worth_bidding(c, min_score_threshold=min_score_threshold)
+    ]
 
     # Pujas propias abiertas "sacrificables" -- se construye SIEMPRE (no
     # solo si hay `blocked_candidates`), porque la reusan dos fases: el
@@ -804,6 +823,7 @@ def run():
                     candidate,
                     remaining_budget,
                     risked_after_decisions,
+                    min_score_threshold=min_score_threshold,
                     pending_committed=pending_after_swap,
                     player_cap=player_cap,
                 )
@@ -841,7 +861,12 @@ def run():
     # plantilla (posición sin cuerpos suficientes), no un candidato mejor
     # bloqueado por presupuesto/tope -- por eso `decide_bid()` de abajo NO
     # exige ningún margen de score frente al sacrificio, a diferencia del
-    # swap normal. Fase APARTE, tras el swap normal -- `deficit_rescue_
+    # swap normal. Por el mismo motivo tampoco se le pasa el
+    # `min_score_threshold` dinámico ("presupuesto objetivo", ver arriba):
+    # subir el listón de calidad porque sobra caja no tiene sentido cuando
+    # lo urgente es tapar un agujero real de plantilla -- se queda con el
+    # umbral fijo de config.BIDDING_MIN_SCORE_THRESHOLD, igual que antes de
+    # este cambio. Fase APARTE, tras el swap normal -- `deficit_rescue_
     # proposals` ya excluyó cualquier puja que ese swap fuera a sacrificar
     # en esta misma pasada (ver `swap_sacrificed_bid_ids` de arriba).
     deficit_rescued, deficit_rescue_failed = [], []

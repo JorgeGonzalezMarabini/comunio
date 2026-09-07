@@ -96,6 +96,77 @@ def dynamic_player_cap(
     return max(limits["max_spend_per_player_floor"], int(blended))
 
 
+def dynamic_min_score_threshold(
+    remaining_budget: int,
+    squad_value_total: int,
+    base_threshold: float = None,
+    target_idle_cash_pct: float = None,
+    max_idle_cash_boost: float = None,
+) -> float:
+    """
+    "Presupuesto objetivo" (a petición del usuario, 2026-09-07 -- ver
+    conversación: sensación de comprar/alinear jugadores de poco valor
+    mientras el presupuesto crece sin parar). Hasta ahora el presupuesto
+    disponible solo subía un TECHO pasivo (dynamic_player_cap: cuánto se
+    puede llegar a pujar por UN jugador) -- nunca exigía más calidad:
+    `config.BIDDING_MIN_SCORE_THRESHOLD` era un número fijo pasase lo que
+    pasase con la caja acumulada, así que un candidato mediocre que apenas
+    lo superase se pujaba igual con poco presupuesto que con mucho.
+
+    Sube el umbral mínimo de score a medida que crece la fracción del
+    capital total del equipo (presupuesto + valor de mercado de la
+    plantilla, `squad_value_total`) que está sin invertir:
+
+        idle_ratio = remaining_budget / (remaining_budget + squad_value_total)
+
+    Por debajo de `target_idle_cash_pct` (config.BIDDING_IDLE_CASH_
+    TARGET_PCT, reserva de caja "sana") no sube nada -- tener algo de
+    colchón es normal y deseable (ver BIDDING_SAFETY_LIMITS
+    ["min_budget_reserve"]). Por encima, el umbral sube LINEALMENTE hasta
+    `base_threshold + max_idle_cash_boost` (config.BIDDING_IDLE_CASH_
+    MAX_THRESHOLD_BOOST) en el caso extremo de que el 100% del capital sea
+    caja sin invertir (squad_value_total=0 -- plantilla vacía o sin
+    precio).
+
+    No fuerza a gastar -- `decide_bid()` sigue anclando el importe al VM
+    real del jugador, nunca puja "porque sobra dinero". Lo que hace este
+    umbral más exigente es que la caja ociosa deje de traducirse
+    automáticamente en fichajes de relleno con la primera puja que supere
+    el listón: si el mercado de hoy no trae nada realmente bueno, mejor
+    dejar que el presupuesto se acumule un poco más que conformarse con un
+    jugador mediocre solo porque "hay dinero de sobra".
+
+    `squad_value_total <= 0` (plantilla vacía o sin precio -- caso
+    degenerado, típico al empezar la temporada antes del primer fichaje,
+    mismo razonamiento que el suelo de `dynamic_player_cap`) devuelve
+    `base_threshold` sin modificar: sin plantilla previa con la que
+    comparar, todo el presupuesto es "sin invertir" por definición, pero
+    eso no es la caja OCIOSA que este umbral quiere frenar -- es
+    simplemente que el equipo todavía no ha empezado a fichar. Sin este
+    reparo, un equipo recién creado (o con la plantilla momentáneamente
+    vaciada) vería el umbral disparado al máximo y no podría empezar a
+    construir plantilla.
+    """
+    base_threshold = config.BIDDING_MIN_SCORE_THRESHOLD if base_threshold is None else base_threshold
+    target_idle_cash_pct = (
+        config.BIDDING_IDLE_CASH_TARGET_PCT if target_idle_cash_pct is None else target_idle_cash_pct
+    )
+    max_idle_cash_boost = (
+        config.BIDDING_IDLE_CASH_MAX_THRESHOLD_BOOST if max_idle_cash_boost is None else max_idle_cash_boost
+    )
+
+    squad_value_total = max(0, squad_value_total)
+    if squad_value_total <= 0:
+        return base_threshold
+
+    budget = max(0, remaining_budget)
+    idle_ratio = budget / (budget + squad_value_total)
+    excess = max(0.0, idle_ratio - target_idle_cash_pct)
+    normalizer = max(1e-9, 1.0 - target_idle_cash_pct)
+    boost = (excess / normalizer) * max_idle_cash_boost
+    return base_threshold + boost
+
+
 def max_biddable_amount(
     remaining_budget: int,
     already_risked_this_matchday: int,
