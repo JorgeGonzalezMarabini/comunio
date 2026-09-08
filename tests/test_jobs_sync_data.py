@@ -492,3 +492,71 @@ def test_sync_data_main_does_not_record_job_run_when_bot_disabled(tmp_db, monkey
         count = conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
     assert count == 0
     assert "ENABLE_BOT=false" in capsys.readouterr().out
+
+
+def test_close_stale_market_listings_invalidates_player_gone_from_market_and_roster(tmp_db, market_player_factory):
+    """
+    Regresión del fallo real (2026-09-08, ver notifier.py/jobs/run_market.py):
+    `_upsert_player_and_snapshot()` solo inserta una fila nueva para
+    jugadores presentes en la respuesta ACTUAL de roster/mercado -- un
+    jugador de mercado que se resuelve (comprado por otro, retirado,
+    expira) sin llegar nunca a nuestro roster se quedaba con
+    `on_market=1` para siempre, porque nada volvía a escribir una fila que
+    lo contradijera. En vivo esto acumuló 280 "candidatos en mercado" en BD
+    con el mercado real de Futmondo en solo 16, y el resumen de
+    `run_market` (un id por descartado) acabó superando el límite de 4096
+    caracteres de Telegram.
+    """
+    market_player = market_player_factory(id=9001, name="Jugador Mercado")
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, market_player, NOW, on_market=True)
+
+    assert len(get_player_features(only_on_market=True)) == 1  # sigue en mercado esta pasada
+
+    # Pasada siguiente: el jugador ya no aparece ni en market_players ni en roster_players.
+    with get_connection() as conn:
+        closed = sync_data._close_stale_market_listings(conn, market_player_ids=set(), roster_player_ids=set(), now="2026-08-17T00:00:00+00:00")
+
+    assert closed == 1
+    assert get_player_features(only_on_market=True) == []  # ya no sale como candidato de compra
+
+
+def test_close_stale_market_listings_skips_player_still_on_market_or_roster(tmp_db, market_player_factory):
+    """No debe tocar un jugador que sigue en el mercado, ni uno que ahora está en nuestro roster (aunque su última fila diga on_market=1)."""
+    still_on_market = market_player_factory(id=9002, name="Sigue en mercado")
+    now_ours = market_player_factory(id=9003, name="Ahora en mi plantilla")
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, still_on_market, NOW, on_market=True)
+        sync_data._upsert_player_and_snapshot(conn, now_ours, NOW, on_market=True)
+        closed = sync_data._close_stale_market_listings(
+            conn, market_player_ids={"9002"}, roster_player_ids={"9003"}, now="2026-08-17T00:00:00+00:00"
+        )
+
+    assert closed == 0
+    assert {p["id"] for p in get_player_features(only_on_market=True)} == {"9002", "9003"}
+
+
+def test_run_full_job_closes_stale_market_listing_and_notifies(tmp_db, roster_player_factory, market_player_factory):
+    """Test de integración: run() completo debe invalidar un candidato de mercado de una pasada anterior que ya no aparece en ninguna respuesta, y avisarlo."""
+    roster_player = roster_player_factory(id=1001, name="Titular", role="defensa")
+    stale_market_player = market_player_factory(id=9001, name="Ya no está en mercado")
+
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, stale_market_player, NOW, on_market=True)
+    assert len(get_player_features(only_on_market=True)) == 1
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}  # el jugador de mercado de arriba ya no aparece
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=({"players": []}, "2025", {})):
+        sync_data.run()
+
+    assert get_player_features(only_on_market=True) == []
+    assert "1 candidato(s) de mercado obsoleto(s) invalidado(s)" in captured[-1]

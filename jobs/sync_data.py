@@ -270,6 +270,69 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
     )
 
 
+def _close_stale_market_listings(conn, market_player_ids: set, roster_player_ids: set, now: str) -> int:
+    """
+    Cierra (`on_market=0`) el snapshot de cualquier jugador cuya última
+    fila conocida diga `on_market=1` pero que esta pasada ya NO aparece ni
+    en `get_market()` ni en `get_roster()` -- caso real (2026-09-08, ver
+    notifier.py/jobs/run_market.py): `_upsert_player_and_snapshot()` solo
+    inserta una fila nueva para los jugadores presentes en la respuesta
+    ACTUAL de roster/mercado, así que un jugador puesto en venta por otro
+    manager que luego se resuelve (comprado, retirado, expira) sin llegar
+    nunca a nuestro roster no vuelve a tener una fila nueva que lo
+    contradiga -- su `on_market=1` de la última vez que sí estuvo en
+    mercado quedaba plantado para siempre en `latest_snapshot`
+    (`db.models._PLAYER_FEATURES_SQL`). En vivo esto acumuló 280
+    "candidatos en mercado" en BD cuando el mercado real de Futmondo solo
+    tenía 16 -- `run_market.py` los evaluaba/reportaba a todos igual (el
+    resumen de Telegram con un id por descartado por "otro manager" acabó
+    superando el límite de 4096 caracteres de sendMessage, 400 Bad
+    Request).
+
+    Solo hace falta para jugadores de MERCADO: el roster propio se
+    refresca siempre por completo cada pasada (bucle de arriba, `on_market`
+    ahí refleja si TÚ lo has puesto en venta, no si está en el mercado
+    global) así que nunca queda obsoleto por este motivo -- por eso se
+    excluye `roster_player_ids` de los candidatos a cerrar, aunque no
+    aparezca ya en el mercado, su fila de roster de ESTA MISMA pasada ya lo
+    corrige si hiciera falta.
+
+    Inserta una fila NUEVA (nunca ACTUALIZA la vieja in place -- mismo
+    espíritu que el resto de `futmondo_snapshots`, historial append-only)
+    que copia el resto de campos tal cual estaban (no hay datos frescos de
+    este jugador esta pasada, solo se corrige `on_market`) para que
+    `latest_snapshot` dejar de devolverlo como candidato de compra. Si el
+    jugador vuelve a aparecer en el mercado más adelante, esa pasada futura
+    ya inserta una fila fresca de verdad, sin relación con esta.
+
+    Devuelve cuántas filas se cerraron, para poder avisar por Telegram.
+    """
+    rows = conn.execute(
+        """
+        WITH latest_snapshot AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY recorded_at DESC) AS rn
+            FROM futmondo_snapshots
+        )
+        SELECT * FROM latest_snapshot WHERE rn = 1 AND on_market = 1
+        """
+    ).fetchall()
+    stale = [r for r in rows if r["player_id"] not in market_player_ids and r["player_id"] not in roster_player_ids]
+    for r in stale:
+        conn.execute(
+            """
+            INSERT INTO futmondo_snapshots
+                (player_id, price, buy_price, points, last_points, average_points, on_market, status,
+                 listing_price, is_clause, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            """,
+            (
+                r["player_id"], r["price"], r["buy_price"], r["points"], r["last_points"], r["average_points"],
+                r["status"], r["listing_price"], r["is_clause"], now,
+            ),
+        )
+    return len(stale)
+
+
 def _upsert_external_stats(conn, player_id: str, understat_player: dict, season: str, now: str, team_games: int = None) -> None:
     """
     `team_games`: partidos ya jugados por el equipo del jugador EN LA
@@ -419,6 +482,13 @@ def run():
             _upsert_player_and_snapshot(conn, player, now, on_market=True)  # siempre True: viene del listado de mercado
             _cross_with_understat(conn, player)
 
+        # Cierra el `on_market` de cualquier jugador de mercado que ya no
+        # aparezca ni en `market_players` ni en `roster_players` esta
+        # pasada (ver docstring de `_close_stale_market_listings`) -- va
+        # DESPUÉS de los dos upserts de arriba para operar sobre el estado
+        # ya actualizado de esta misma pasada, no sobre el de la anterior.
+        closed_stale_listings = _close_stale_market_listings(conn, market_player_ids, roster_player_ids, now)
+
         # Backfill de pujas 'won' sintéticas para la plantilla inicial (ver
         # docstring de _backfill_initial_squad_bids) -- necesita que las
         # filas de `players` ya existan (FK), por eso va tras el upsert de
@@ -452,6 +522,11 @@ def run():
     if rescued:
         detail = ", ".join(f"{r['position']} #{r['player_id']}" for r in rescued)
         message.append(f"Venta(s) cancelada(s) por riesgo de plantilla ({detail}).")
+    if closed_stale_listings:
+        message.append(
+            f"{closed_stale_listings} candidato(s) de mercado obsoleto(s) invalidado(s) "
+            "(ya no están ni en mercado ni en plantilla)."
+        )
     notify(" ".join(message))
 
 
