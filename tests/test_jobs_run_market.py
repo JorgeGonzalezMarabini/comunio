@@ -1446,3 +1446,26 @@ def test_run_market_reprice_down_aborts_cleanly_when_cancel_bid_fails(tmp_db):
         row = conn.execute("SELECT status FROM bids WHERE player_id = 'old'").fetchone()
     assert row["status"] == "placed"  # sigue igual, nunca se marcó 'cancelled'
     assert any("cancelación fallida" in m for m in captured)
+
+
+def test_format_id_list_truncates_long_lists():
+    """
+    Regresión del fallo real (2026-09-08): un desfase entre el `on_market`
+    cacheado en BD y el mercado real de Futmondo hizo que
+    `skipped_manager_listed` trajera 264 candidatos en una sola ejecución
+    -- esa línea, sin truncar, medía ~7000 caracteres ella sola e hizo que
+    el resumen entero superase el límite de 4096 de Telegram (400 Bad
+    Request en `notifier.notify()`). `_format_id_list` debe truncar a
+    `_MAX_IDS_IN_SUMMARY` ids y avisar cuántos más quedan fuera.
+    """
+    ids = [str(i) for i in range(264)]
+    result = run_market._format_id_list(ids)
+
+    assert result.startswith(", ".join(ids[: run_market._MAX_IDS_IN_SUMMARY]))
+    assert f"(y {264 - run_market._MAX_IDS_IN_SUMMARY} más)" in result
+    assert len(result) < 500  # antes: ~2000+ caracteres para 264 ids sin truncar
+
+
+def test_format_id_list_no_truncation_note_when_short():
+    ids = ["a", "b", "c"]
+    assert run_market._format_id_list(ids) == "a, b, c"

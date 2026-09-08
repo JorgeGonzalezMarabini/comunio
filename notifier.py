@@ -38,9 +38,61 @@ def format_number(value) -> str:
     return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
+# Límite duro de Telegram para `text` en sendMessage (4096 caracteres, ver
+# https://core.telegram.org/bots/api#sendmessage) -- por debajo del límite
+# real para dejar margen (Telegram cuenta en unidades UTF-16, un emoji
+# puede contar como 2 aunque `len()` de Python lo cuente como 1).
+_TELEGRAM_MAX_MESSAGE_LENGTH = 4000
+
+
+def _split_message(message: str, max_length: int = _TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
+    """
+    Trocea `message` en fragmentos <= `max_length` sin cortar líneas por la
+    mitad cuando se puede evitar -- caso real (2026-09-08): `run_market`
+    dejó de notificar por Telegram porque su resumen (candidatos
+    descartados por estar en venta de otro manager, con un id por
+    candidato) superó los 4096 caracteres que Telegram acepta como máximo
+    en un solo `sendMessage`, y la API respondía 400 Bad Request sin que
+    `notify()` lo distinguiera de cualquier otro fallo de red.
+
+    Cada fragmento (salvo el primero) se prefija con "(cont.)" para que se
+    entienda que es la continuación del mensaje anterior, no uno nuevo sin
+    relación.
+
+    Una sola línea más larga que `max_length` (no debería darse con el
+    contenido actual, pero por si acaso) se trocea sin más a lo bruto en
+    vez de enviarla igualmente y volver a fallar con 400.
+    """
+    if len(message) <= max_length:
+        return [message]
+
+    chunks = []
+    current = ""
+    for line in message.split("\n"):
+        # +1 por el "\n" que uniría `current` con `line`.
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= max_length:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        if len(line) <= max_length:
+            current = line
+        else:
+            # Línea suelta demasiado larga -- se trocea a lo bruto.
+            for i in range(0, len(line), max_length):
+                chunks.append(line[i : i + max_length])
+            current = ""
+    if current:
+        chunks.append(current)
+
+    return [chunks[0]] + [f"(cont.)\n{c}" for c in chunks[1:]]
+
+
 def notify(message: str) -> bool:
     """
-    Envía `message` al chat configurado. Devuelve True si se envió bien,
+    Envía `message` al chat configurado. Devuelve True si se envió bien
+    (todos los fragmentos, si hizo falta trocear -- ver `_split_message`),
     False si falla (nunca lanza excepción: un fallo de notificación no debe
     tumbar un job).
     """
@@ -49,17 +101,26 @@ def notify(message: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(
-            url,
-            json={"chat_id": config.TELEGRAM_CHAT_ID, "text": message},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        print(f"[notifier] Error enviando notificación: {e}")
-        return False
+    ok = True
+    for chunk in _split_message(message):
+        try:
+            resp = requests.post(
+                url,
+                json={"chat_id": config.TELEGRAM_CHAT_ID, "text": chunk},
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            # Incluye el cuerpo de la respuesta (si lo hay): Telegram manda
+            # el motivo real del 400 en el JSON ("description"), que
+            # `raise_for_status()` no expone -- antes esto se perdía y solo
+            # quedaba el genérico "400 Client Error: Bad Request".
+            detail = ""
+            if e.response is not None:
+                detail = f" -- respuesta: {e.response.text[:500]}"
+            print(f"[notifier] Error enviando notificación: {e}{detail}")
+            ok = False
+    return ok
 
 
 @contextlib.contextmanager

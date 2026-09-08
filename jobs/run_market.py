@@ -259,6 +259,32 @@ from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starte
 from notifier import notify, track_job_run, format_number
 
 
+_MAX_IDS_IN_SUMMARY = 20
+
+
+def _format_id_list(ids: list) -> str:
+    """
+    Lista de ids separados por coma para el resumen de Telegram, truncada a
+    `_MAX_IDS_IN_SUMMARY` -- caso real (2026-09-08): un desfase entre el
+    `on_market` cacheado en BD (ver `db.models.get_player_features` /
+    `jobs.sync_data`, que solo refresca ese flag para jugadores presentes
+    en el roster o mercado de la pasada actual, así que uno que sale del
+    mercado sin volver a aparecer en ninguna de las dos listas se queda
+    "on_market=1" en BD indefinidamente) y el mercado real de Futmondo hizo
+    que `skipped_manager_listed` trajera 264 candidatos en una sola
+    ejecución -- esa única línea, sin truncar, medía ~7000 caracteres ella
+    sola y hacía que el mensaje entero superase el límite de 4096 de
+    Telegram (`api.telegram.org/.../sendMessage` respondía 400 Bad
+    Request, ver notifier.py). Aparte de la protección genérica de
+    `notifier._split_message()`, truncar aquí evita además un mensaje
+    ilegible (264 ids en crudo no aportan nada a un vistazo en el móvil).
+    """
+    shown = [str(i) for i in ids[:_MAX_IDS_IN_SUMMARY]]
+    rest = len(ids) - len(shown)
+    suffix = f" (y {rest} más)" if rest > 0 else ""
+    return ", ".join(shown) + suffix
+
+
 def _persist_bid(conn, decision: dict, status: str, now: str, error: str | None = None) -> None:
     """
     `error`: mensaje real del fallo (`str(excepción)`) cuando `status`
@@ -1032,19 +1058,19 @@ def run():
     if skipped_injured:
         summary.append(
             f"🚑 {len(skipped_injured)} candidato(s) descartado(s) del mercado por lesión confirmada: "
-            + ", ".join(str(p["id"]) for p in skipped_injured)
+            + _format_id_list([p["id"] for p in skipped_injured])
         )
     if skipped_manager_listed:
         summary.append(
             f"👤 {len(skipped_manager_listed)} candidato(s) descartado(s) por estar en venta por otro manager "
             "(config.ENABLE_BIDS_ON_MANAGER_LISTINGS=false): "
-            + ", ".join(str(p["id"]) for p in skipped_manager_listed)
+            + _format_id_list([p["id"] for p in skipped_manager_listed])
         )
     if skipped_already_bid:
         summary.append(
             f"🔁 {len(skipped_already_bid)} candidato(s) en mercado con puja local ya pendiente (sin repujar, "
             "ver reajuste a la baja arriba si el VM cayó lo bastante): "
-            + ", ".join(str(p["id"]) for p in skipped_already_bid)
+            + _format_id_list([p["id"] for p in skipped_already_bid])
         )
     if roster_full:
         summary.append(
