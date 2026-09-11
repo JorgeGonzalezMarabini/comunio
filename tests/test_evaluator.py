@@ -195,6 +195,60 @@ def test_normalize_pool_minutes_ratio_falls_back_to_player_games_without_team_ga
     assert normalized[0]["minutes_played_ratio"] == 0.5  # único jugador del grupo -> empate consigo mismo
 
 
+def test_normalize_pool_clean_sheet_rate_from_team_clean_sheets_and_team_games():
+    """
+    Análisis a petición del usuario (2026-09-11): Futmondo da puntos extra
+    por portería a cero -- clean_sheet_rate = team_clean_sheets / team_games,
+    normalizado dentro del grupo de posición como el resto de features (ver
+    jobs.sync_data._team_clean_sheets_by_title()).
+    """
+    raw = [
+        {"id": "def_solido", "position": "DEF", "price": 1_000_000, "average_points": 5.0,
+         "team_games": 10, "team_clean_sheets": 8},
+        {"id": "def_goleado", "position": "DEF", "price": 1_000_000, "average_points": 5.0,
+         "team_games": 10, "team_clean_sheets": 1},
+    ]
+    normalized = normalize_pool(raw)
+    by_id = {p["id"]: p for p in normalized}
+    assert by_id["def_solido"]["clean_sheet_rate"] == 1.0
+    assert by_id["def_goleado"]["clean_sheet_rate"] == 0.0
+
+
+def test_normalize_pool_clean_sheet_rate_zero_without_team_games():
+    """Sin `team_games` (0 o ausente) no se puede calcular la tasa -- 0, igual que el resto de features sin dato."""
+    raw = [{"id": "a", "position": "DEF", "price": 1_000_000, "average_points": 5.0, "team_clean_sheets": 5}]
+    normalized = normalize_pool(raw)
+    assert normalized[0]["clean_sheet_rate"] == 0.5  # único jugador del grupo -> empate consigo mismo (valor crudo 0)
+
+
+def test_score_player_clean_sheet_rate_only_applies_to_por_and_def():
+    """
+    El bonus de portería a cero real de Futmondo es (sobre todo) para
+    POR/DEF -- score_player no debe sumarlo para MED/DEL aunque su
+    clean_sheet_rate normalizado no sea 0 (comparten el valor de su equipo).
+    """
+    weights = {
+        "futmondo_points_per_price": 0,
+        "futmondo_trend": 0,
+        "xg": 0,
+        "minutes_played": 0,
+        "clean_sheet_rate": 1.0,
+    }
+    base = {"points_per_price": 0, "trend": 0, "xg": 0, "minutes_played_ratio": 0, "clean_sheet_rate": 1.0}
+
+    assert score_player({**base, "position": "POR"}, weights=weights) == pytest.approx(1.0)
+    assert score_player({**base, "position": "DEF"}, weights=weights) == pytest.approx(1.0)
+    assert score_player({**base, "position": "MED"}, weights=weights) == pytest.approx(0.0)
+    assert score_player({**base, "position": "DEL"}, weights=weights) == pytest.approx(0.0)
+
+
+def test_score_player_ignores_clean_sheet_rate_if_weight_not_configured():
+    """Pesos sin "clean_sheet_rate" (p. ej. tests/llamadas antiguas) no deben romper ni sumar nada -- compatibilidad hacia atrás."""
+    weights = {"futmondo_points_per_price": 0, "futmondo_trend": 0, "xg": 0, "minutes_played": 0}
+    score = score_player({"clean_sheet_rate": 1.0, "position": "DEF"}, weights=weights)
+    assert score == 0.0
+
+
 def test_normalize_pool_handles_tied_values_without_crash():
     # Rango 0 en todas las features -> no debe dividir por cero
     raw = [{"id": "a", "price": 1_000_000, "average_points": 5.0}, {"id": "b", "price": 1_000_000, "average_points": 5.0}]

@@ -1032,3 +1032,23 @@ mezclado, penalizando sistemáticamente a defensas/porteros frente a
 delanteros. Corregido normalizando dentro de cada grupo de posición
 (POR/DEF/MED/DEL). Ver `tests/test_evaluator.py:58` (test de regresión) y
 `README.md` (nota "Arreglado 2026-08-17").
+
+**El score no modelaba el bonus de Futmondo por portería a cero** —
+analizado y arreglado el 2026-09-11 (a petición del usuario, que preguntó
+si dos reglas reales de puntuación de Futmondo ya estaban contempladas):
+(1) el bonus de +1 punto por jugar >60' ya se cuela de forma opaca dentro
+de "average_points"/"last_points" (Futmondo los calcula con ese bonus ya
+aplicado), así que no necesitaba señal propia; pero (2) el bonus por
+portería a cero (sobre todo a POR/DEF) no tenía NINGUNA señal en el score,
+pese a que el propio docstring de `normalize_pool()` ya reconocía el
+problema desde el fix de sesgo de xG de arriba. Añadida una nueva señal
+"clean_sheet_rate" (`team_clean_sheets / team_games` del equipo del
+jugador, ver `jobs.sync_data._team_clean_sheets_by_title()`, nueva columna
+`external_stats.team_clean_sheets`), normalizada por grupo de posición
+igual que el resto y aplicada en `score_player()` SOLO cuando `position`
+es "POR" o "DEF" (nuevo peso `clean_sheet_rate` en
+`config.EVALUATOR_WEIGHTS`/`LINEUP_EVALUATOR_WEIGHTS`). Sin calibrar
+todavía con resultados reales, igual que el resto de pesos. Ver
+`engine/evaluator.py` (`normalize_pool`/`score_player`),
+`jobs/sync_data.py`, `db/models.py`, `tests/test_evaluator.py`,
+`tests/test_jobs_sync_data.py`.

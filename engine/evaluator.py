@@ -31,6 +31,8 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
             "trend": float,              # normalizado 0..1 dentro del pool
             "xg": float,                 # normalizado 0..1 dentro del pool (xG/90)
             "minutes_played_ratio": float,  # normalizado 0..1 dentro del pool
+            "clean_sheet_rate": float,   # normalizado 0..1 dentro del pool -- solo se aplica si "position" es POR/DEF
+            "position": str,             # POR | DEF | MED | DEL -- decide si "clean_sheet_rate" cuenta (ver más abajo)
             "is_injured_or_doubtful": bool,  # duda O lesión confirmada -- consumido por "injury_penalty"
             "is_doubtful": bool,              # SOLO duda (no lesión confirmada) -- consumido por "doubt_penalty"
         }
@@ -53,10 +55,18 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
         descarta antes de llegar aquí (ver jobs/run_market.py y
         clients.futmondo_client.is_confirmed_injured_status()), así que
         no necesita penalización de score, solo la duda la necesita.
+      - "clean_sheet_rate": suma si `position` es "POR" o "DEF" (para
+        cualquier otra posición no se aplica, sea cual sea su
+        `clean_sheet_rate` -- ver docstring de `normalize_pool`). Futmondo
+        da puntos extra por portería a cero casi siempre solo a estas dos
+        posiciones (análisis a petición del usuario, 2026-09-11), así que
+        aplicarlo también a MED/DEL premiaría a sus jugadores por algo que
+        el juego no les puntúa a ellos.
 
     Devuelve un score comparable entre jugadores (mayor = mejor). Con los
-    pesos de EVALUATOR_WEIGHTS, el rango típico es aprox. [-0.20, 0.90] (la
-    suma de pesos positivos es 0.90, doubt_penalty resta hasta 0.20 más).
+    pesos de EVALUATOR_WEIGHTS, el rango típico es aprox. [-0.20, 0.90] para
+    MED/DEL (la suma de pesos positivos es 0.90, doubt_penalty resta hasta
+    0.20 más) y algo mayor para POR/DEF, que además suman "clean_sheet_rate".
 
     TODO: los pesos son un punto de partida razonado, no calibrado todavía
     contra resultados reales de la liga — ajustar con el tiempo en
@@ -71,6 +81,9 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
         + w["xg"] * player_stats.get("xg", 0)
         + w["minutes_played"] * player_stats.get("minutes_played_ratio", 0)
     )
+
+    if "clean_sheet_rate" in w and player_stats.get("position") in ("POR", "DEF"):
+        score += w["clean_sheet_rate"] * player_stats.get("clean_sheet_rate", 0)
 
     if "injury_penalty" in w and player_stats.get("is_injured_or_doubtful"):
         score -= w["injury_penalty"]
@@ -153,12 +166,24 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         todavía no publica el `history` del equipo para la temporada
         actual, o si la fila es del fallback a temporada anterior (ver
         `jobs/sync_data.py`).
+      - clean_sheet_rate: team_clean_sheets / team_games -- tasa de
+        portería a cero del EQUIPO del jugador esta temporada (0 si no se
+        conoce `team_games`, mismo criterio conservador que el resto de
+        señales cuando falta el dato; ver
+        `jobs.sync_data._team_clean_sheets_by_title()`). Es una señal de
+        EQUIPO, no del jugador individual -- todos los jugadores de un
+        mismo equipo comparten el mismo valor -- pero solo se aplica de
+        verdad a POR/DEF en `score_player` (ver su docstring), que es a
+        quienes Futmondo puntúa extra por portería a cero. Se normaliza
+        aquí igual que el resto (por grupo de posición) para que
+        `score_player` no tenga que normalizar nada por su cuenta.
     """
     n = len(raw_players)
     points_per_price = [0.0] * n
     trend = [0.0] * n
     xg90 = [0.0] * n
     minutes_ratio = [0.0] * n
+    clean_sheet_rate = [0.0] * n
 
     for i, p in enumerate(raw_players):
         price = p.get("price") or 0
@@ -175,6 +200,8 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         team_games = p.get("team_games") or 0
         if team_games > 0:
             minutes_ratio[i] = minutes / (team_games * 90)
+            team_clean_sheets = p.get("team_clean_sheets") or 0
+            clean_sheet_rate[i] = team_clean_sheets / team_games
         else:
             games = p.get("games") or 0
             minutes_ratio[i] = minutes / (games * 90) if games > 0 else 0
@@ -187,17 +214,20 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     norm_trend = [0.0] * n
     norm_xg90 = [0.0] * n
     norm_minutes = [0.0] * n
+    norm_clean_sheet = [0.0] * n
 
     for idxs in groups_idx.values():
         group_ppp = _minmax_normalize([points_per_price[i] for i in idxs])
         group_trend = _minmax_normalize([trend[i] for i in idxs])
         group_xg90 = _minmax_normalize([xg90[i] for i in idxs])
         group_minutes = _minmax_normalize([minutes_ratio[i] for i in idxs])
+        group_clean_sheet = _minmax_normalize([clean_sheet_rate[i] for i in idxs])
         for j, i in enumerate(idxs):
             norm_ppp[i] = group_ppp[j]
             norm_trend[i] = group_trend[j]
             norm_xg90[i] = group_xg90[j]
             norm_minutes[i] = group_minutes[j]
+            norm_clean_sheet[i] = group_clean_sheet[j]
 
     normalized = []
     for i, p in enumerate(raw_players):
@@ -208,6 +238,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
                 "trend": norm_trend[i],
                 "xg": norm_xg90[i],
                 "minutes_played_ratio": norm_minutes[i],
+                "clean_sheet_rate": norm_clean_sheet[i],
                 "is_injured_or_doubtful": is_injury_status(p.get("status")),
                 "is_doubtful": is_doubtful_status(p.get("status")),
             }

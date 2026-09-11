@@ -333,7 +333,9 @@ def _close_stale_market_listings(conn, market_player_ids: set, roster_player_ids
     return len(stale)
 
 
-def _upsert_external_stats(conn, player_id: str, understat_player: dict, season: str, now: str, team_games: int = None) -> None:
+def _upsert_external_stats(
+    conn, player_id: str, understat_player: dict, season: str, now: str, team_games: int = None, team_clean_sheets: int = None
+) -> None:
     """
     `team_games`: partidos ya jugados por el equipo del jugador EN LA
     TEMPORADA ACTUAL (ver `_team_games_by_title()`). Se pasa `None` cuando
@@ -341,14 +343,21 @@ def _upsert_external_stats(conn, player_id: str, understat_player: dict, season:
     get_league_data_with_fallback()) -- `games`/`minutes_played` de esa fila
     son de una temporada completa distinta, mezclarlos con el team_games de
     la temporada actual daría un ratio sin sentido (ver TODO.md #12).
+
+    `team_clean_sheets`: de esos mismos `team_games`, en cuántos el equipo
+    del jugador no encajó (ver `_team_clean_sheets_by_title()`) -- mismo
+    motivo y mismo `None` que `team_games` si viene del fallback de
+    temporada anterior (sin esto, engine.evaluator.normalize_pool no podría
+    calcular una tasa "clean_sheet_rate" coherente con el team_games que sí
+    se guardó para esa fila).
     """
     conn.execute(
         """
         INSERT INTO external_stats
             (player_id, season, games, minutes_played, goals, non_penalty_goals, assists,
              xg, non_penalty_xg, xa, xg_chain, xg_buildup, yellow_cards, red_cards,
-             understat_position, team_games, source, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'understat', ?)
+             understat_position, team_games, team_clean_sheets, source, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'understat', ?)
         """,
         (
             player_id,
@@ -367,6 +376,7 @@ def _upsert_external_stats(conn, player_id: str, understat_player: dict, season:
             _parse_int(understat_player.get("red_cards")),
             understat_player.get("position"),
             team_games,
+            team_clean_sheets,
             now,
         ),
     )
@@ -383,6 +393,28 @@ def _team_games_by_title(league_data: dict) -> dict:
     que ÉL jugó, que puede ser menor si se perdió alguno por lesión/sanción).
     """
     return {t["title"]: len(t.get("history") or []) for t in league_data.get("teams", {}).values() if t.get("title")}
+
+
+def _team_clean_sheets_by_title(league_data: dict) -> dict:
+    """
+    {team_title: nº de partidos de `history` (ver `_team_games_by_title()`)
+    en los que el equipo NO encajó ningún gol (`missed` == 0)} -- Futmondo
+    da puntos extra por portería a cero, sobre todo a porteros y defensas
+    (análisis a petición del usuario, 2026-09-11: ver engine.evaluator.
+    normalize_pool para cómo se convierte en la señal "clean_sheet_rate" del
+    score). Un partido sin campo `missed` parseable (no debería pasar con
+    datos reales, ver docstring de `get_league_data()`) cuenta como "no
+    portería a cero" -- ninguna evidencia de haberla mantenido, igual de
+    conservador que el resto de estas señales cuando falta un dato.
+    """
+    result = {}
+    for t in league_data.get("teams", {}).values():
+        title = t.get("title")
+        if not title:
+            continue
+        history = t.get("history") or []
+        result[title] = sum(1 for m in history if _parse_int(m.get("missed")) == 0)
+    return result
 
 
 def run():
@@ -421,6 +453,7 @@ def run():
     # jugados esta temporada" incluso para equipos con fallback (ver
     # `_upsert_external_stats`/TODO.md #12).
     team_games_by_title = _team_games_by_title(league_data)
+    team_clean_sheets_by_title = _team_clean_sheets_by_title(league_data)
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -470,8 +503,10 @@ def run():
             # team_games solo tiene sentido si esta fila es de la temporada
             # ACTUAL -- si viene del fallback (temporada anterior completa),
             # None (ver docstring de _upsert_external_stats).
-            team_games = team_games_by_title.get(understat_player.get("team_title")) if player_season == season else None
-            _upsert_external_stats(conn, str(player["id"]), understat_player, player_season, now, team_games)
+            team_title = understat_player.get("team_title")
+            team_games = team_games_by_title.get(team_title) if player_season == season else None
+            team_clean_sheets = team_clean_sheets_by_title.get(team_title) if player_season == season else None
+            _upsert_external_stats(conn, str(player["id"]), understat_player, player_season, now, team_games, team_clean_sheets)
 
     with get_connection() as conn:
         for player in roster_players:

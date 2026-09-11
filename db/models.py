@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS external_stats (
                                               -- minutes_played de esa fila ya son de temporada
                                               -- completa, mezclarlos con el team_games de la
                                               -- temporada actual daría un ratio sin sentido)
+    team_clean_sheets INTEGER,               -- de los `team_games` de arriba, en cuántos el equipo del
+                                              -- jugador NO encajó (`missed`==0` en teams[id]["history"]) --
+                                              -- Futmondo da puntos extra por portería a cero (sobre todo a
+                                              -- POR/DEF), ver engine.evaluator.normalize_pool
+                                              -- ("clean_sheet_rate") y jobs.sync_data._team_clean_sheets_by_title().
+                                              -- Mismo NULL que team_games (y por el mismo motivo) si el
+                                              -- equipo aún no tiene historial esta temporada o la fila es
+                                              -- de fallback a temporada anterior.
     source          TEXT NOT NULL DEFAULT 'understat',
     recorded_at     TEXT NOT NULL
 );
@@ -288,6 +296,7 @@ def init_db():
     with get_connection() as conn:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "external_stats", "team_games", "INTEGER")
+        _ensure_column(conn, "external_stats", "team_clean_sheets", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "listing_price", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "is_clause", "INTEGER")
         _ensure_column(conn, "bids", "error", "TEXT")
@@ -309,7 +318,7 @@ SELECT
     p.id, p.name, p.team, p.position,
     s.price, s.buy_price, s.points, s.last_points, s.average_points,
     s.on_market, s.status, s.listing_price, s.is_clause,
-    e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.non_penalty_goals, e.assists, e.understat_position
+    e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.team_clean_sheets, e.non_penalty_goals, e.assists, e.understat_position
 FROM players p
 LEFT JOIN latest_snapshot s ON s.player_id = p.id AND s.rn = 1
 LEFT JOIN latest_external e ON e.player_id = p.id AND e.rn = 1

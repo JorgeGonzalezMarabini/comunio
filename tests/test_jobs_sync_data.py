@@ -428,6 +428,76 @@ def test_run_stores_team_games_from_current_season_league_data(tmp_db, roster_pl
     assert features[0]["team_games"] == 2   # partidos jugados por el EQUIPO (mayor: se perdió uno)
 
 
+def test_team_clean_sheets_by_title_counts_missed_zero_entries():
+    """
+    Análisis a petición del usuario (2026-09-11): Futmondo da puntos extra
+    por portería a cero -- `_team_clean_sheets_by_title()` cuenta, de
+    `history`, los partidos con `missed` == 0 (sin encajar).
+    """
+    league_data = {
+        "teams": {
+            "1": {"title": "Sevilla", "history": [{"missed": "0"}, {"missed": "2"}, {"missed": 0}]},
+            "2": {"title": "Malaga", "history": [{"missed": "1"}]},
+        }
+    }
+    assert sync_data._team_clean_sheets_by_title(league_data) == {"Sevilla": 2, "Malaga": 0}
+
+
+def test_team_clean_sheets_by_title_treats_missing_or_unparseable_missed_as_not_clean_sheet():
+    """Sin `missed` parseable en una entrada de `history`, no cuenta como portería a cero (ninguna evidencia de haberla mantenido)."""
+    league_data = {"teams": {"1": {"title": "Sevilla", "history": [{"result": "w"}, {"missed": None}]}}}
+    assert sync_data._team_clean_sheets_by_title(league_data) == {"Sevilla": 0}
+
+
+def test_run_stores_team_clean_sheets_from_current_season_league_data(tmp_db, roster_player_factory):
+    """El team_clean_sheets guardado en external_stats debe salir de team["history"], igual que team_games."""
+    roster_player = roster_player_factory(id=1001, name="Cairney", role="delantero", team="Fulham")
+    league_data = {
+        "players": [{"player_name": "Tom Cairney", "team_title": "Fulham", "games": "1", "time": "90"}],
+        "teams": {"1": {"title": "Fulham", "history": [{"missed": "0"}, {"missed": "1"}]}},
+    }
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify"), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", {})):
+        sync_data.run()
+
+    features = get_player_features()
+    assert features[0]["team_games"] == 2
+    assert features[0]["team_clean_sheets"] == 1
+
+
+def test_run_does_not_set_team_clean_sheets_for_previous_season_fallback_rows(tmp_db, roster_player_factory):
+    """Mismo motivo que team_games (ver test de fallback de abajo): sin esto, se mezclaría team_clean_sheets de la temporada actual con minutos/games de la anterior."""
+    roster_player = roster_player_factory(id=1001, name="Cairney", role="delantero", team="Fulham")
+    league_data = {
+        "players": [{"player_name": "Tom Cairney", "team_title": "Fulham", "games": "38", "time": "3000", "_source_season": "2024"}],
+        "teams": {"1": {"title": "Fulham", "history": [{"missed": "0"}]}},
+    }
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify"), \
+         patch("jobs.sync_data.get_league_data_with_fallback", return_value=(league_data, "2025", {"Fulham": "2024"})):
+        sync_data.run()
+
+    features = get_player_features()
+    assert features[0]["team_clean_sheets"] is None
+
+
 def test_run_does_not_set_team_games_for_previous_season_fallback_rows(tmp_db, roster_player_factory):
     """
     Regresión: si la fila viene del fallback a temporada anterior (ver

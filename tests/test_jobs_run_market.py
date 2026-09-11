@@ -291,9 +291,14 @@ def test_run_market_aborts_remaining_new_bids_after_live_roster_full_rejection(t
     cuanto Futmondo rechaza EN VIVO un candidato con ese código exacto, el
     resto de candidatos NUEVOS de este mismo lote comparte el mismo hueco
     ya inexistente -- el job no debe seguir intentándolos uno a uno.
+
+    Misma posición (MED) para los dos a propósito: distinta posición
+    normalizaría cada uno solo, en un grupo de tamaño 1, empatando ambos a
+    0.5 en toda feature comparativa (ver evaluator._minmax_normalize) --
+    la diferencia real de "points" no se reflejaría en el score.
     """
     _seed_player("mejor", "MED", price=350_000, points=20)
-    _seed_player("peor", "DEF", price=350_000, points=5)
+    _seed_player("peor", "MED", price=350_000, points=5)
     attempts = []
 
     class FakeClient(FutmondoClient):
@@ -342,9 +347,14 @@ def test_run_market_limits_bids_to_available_roster_slots_by_priority(tmp_db):
     menos candidatos de los que pasarían el resto de filtros), run_market
     debe pujar solo por los más importantes hasta llenar el hueco -- no
     por todos los que pasen score/precio/presupuesto.
+
+    Misma posición (MED) para los dos a propósito: distinta posición
+    normalizaría cada uno solo, en un grupo de tamaño 1, empatando ambos a
+    0.5 en toda feature comparativa (ver evaluator._minmax_normalize) --
+    la diferencia real de "points" no se reflejaría en el score.
     """
     _seed_player("mejor", "MED", price=350_000, points=20)
-    _seed_player("peor", "DEF", price=350_000, points=5)
+    _seed_player("peor", "MED", price=350_000, points=5)
 
     class FakeClient(FutmondoClient):
         def get_roster(self):

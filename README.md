@@ -844,6 +844,37 @@ Corregido normalizando cada feature (xG, tendencia, puntos/precio,
 minutos) **dentro de su propio grupo de posición** (POR/DEF/MED/DEL) — un
 central ahora compite contra otros centrales, no contra delanteros.
 
+## Portería a cero: nueva señal de score, solo para POR/DEF
+
+Análisis a petición del usuario (2026-09-11): ¿el score tenía en cuenta
+dos reglas reales de puntuación de Futmondo? (1) +1 punto por jugar >60'
+en un partido, y (2) puntos extra por portería a cero (sobre todo a
+porteros/defensas). Resultado del análisis:
+
+- El bonus de >60' ya se cuela de forma opaca dentro de
+  `average_points`/`last_points` — son los puntos que Futmondo YA calcula
+  con ese bonus aplicado, el bot los consume como caja negra — así que no
+  hacía falta ninguna señal nueva para él.
+- El de portería a cero **no tenía ninguna señal en el score**, pese a
+  que la sección de arriba ("La posición sí importa al puntuar") ya
+  señalaba el problema de fondo desde 2026-08-17 sin haberlo llegado a
+  corregir.
+
+Añadida una nueva feature `clean_sheet_rate` = `team_clean_sheets /
+team_games` del EQUIPO del jugador esta temporada (`team_clean_sheets`:
+de esos mismos `team_games` ya guardados — ver sección de xG por
+posición arriba —, en cuántos el equipo no encajó ningún gol, contando
+`missed == 0` en `teams[id]["history"]` de Understat; ver
+`jobs.sync_data._team_clean_sheets_by_title()`, nueva columna
+`external_stats.team_clean_sheets`). Se normaliza por grupo de posición
+igual que el resto de features, pero `engine.evaluator.score_player()`
+solo la SUMA al score cuando `position` es "POR" o "DEF" — para MED/DEL
+no cuenta, aunque su `clean_sheet_rate` normalizado no sea 0 (comparten
+el valor de su equipo, pero Futmondo no les da ese bonus a ellos). Nuevo
+peso `clean_sheet_rate` en `config.EVALUATOR_WEIGHTS` (0.15) y
+`config.LINEUP_EVALUATOR_WEIGHTS` (0.20), sin calibrar todavía con
+resultados reales, igual que el resto de pesos.
+
 ## Setup local
 
 Requiere Python 3.11+ (el `venv/` de este repo, gestionado por PyCharm, usa 3.14).

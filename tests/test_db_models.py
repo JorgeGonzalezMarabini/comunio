@@ -59,6 +59,55 @@ def test_get_player_features_includes_team_games(tmp_db):
     assert features[0]["team_games"] == 5
 
 
+def test_get_player_features_includes_team_clean_sheets(tmp_db):
+    """team_clean_sheets (análisis de portería a cero, 2026-09-11) debe salir en las features igual que team_games."""
+    with get_connection() as conn:
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", ("1", "Jugador", "Equipo", "DEF", NOW))
+        conn.execute(
+            "INSERT INTO external_stats (player_id, season, team_games, team_clean_sheets, recorded_at) VALUES (?,?,?,?,?)",
+            ("1", "2025", 5, 3, NOW),
+        )
+
+    features = get_player_features()
+    assert features[0]["team_clean_sheets"] == 3
+
+
+def test_init_db_migrates_existing_db_missing_team_clean_sheets_column(tmp_path, monkeypatch):
+    """Misma migración que team_games (ver test de abajo), para la columna team_clean_sheets añadida el 2026-09-11."""
+    db_path = tmp_path / "old.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE external_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id TEXT NOT NULL,
+            season TEXT NOT NULL,
+            team_games INTEGER,
+            source TEXT NOT NULL DEFAULT 'understat',
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO external_stats (player_id, season, team_games, recorded_at) VALUES (?,?,?,?)",
+        ("1", "2025", 5, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+    init_db()
+
+    with get_connection() as db_conn:
+        db_conn.execute(
+            "INSERT INTO external_stats (player_id, season, team_games, team_clean_sheets, recorded_at) VALUES (?,?,?,?,?)",
+            ("2", "2026", 5, 3, NOW),
+        )
+        rows = {r["player_id"]: r["team_clean_sheets"] for r in db_conn.execute("SELECT player_id, team_clean_sheets FROM external_stats")}
+    assert rows == {"1": None, "2": 3}
+
+
 def test_init_db_migrates_existing_db_missing_team_games_column(tmp_path, monkeypatch):
     """
     Regresión: `db/futmondo.db` está versionado en el repo con datos ya

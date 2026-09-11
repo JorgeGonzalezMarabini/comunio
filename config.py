@@ -143,11 +143,22 @@ ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower(
 # la suma de pesos positivos se mantiene en 0.90, igual que antes (ver
 # rango típico documentado en engine/evaluator.score_player). Sin
 # calibrar todavía con resultados reales tras el cambio.
+# "clean_sheet_rate" (2026-09-11, análisis a petición del usuario: Futmondo
+# da +1 punto por jugar >60' -- ya se cuela de forma opaca dentro de
+# "average_points"/"last_points", que Futmondo calcula con ese bonus ya
+# aplicado, así que no lleva peso propio -- y puntos extra por portería a
+# cero, que NO tenía ninguna señal en el score pese a que el propio
+# docstring de evaluator.normalize_pool ya señalaba el problema). Solo
+# cuenta para POR/DEF (ver engine.evaluator.score_player) -- para
+# MED/DEL el peso es irrelevante, así que no hace falta bajarles nada al
+# resto de pesos para dejarle sitio. Sin calibrar todavía con resultados
+# reales, igual que el resto de EVALUATOR_WEIGHTS.
 EVALUATOR_WEIGHTS = {
     "futmondo_points_per_price": 0.10,  # rendimiento Futmondo relativo al precio
     "futmondo_trend": 0.20,             # tendencia de puntuación reciente
     "xg": 0.40,                         # expected goals (Understat)
     "minutes_played": 0.20,             # continuidad / peso en su equipo
+    "clean_sheet_rate": 0.15,           # portería a cero del equipo -- solo aplica a POR/DEF
     "doubt_penalty": 0.20,              # penalización si en duda (no lesión confirmada, esa se descarta antes)
 }
 
@@ -168,6 +179,7 @@ LINEUP_EVALUATOR_WEIGHTS = {
     "futmondo_trend": 0.30,
     "xg": 0.40,
     "minutes_played": 0.30,
+    "clean_sheet_rate": 0.20,  # solo aplica a POR/DEF, ver EVALUATOR_WEIGHTS arriba
     "injury_penalty": 0.10,
 }
 
