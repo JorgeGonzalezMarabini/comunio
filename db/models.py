@@ -23,6 +23,7 @@ columnas específicas de esa fuente.
 """
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 import config
 
@@ -451,6 +452,107 @@ def get_won_bid_prices() -> dict[str, int]:
             """
         ).fetchall()
         return {row["player_id"]: row["amount"] for row in rows}
+
+
+def get_purchase_baselines() -> dict[str, dict]:
+    """
+    Para cada jugador con al menos una puja 'won' (mismo conjunto y mismo
+    criterio de "más reciente" -- mayor `id`, ver get_won_bid_prices() --
+    para el caso de recompra tras una venta anterior), agrega DESDE el
+    `created_at` de esa puja hasta ahora sobre `futmondo_snapshots` (SIN
+    llamada de red, reutilizando el histórico local que ya recoge cada
+    pasada de jobs/sync_data.py):
+      - "peak_price": MAX(price) visto desde la compra -- para el
+        trailing-stop de engine.selling_strategy.decide_sales() ("corte
+        por reversión desde máximo", ver su docstring).
+      - "points_at_purchase": "points" (acumulado de TEMPORADA, NO se
+        resetea al fichar) del snapshot MÁS CERCANO a esa fecha --
+        baseline para que decide_sales() calcule cuántos puntos sumó el
+        jugador MIENTRAS fue del bot (points_now del roster en vivo, menos
+        este valor). Puramente informativo en el `reason`: no participa en
+        ninguna condición de venta (ver docstring de decide_sales sobre
+        por qué no debe hacerlo).
+
+    Devuelve {player_id: {"peak_price": int, "points_at_purchase": int|None}}
+    -- solo para jugadores con al menos un snapshot de precio desde la
+    compra; sin eso ambas señales quedan sin dato para ese jugador esta
+    pasada (decide_sales() lo trata como "vía/nota desactivada", nunca
+    asume 0). "points_at_purchase" puede ser None dentro de una fila
+    presente si ese primer snapshot no tenía "points" parseable.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            WITH latest_won AS (
+                SELECT player_id, created_at, ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY id DESC) AS rn
+                FROM bids
+                WHERE status = 'won'
+            ),
+            since_purchase AS (
+                SELECT s.player_id, s.price, s.points,
+                       ROW_NUMBER() OVER (PARTITION BY s.player_id ORDER BY s.recorded_at ASC) AS rn_asc
+                FROM futmondo_snapshots s
+                JOIN latest_won w ON w.player_id = s.player_id AND w.rn = 1
+                WHERE s.recorded_at >= w.created_at
+            )
+            SELECT
+                player_id,
+                MAX(CASE WHEN price > 0 THEN price END) AS peak_price,
+                MAX(CASE WHEN rn_asc = 1 THEN points END) AS points_at_purchase
+            FROM since_purchase
+            GROUP BY player_id
+            """
+        ).fetchall()
+        return {
+            row["player_id"]: {"peak_price": row["peak_price"], "points_at_purchase": row["points_at_purchase"]}
+            for row in rows
+            if row["peak_price"] is not None
+        }
+
+
+def get_recent_price_history(player_ids: list, since_days: float) -> dict[str, list[dict]]:
+    """
+    Histórico local RECIENTE de precio ({"recorded_at", "price"} por fila,
+    orden cronológico ascendente) de `futmondo_snapshots` para cada
+    jugador en `player_ids`, desde hace `since_days` hasta ahora -- SIN
+    llamada de red (a diferencia de `FutmondoClient.get_player_summary()`,
+    que cubre una ventana corta y cuesta una llamada por jugador). Pensado
+    para `engine.selling_strategy.confirm_loss_is_sustained()` vía
+    `decide_sales()` ("recent_price_history", ver su docstring): confirma
+    que un corte de pérdidas no se dispara por un único dato de ruido
+    reciente antes de vender.
+
+    `player_ids` acotado explícitamente (a diferencia de
+    get_purchase_baselines(), ya acotado por `bids`) porque
+    `futmondo_snapshots` cubre TODO jugador visto alguna vez en roster o
+    mercado, no solo los comprados por el bot -- sin este filtro se
+    traería histórico de cientos de jugadores irrelevantes para esta
+    llamada.
+
+    Devuelve {player_id: [{"recorded_at", "price"}, ...]} -- SOLO
+    jugadores con al menos una fila en la ventana; ausencia = "sin
+    historial reciente todavía", decide_sales()/confirm_loss_is_sustained()
+    lo tratan igual que "sin datos suficientes" (falla abierto, ver
+    docstring de confirm_loss_is_sustained).
+    """
+    if not player_ids:
+        return {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in player_ids)
+        rows = conn.execute(
+            f"""
+            SELECT player_id, price, recorded_at
+            FROM futmondo_snapshots
+            WHERE player_id IN ({placeholders}) AND recorded_at >= ? AND price > 0
+            ORDER BY player_id, recorded_at ASC
+            """,
+            [str(pid) for pid in player_ids] + [cutoff],
+        ).fetchall()
+    history: dict[str, list[dict]] = {}
+    for row in rows:
+        history.setdefault(row["player_id"], []).append({"recorded_at": row["recorded_at"], "price": row["price"]})
+    return history
 
 
 def get_open_sales() -> list[dict]:

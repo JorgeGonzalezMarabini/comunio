@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 from db.models import (
@@ -9,7 +9,9 @@ from db.models import (
     get_open_sales,
     get_pending_bid_amount,
     get_player_features,
+    get_purchase_baselines,
     get_real_lineup_check,
+    get_recent_price_history,
     get_won_bid_prices,
     init_db,
     save_real_lineup_check,
@@ -237,6 +239,97 @@ def test_get_won_bid_prices_keeps_most_recent_when_bought_more_than_once(tmp_db)
         )
 
     assert get_won_bid_prices() == {"1": 700_000}
+
+
+# --- get_purchase_baselines / get_recent_price_history (evaluación del trigger de venta, 2026-09-11) ---
+
+
+def test_get_purchase_baselines_peak_price_and_points_at_purchase(tmp_db):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 1_000_000, "won", "2026-08-01T00:00:00+00:00"),
+        )
+        # Snapshot ANTES de la compra -- no debe contar para el peak ni para el baseline de puntos.
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 5_000_000, 999, "2026-07-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 1_000_000, 10, "2026-08-02T00:00:00+00:00"),  # primero DESPUÉS de la compra
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 1_500_000, 20, "2026-08-10T00:00:00+00:00"),  # pico
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 1_200_000, 30, "2026-08-15T00:00:00+00:00"),
+        )
+
+    baselines = get_purchase_baselines()
+    assert baselines["1"] == {"peak_price": 1_500_000, "points_at_purchase": 10}
+
+
+def test_get_purchase_baselines_uses_most_recent_won_bid(tmp_db):
+    """Vendido y recomprado más tarde -> el peak/baseline se cuentan desde la puja 'won' más reciente."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 500_000, "won", "2026-07-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 700_000, "won", "2026-08-01T00:00:00+00:00"),
+        )
+        conn.execute(  # de la primera compra -- NO debe contar
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 9_000_000, 999, "2026-07-15T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 800_000, 5, "2026-08-02T00:00:00+00:00"),
+        )
+
+    baselines = get_purchase_baselines()
+    assert baselines["1"] == {"peak_price": 800_000, "points_at_purchase": 5}
+
+
+def test_get_purchase_baselines_omits_players_without_snapshot_since_purchase(tmp_db):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 500_000, "won", NOW),
+        )
+
+    assert get_purchase_baselines() == {}
+
+
+def test_get_recent_price_history_filters_by_window_and_player_ids(tmp_db):
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(days=1)).isoformat()
+    old = (now - timedelta(days=30)).isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, recorded_at) VALUES (?,?,?)",
+            ("1", 1_000_000, old),  # fuera de la ventana de 3 días
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, recorded_at) VALUES (?,?,?)",
+            ("1", 900_000, recent),
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, recorded_at) VALUES (?,?,?)",
+            ("2", 2_000_000, recent),  # otro jugador, no pedido
+        )
+
+    history = get_recent_price_history(["1"], since_days=3)
+    assert history == {"1": [{"recorded_at": recent, "price": 900_000}]}
+
+
+def test_get_recent_price_history_returns_empty_dict_for_no_player_ids(tmp_db):
+    assert get_recent_price_history([], since_days=3) == {}
 
 
 def test_get_real_lineup_check_returns_none_when_never_checked(tmp_db):

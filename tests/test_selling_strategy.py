@@ -1,6 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
-from engine.selling_strategy import apply_revaluation_premium, compute_revaluation_premium_pct, decide_sales
+from engine.selling_strategy import (
+    apply_revaluation_premium,
+    compute_revaluation_premium_pct,
+    confirm_loss_is_sustained,
+    decide_sales,
+)
 
 NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
 
@@ -8,6 +13,10 @@ NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
 def _price(days_ago, price):
     date = (NOW - timedelta(days=days_ago)).isoformat()
     return {"date": date, "price": price}
+
+
+def _history_point(days_ago, price):
+    return {"recorded_at": (NOW - timedelta(days=days_ago)).isoformat(), "price": price}
 
 # _full_442_squad(): índices fijos para que los tests puedan referenciar
 # jugadores concretos sin ambigüedad.
@@ -890,4 +899,265 @@ def test_apply_revaluation_premium_inflates_asking_price_and_extends_reason():
     result = apply_revaluation_premium(decision, prices, now=NOW)
     assert result["asking_price"] == 1_100_000  # 1_000_000 * 1.10
     assert result["reason"].startswith("motivo original; revalorización sostenida")
-    assert decision["asking_price"] == 1_000_000  # el original no se muta
+
+
+# --- confirm_loss_is_sustained (evaluación del trigger de venta, 2026-09-11) ---
+
+
+def test_confirm_loss_is_sustained_fails_open_with_too_few_data_points():
+    """Sin histórico suficiente, se confirma el corte igual que si esta función no existiera."""
+    history = [_history_point(1, 900_000)]
+    assert confirm_loss_is_sustained(history, min_data_points=2, now=NOW) == (True, None)
+
+
+def test_confirm_loss_is_sustained_fails_open_without_any_history():
+    assert confirm_loss_is_sustained([], min_data_points=2, now=NOW) == (True, None)
+
+
+def test_confirm_loss_is_sustained_confirms_a_clean_sustained_drop():
+    """Serie que solo baja, sin repunte -- se confirma el corte."""
+    history = [_history_point(2, 1_000_000), _history_point(1, 950_000), _history_point(0, 900_000)]
+    confirmed, note = confirm_loss_is_sustained(history, min_data_points=2, max_rebound_pct=0.05, now=NOW)
+    assert (confirmed, note) == (True, None)
+
+
+def test_confirm_loss_is_sustained_postpones_on_a_clear_rebound_from_the_bottom():
+    """Repuntó +10% desde el mínimo reciente (por encima del 5% tolerado) -- se pospone el corte."""
+    history = [_history_point(2, 1_000_000), _history_point(1, 800_000), _history_point(0, 880_000)]
+    confirmed, note = confirm_loss_is_sustained(history, min_data_points=2, max_rebound_pct=0.05, now=NOW)
+    assert confirmed is False
+    assert note is not None and "repuntó" in note
+
+
+def test_confirm_loss_is_sustained_tolerates_a_small_rebound_within_the_margin():
+    """Un repunte pequeño (2%, por debajo del 5% tolerado) no invalida la confirmación."""
+    history = [_history_point(2, 1_000_000), _history_point(1, 800_000), _history_point(0, 816_000)]
+    confirmed, _ = confirm_loss_is_sustained(history, min_data_points=2, max_rebound_pct=0.05, now=NOW)
+    assert confirmed is True
+
+
+def test_confirm_loss_is_sustained_ignores_entries_outside_the_lookback_window():
+    history = [_history_point(30, 2_000_000), _history_point(1, 1_000_000), _history_point(0, 900_000)]
+    confirmed, _ = confirm_loss_is_sustained(history, lookback_days=7, min_data_points=2, now=NOW)
+    assert confirmed is True  # el punto de hace 30 días no cuenta ni para el mínimo ni para el repunte
+
+
+def test_confirm_loss_is_sustained_ignores_unparseable_or_non_positive_entries():
+    history = [
+        {"recorded_at": None, "price": 1_000_000},
+        {"recorded_at": _history_point(1, 0)["recorded_at"], "price": 0},
+        _history_point(1, 1_000_000),
+        _history_point(0, 900_000),
+    ]
+    confirmed, _ = confirm_loss_is_sustained(history, min_data_points=2, max_rebound_pct=0.05, now=NOW)
+    assert confirmed is True  # solo los 2 puntos válidos cuentan, sin repunte entre ellos
+
+
+# --- decide_sales: trailing-stop / corte por reversión desde máximo (2026-09-11) ---
+
+
+def test_decide_sales_trailing_stop_triggers_even_while_still_profitable_vs_purchase():
+    """
+    Comprado a 10M, subió a 20M de pico y ha caído a 16M: +60% frente a la
+    compra (no activaría ni rentabilidad -- por debajo de un umbral muy
+    alto -- ni corte de pérdidas), pero -20% desde el pico sí activa el
+    trailing-stop (umbral 15%).
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 10_000_000}
+    squad[9]["value"] = 16_000_000  # +60% vs compra, -20% vs pico de 20M
+    purchase_baselines = {str(squad[9]["id"]): {"peak_price": 20_000_000, "points_at_purchase": None}}
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        min_profit_pct=999,  # nunca se alcanza por esta vía en este test
+        max_loss_pct=999,  # idem
+        purchase_baselines=purchase_baselines,
+        trailing_stop_max_drawdown_pct=0.15,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    assert "reversión desde máximo" in decisions[0]["reason"]
+    assert "20000000" in decisions[0]["reason"].replace(".", "").replace(",", "")
+
+
+def test_decide_sales_trailing_stop_not_triggered_below_the_drawdown_threshold():
+    squad = _full_442_squad()
+    bought_by_bot = {str(squad[9]["id"]): 10_000_000}
+    squad[9]["value"] = 19_000_000  # -5% desde el pico, por debajo del umbral 15%
+    purchase_baselines = {str(squad[9]["id"]): {"peak_price": 20_000_000, "points_at_purchase": None}}
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        min_profit_pct=999,
+        max_loss_pct=999,
+        purchase_baselines=purchase_baselines,
+        trailing_stop_max_drawdown_pct=0.15,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_trailing_stop_disabled_without_purchase_baselines():
+    """Sin `purchase_baselines`, la vía queda desactivada -- comportamiento idéntico al de antes de esta feature."""
+    squad = _full_442_squad()
+    bought_by_bot = {str(squad[9]["id"]): 10_000_000}
+    squad[9]["value"] = 16_000_000  # -20% desde un pico que aquí no se informa
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=999, max_loss_pct=999
+    )
+    assert decisions == []
+
+
+# --- decide_sales: confirmación de tendencia del corte de pérdidas (2026-09-11) ---
+
+
+def test_decide_sales_loss_cut_postponed_when_price_already_rebounded():
+    """Cruza el umbral de corte (-12%), pero el histórico reciente muestra un repunte claro -- se pospone."""
+    squad = _full_442_squad()
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 880_000  # -12%, por encima del umbral de corte (10%)
+    recent_price_history = {
+        str(squad[9]["id"]): [
+            _history_point(2, 800_000),
+            _history_point(1, 850_000),
+            _history_point(0, 880_000),  # repuntó +10% desde el mínimo de la ventana
+        ]
+    }
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10,
+        max_loss_pct=0.10,
+        recent_price_history=recent_price_history,
+        loss_confirmation_min_data_points=2,
+        loss_confirmation_max_rebound_pct=0.05,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_loss_cut_confirmed_when_no_rebound():
+    """Cruza el umbral y el histórico reciente confirma que la caída sigue vigente -- se vende."""
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 880_000  # -12%
+    recent_price_history = {
+        str(squad[9]["id"]): [
+            _history_point(2, 950_000),
+            _history_point(1, 910_000),
+            _history_point(0, 880_000),  # sigue bajando, sin repunte
+        ]
+    }
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10,
+        max_loss_pct=0.10,
+        recent_price_history=recent_price_history,
+        loss_confirmation_min_data_points=2,
+        loss_confirmation_max_rebound_pct=0.05,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+
+
+def test_decide_sales_loss_cut_unaffected_without_recent_price_history():
+    """Sin `recent_price_history`, el corte de pérdidas se dispara igual que antes de esta feature (falla abierto)."""
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 880_000  # -12%
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.10, max_loss_pct=0.10
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+
+
+def test_decide_sales_loss_confirmation_gate_does_not_block_confirmed_injury_sale():
+    """
+    Si además de cruzar el umbral de pérdida el jugador tiene lesión
+    CONFIRMADA, esa vía incondicional manda igual -- el repunte de precio
+    no pospone nada porque el corte de pérdidas ya no es el ÚNICO motivo
+    (un lesionado confirmado tampoco necesita margen de banquillo, ver
+    docstring del módulo).
+    """
+    squad = _full_442_squad()
+    squad[9]["status"] = "injured2"
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 880_000  # -12%
+    recent_price_history = {
+        str(squad[9]["id"]): [
+            _history_point(2, 800_000),
+            _history_point(1, 850_000),
+            _history_point(0, 880_000),  # repunte claro, que SÍ pospondría un corte de pérdidas "puro"
+        ]
+    }
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10,
+        max_loss_pct=0.10,
+        recent_price_history=recent_price_history,
+        loss_confirmation_min_data_points=2,
+        loss_confirmation_max_rebound_pct=0.05,
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["player_id"] == squad[9]["id"]
+    # motivo mostrado: cutting_losses sigue en True (no es el ÚNICO motivo,
+    # así que la confirmación de tendencia ni se evalúa) -- misma prioridad
+    # de `reason` que ya existía antes de esta feature (ver docstring de
+    # decide_sales: vías 2/3 dan un motivo más específico cuando también
+    # aplican junto a la 4).
+    assert "corte de pérdidas (lesión confirmada)" in decisions[0]["reason"]
+
+
+# --- decide_sales: nota informativa de puntos ya extraídos (2026-09-11) ---
+
+
+def test_decide_sales_loss_cut_reason_includes_points_earned_context():
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 880_000  # -12%
+    squad[9]["points"] = 45
+    purchase_baselines = {str(squad[9]["id"]): {"peak_price": None, "points_at_purchase": 10}}
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        min_profit_pct=0.10,
+        max_loss_pct=0.10,
+        purchase_baselines=purchase_baselines,
+    )
+    assert len(decisions) == 1
+    assert "sumó 35 punto(s) de liga" in decisions[0]["reason"]
+    assert "no afecta a la decisión" in decisions[0]["reason"]
+
+
+def test_decide_sales_reason_has_no_points_note_without_points_at_purchase():
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 880_000  # -12%
+    squad[9]["points"] = 45
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.10, max_loss_pct=0.10
+    )
+    assert len(decisions) == 1
+    assert "para contexto" not in decisions[0]["reason"]

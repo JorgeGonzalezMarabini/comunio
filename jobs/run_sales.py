@@ -169,6 +169,8 @@ from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, Futmo
 from db.models import (
     get_connection,
     get_player_features,
+    get_purchase_baselines,
+    get_recent_price_history,
     get_swap_target_for_player,
     get_won_bid_prices,
     mark_offer_accepted,
@@ -509,6 +511,22 @@ def run():
     roster_items = roster.get("answer", [])
     bought_by_bot = get_won_bid_prices()
 
+    # Trailing-stop, confirmación de tendencia del corte de pérdidas y nota
+    # de puntos ya extraídos (a petición del usuario, evaluación del
+    # trigger de venta 2026-09-11, ver docstring de
+    # engine/selling_strategy.py) -- histórico 100% LOCAL
+    # (`futmondo_snapshots`, recogido por cada pasada de jobs/sync_data.py),
+    # sin ninguna llamada de red adicional. Un fallo aquí (BD no
+    # disponible) no debería tumbar el job entero, pero sí es una
+    # dependencia local (a diferencia de la prima de revalorización, que
+    # depende de la red) -- si falla, decide_sales() simplemente recibe
+    # {} y esas tres vías/nota quedan desactivadas esta pasada, igual que
+    # si el llamador no las pasara.
+    purchase_baselines = get_purchase_baselines()
+    recent_price_history = get_recent_price_history(
+        list(bought_by_bot.keys()), config.SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS
+    )
+
     # Oportunidad de mercado / swaps (a petición del usuario, 2026-08-22 y
     # 2026-08-29, ver docstring de engine/selling_strategy.py) -- features
     # CRUDAS de la plantilla propia y del mercado abierto AHORA MISMO
@@ -610,6 +628,8 @@ def run():
         market_candidates=market_candidates,
         market_listing_expirations=market_listing_expirations,
         own_lineup_player_ids=own_lineup_player_ids,
+        purchase_baselines=purchase_baselines,
+        recent_price_history=recent_price_history,
     )
     if not decisions:
         report_lines.append(

@@ -175,6 +175,57 @@ cinco vías queda exenta) -- no está confirmado si Futmondo penaliza vender
 a un titular con la jornada en juego, así que es puramente preventivo.
 Sin `own_lineup_player_ids`, este bloqueo queda desactivado (no se puede
 aplicar sin saber quién está alineado).
+
+Corte por reversión desde máximo / trailing-stop (a petición del usuario,
+evaluación del trigger de venta 2026-09-11): el corte de pérdidas de arriba
+solo mira la plusvalía frente al precio de COMPRA. Un jugador comprado a
+10 que subió a 20 y ha caído a 15 sigue con +50% frente a la compra y no
+dispara nada, aunque haya perdido una cuarta parte de su pico -- se deja
+evaporar buena parte de una plusvalía ya generada antes de reaccionar. Por
+eso, si `purchase_baselines` (mismo formato que
+`db.models.get_purchase_baselines()`) viene informado y trae "peak_price"
+para el jugador, también se pone en venta si ha caído
+`trailing_stop_max_drawdown_pct` (config.SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT,
+por defecto 15%, deliberadamente más laxo que `max_loss_pct` -- aquí no se
+corta una mala operación, se protege una buena) desde ese máximo, AUNQUE
+siga en positivo frente al precio de compra. Sin `purchase_baselines` (o
+sin "peak_price" para ese jugador -- recién comprado, sin snapshot todavía
+desde entonces), esta vía queda desactivada sin más para él esta pasada.
+No necesita una confirmación de tendencia propia (a diferencia del corte
+de pérdidas, ver abajo): al compararse contra un máximo HISTÓRICO ya exige
+una caída sostenida por construcción.
+
+Confirmación de tendencia del corte de pérdidas (a petición del usuario,
+misma evaluación 2026-09-11): `cutting_losses` mira el ÚLTIMO valor
+conocido -- un dato puntual volátil que cruce `-max_loss_pct` un día y se
+corrija al siguiente dispararía la venta igualmente. Por eso, cuando el
+corte de pérdidas sería el ÚNICO motivo de venta de un candidato (igual
+que el patrón de `only_market_reason` de la vía 5), y `recent_price_history`
+(mismo formato que `db.models.get_recent_price_history()`) trae histórico
+para ese jugador, se llama a `confirm_loss_is_sustained()` (ver su
+docstring) antes de confirmar el corte -- si detecta que el valor ya
+repuntó desde el mínimo reciente más de lo tolerado, se pospone el corte
+esta pasada (se reevalúa en la siguiente, no se descarta para siempre).
+Con menos histórico del mínimo exigido, o sin `recent_price_history` en
+absoluto, esta confirmación queda desactivada y el corte se dispara igual
+que hoy (falla ABIERTO: la falta de datos nunca debe bloquear un corte de
+pérdidas real).
+
+Nota informativa de puntos ya extraídos (a petición del usuario, misma
+evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
+disparan una venta, si `purchase_baselines` trae "points_at_purchase" para
+ese jugador, se añade al `reason` cuántos puntos de liga sumó DESDE que el
+bot lo compró (`player["points"]` actual, que es un acumulado de
+TEMPORADA que no se resetea al fichar, menos ese baseline) -- puramente
+informativo, para que quien revise la notificación vea que la operación,
+aunque perdiera valor de mercado, sí aportó puntos mientras estuvo en
+plantilla. Deliberadamente NO participa en ninguna condición de venta:
+usarlo para dar más margen a un jugador que ya rindió sería la misma
+falacia del coste hundido con otro nombre (aferrarse a lo que YA dio, en
+vez de decidir por lo que vale AHORA) -- la señal de rendimiento propio
+reciente ya tiene su vía correcta, no condicionada al pasado, en
+"oportunidad de mercado" (`config.LINEUP_EVALUATOR_WEIGHTS["futmondo_trend"]`
+más arriba).
 """
 from __future__ import annotations
 
@@ -258,6 +309,12 @@ def decide_sales(
     assumed_sale_resolution_hours: float = None,
     own_lineup_player_ids=None,
     enable_weekend_lineup_guard: bool = None,
+    purchase_baselines: dict[str, dict] = None,
+    trailing_stop_max_drawdown_pct: float = None,
+    recent_price_history: dict[str, list[dict]] = None,
+    loss_confirmation_lookback_days: float = None,
+    loss_confirmation_min_data_points: int = None,
+    loss_confirmation_max_rebound_pct: float = None,
     now: datetime = None,
 ) -> list[dict]:
     """
@@ -338,12 +395,39 @@ def decide_sales(
     `own_lineup_player_ids` se pone en venta esta pasada, sea cual sea el
     motivo (ver docstring del módulo).
 
+    `purchase_baselines`: mismo formato que
+    `db.models.get_purchase_baselines()` — {player_id: {"peak_price",
+    "points_at_purchase"}}. Habilita la 6ª vía de venta (trailing-stop,
+    ver docstring del módulo) y la nota informativa de puntos ya
+    extraídos. Si se omite (o falta la entrada de un jugador concreto),
+    ambas quedan desactivadas sin más para él, backward-compatible con el
+    resto de usos de `decide_sales()`.
+
+    `trailing_stop_max_drawdown_pct`: por defecto
+    config.SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT — % de caída desde
+    "peak_price" (ver `purchase_baselines`) a partir del cual se vende
+    igualmente, aunque siga en positivo frente al precio de compra.
+
+    `recent_price_history`: mismo formato que
+    `db.models.get_recent_price_history()` — {player_id: [{"recorded_at",
+    "price"}, ...]}. Habilita la confirmación de tendencia del corte de
+    pérdidas (ver docstring del módulo y `confirm_loss_is_sustained()`) —
+    sin esto (o sin histórico suficiente para un jugador concreto), el
+    corte de pérdidas se dispara igual que antes de esta feature (falla
+    ABIERTO, ver docstring del módulo).
+
+    `loss_confirmation_lookback_days`, `loss_confirmation_min_data_points`,
+    `loss_confirmation_max_rebound_pct`: parámetros de
+    `confirm_loss_is_sustained()`, todos por defecto de config
+    (`SELLING_LOSS_CONFIRMATION_*`, ver su docstring).
+
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
-    tests deterministas (afecta al bloqueo de fin de semana y a la
-    comparación de tiempo del listado objetivo).
+    tests deterministas (afecta al bloqueo de fin de semana, a la
+    comparación de tiempo del listado objetivo y a la confirmación de
+    tendencia del corte de pérdidas).
 
     Devuelve una decisión por cada jugador que cumpla CUALQUIERA de estas
-    cinco condiciones (Y cuya posición siga teniendo margen de suplentes
+    seis condiciones (Y cuya posición siga teniendo margen de suplentes
     sanos después de la venta, salvo que ya esté lesionado/en duda —
     ver más abajo):
       1. Su revalorización (`value` vs. el precio pagado en
@@ -369,6 +453,17 @@ def decide_sales(
          esta es la ÚNICA vía que aplica, además tiene que sobrevivir los
          cuatro refinamientos de arriba (tope por posición, eficiencia de
          precio, ventana de tiempo, asequibilidad compartida).
+      6. Ha caído `trailing_stop_max_drawdown_pct` desde el valor MÁS ALTO
+         observado desde la compra ("peak_price" de `purchase_baselines`)
+         — trailing-stop, aunque siga en positivo frente al precio de
+         compra. Solo si `purchase_baselines` trae "peak_price" para ese
+         jugador.
+
+    El corte de pérdidas (vía 2) se pospone (no se descarta, se reevalúa
+    en la siguiente pasada) si es la ÚNICA vía que aplica para un
+    candidato y `confirm_loss_is_sustained()` detecta que el valor ya
+    repuntó desde su mínimo reciente más de lo tolerado (ver
+    `recent_price_history`/`loss_confirmation_*` y docstring del módulo).
 
     Ningún jugador presente en `own_lineup_player_ids` se vende en fin de
     semana, sea cual sea la vía (ver `enable_weekend_lineup_guard`) — esto
@@ -423,9 +518,31 @@ def decide_sales(
         if enable_weekend_lineup_guard is None
         else enable_weekend_lineup_guard
     )
+    trailing_stop_max_drawdown_pct = (
+        config.SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT
+        if trailing_stop_max_drawdown_pct is None
+        else trailing_stop_max_drawdown_pct
+    )
+    loss_confirmation_lookback_days = (
+        config.SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS
+        if loss_confirmation_lookback_days is None
+        else loss_confirmation_lookback_days
+    )
+    loss_confirmation_min_data_points = (
+        config.SELLING_LOSS_CONFIRMATION_MIN_DATA_POINTS
+        if loss_confirmation_min_data_points is None
+        else loss_confirmation_min_data_points
+    )
+    loss_confirmation_max_rebound_pct = (
+        config.SELLING_LOSS_CONFIRMATION_MAX_REBOUND_PCT
+        if loss_confirmation_max_rebound_pct is None
+        else loss_confirmation_max_rebound_pct
+    )
     now = now or datetime.now(timezone.utc)
     market_listing_expirations = market_listing_expirations or {}
     own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
+    purchase_baselines = purchase_baselines or {}
+    recent_price_history = recent_price_history or {}
     # Aproximación por día de la semana (sábado=5, domingo=6) -- no
     # distingue la hora exacta de los partidos, ver docstring del módulo.
     is_weekend_now = now.weekday() >= 5
@@ -485,6 +602,18 @@ def decide_sales(
         loss_threshold = max_loss_pct
         cutting_losses = profit_pct <= -loss_threshold
 
+        # Trailing-stop / corte por reversión desde máximo (ver docstring
+        # del módulo): compara contra el valor MÁS ALTO observado desde la
+        # compra ("peak_price" de purchase_baselines), no contra el precio
+        # de compra -- puede disparar aunque profit_pct siga en positivo.
+        baseline = purchase_baselines.get(str(player["id"])) or {}
+        peak_price = baseline.get("peak_price")
+        points_at_purchase = baseline.get("points_at_purchase")
+        drawdown_from_peak_pct = (
+            (peak_price - current_price) / peak_price if peak_price else 0.0
+        )
+        trailing_stop_triggered = bool(peak_price) and drawdown_from_peak_pct >= trailing_stop_max_drawdown_pct
+
         # Concentración de capital: solo lesión CONFIRMADA, sin mirar
         # rentabilidad -- demasiado capital inmovilizado en un jugador que
         # no se puede usar es un problema en sí mismo (ver docstring).
@@ -512,12 +641,40 @@ def decide_sales(
             and (best_available_lineup_score - own_lineup_score) >= upgrade_available_min_margin
         )
 
+        # Confirmación de tendencia del corte de pérdidas (ver docstring
+        # del módulo y confirm_loss_is_sustained()) -- SOLO cuando el corte
+        # de pérdidas sería el ÚNICO motivo de venta de este candidato (si
+        # además aplica otra vía incondicional, esa manda igual y no hace
+        # falta confirmar nada). Sin recent_price_history para este
+        # jugador, cutting_losses no se toca -- falla ABIERTO, idéntico al
+        # comportamiento previo a esta feature.
+        only_loss_cut_reason = (
+            cutting_losses
+            and not overconcentrated
+            and not force_sell_confirmed_injury
+            and not market_upgrade_available
+            and not trailing_stop_triggered
+        )
+        if only_loss_cut_reason:
+            history = recent_price_history.get(str(player["id"]))
+            if history:
+                confirmed, _ = confirm_loss_is_sustained(
+                    history,
+                    lookback_days=loss_confirmation_lookback_days,
+                    min_data_points=loss_confirmation_min_data_points,
+                    max_rebound_pct=loss_confirmation_max_rebound_pct,
+                    now=now,
+                )
+                if not confirmed:
+                    cutting_losses = False  # repuntó desde el mínimo reciente -- se pospone esta pasada
+
         if (
             profit_pct < min_profit_pct
             and not cutting_losses
             and not overconcentrated
             and not force_sell_confirmed_injury
             and not market_upgrade_available
+            and not trailing_stop_triggered
         ):
             continue
 
@@ -532,6 +689,7 @@ def decide_sales(
             and not cutting_losses
             and not overconcentrated
             and not force_sell_confirmed_injury
+            and not trailing_stop_triggered
         )
 
         candidates.append(
@@ -552,6 +710,10 @@ def decide_sales(
                 force_sell_confirmed_injury,
                 only_market_reason,
                 best_market_candidate,
+                trailing_stop_triggered,
+                peak_price,
+                drawdown_from_peak_pct,
+                points_at_purchase,
             )
         )
 
@@ -638,6 +800,10 @@ def decide_sales(
         force_sell_confirmed_injury,
         only_market_reason,
         best_market_candidate,
+        trailing_stop_triggered,
+        peak_price,
+        drawdown_from_peak_pct,
+        points_at_purchase,
     ) in candidates:
         if only_market_reason and str(player["id"]) not in approved_market_only_ids:
             continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
@@ -652,11 +818,28 @@ def decide_sales(
                 continue  # vender aquí dejaría la posición sin cubrir -- no se vende, por rentable que sea
             bench_remaining[position] -= 1
 
+        # Nota informativa de puntos ya extraídos (ver docstring del
+        # módulo): SOLO se añade a las dos vías que "sacrifican" valor de
+        # mercado (corte de pérdidas, trailing-stop) -- puramente
+        # auditoría, nunca condiciona la decisión (ver docstring: usarlo
+        # para dar más margen sería la misma falacia del coste hundido con
+        # otro nombre). Sin points_at_purchase (o sin "points" en el
+        # roster en vivo), no se añade nada.
+        points_now = player.get("points")
+        points_note = ""
+        if points_at_purchase is not None and isinstance(points_now, (int, float)):
+            points_earned = points_now - points_at_purchase
+            points_note = (
+                f"; para contexto: sumó {points_earned} punto(s) de liga mientras estuvo en plantilla "
+                "(no afecta a la decisión, solo auditoría)"
+            )
+
         # Prioridad del motivo mostrado (no son excluyentes entre sí, un
         # candidato puede cumplir varios a la vez): rentabilidad normal
         # primero (el caso más informativo/común), luego corte de
-        # pérdidas, luego concentración de capital, luego oportunidad de
-        # mercado (las dos últimas ni siquiera miran profit_pct).
+        # pérdidas, luego trailing-stop, luego concentración de capital,
+        # luego lesión confirmada, luego oportunidad de mercado (las
+        # últimas tres ni siquiera miran profit_pct).
         if profit_pct >= min_profit_pct:
             reason = (
                 f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
@@ -668,7 +851,14 @@ def decide_sales(
                 f"{motivo}: pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
                 f"({profit_pct:+.1%}) -- pérdida >= umbral de corte {loss_threshold:.1%} (mismo umbral para "
                 "cualquier estado); se vende aunque no llegue al umbral de rentabilidad, para no caer en la "
-                "falacia del coste hundido"
+                f"falacia del coste hundido{points_note}"
+            )
+        elif trailing_stop_triggered:
+            reason = (
+                f"corte por reversión desde máximo: pico de {peak_price} desde la compra, ahora "
+                f"{player.get('value', 0)} ({drawdown_from_peak_pct:.1%} de caída desde el pico) >= umbral "
+                f"{trailing_stop_max_drawdown_pct:.1%}; se protege la plusvalía ya generada aunque siga en "
+                f"positivo frente al precio de compra ({profit_pct:+.1%}){points_note}"
             )
         elif overconcentrated:
             reason = (
@@ -751,6 +941,90 @@ def parse_iso_datetime(value) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def confirm_loss_is_sustained(
+    price_points: list[dict],
+    lookback_days: float = None,
+    min_data_points: int = None,
+    max_rebound_pct: float = None,
+    now: datetime = None,
+) -> tuple[bool, str | None]:
+    """
+    A petición del usuario (evaluación del trigger de venta 2026-09-11):
+    el corte de pérdidas de `decide_sales()` (`cutting_losses`) mira el
+    ÚLTIMO valor conocido -- un dato puntual volátil que cruce
+    `-max_loss_pct` un día y se corrija al siguiente dispararía la venta
+    igualmente. Esta función confirma que la caída sigue vigente antes de
+    aceptar el corte, usando histórico LOCAL reciente (ver
+    `db.models.get_recent_price_history()` -- SIN llamada de red, a
+    diferencia de `compute_revaluation_premium_pct()`, que usa el
+    histórico corto de `FutmondoClient.get_player_summary()`).
+
+    `price_points`: [{"recorded_at", "price"}, ...] tal cual devuelve
+    `db.models.get_recent_price_history()` (cualquier orden, se ordena
+    aquí dentro). Entradas sin "recorded_at"/"price" parseables (o con
+    precio <= 0) se descartan, no cuentan como dato -- misma defensiva que
+    `compute_revaluation_premium_pct()`.
+
+    Con menos de `min_data_points` (config.
+    SELLING_LOSS_CONFIRMATION_MIN_DATA_POINTS) dentro de los últimos
+    `lookback_days` (config.SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS) --
+    FALLA ABIERTO: devuelve `(True, None)`, se confirma el corte igual que
+    si esta función no existiera. A diferencia de
+    `compute_revaluation_premium_pct()` (que ante falta de datos falla
+    hacia "sin prima", la opción conservadora para SUBIR un precio), aquí
+    el sesgo de seguridad es el opuesto: la falta de histórico NUNCA debe
+    poder bloquear un corte de pérdidas real.
+
+    Con datos suficientes: se compara el ÚLTIMO precio de la ventana
+    contra el MÍNIMO de la ventana (no se exige una serie estrictamente
+    no-creciente, a diferencia de la prima de revalorización -- un valor
+    puede oscilar día a día incluso en una caída real, exigir monotonía
+    sería demasiado frágil). Si el último precio ya repuntó
+    `max_rebound_pct` (config.SELLING_LOSS_CONFIRMATION_MAX_REBOUND_PCT) o
+    más desde ese mínimo, la caída puede estar revirtiendo -- devuelve
+    `(False, nota)`: `decide_sales()` pospone el corte esta pasada (se
+    reevalúa en la siguiente, no se descarta para siempre). Si no,
+    `(True, None)`: se confirma el corte.
+    """
+    lookback_days = (
+        config.SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS if lookback_days is None else lookback_days
+    )
+    min_data_points = (
+        config.SELLING_LOSS_CONFIRMATION_MIN_DATA_POINTS if min_data_points is None else min_data_points
+    )
+    max_rebound_pct = (
+        config.SELLING_LOSS_CONFIRMATION_MAX_REBOUND_PCT if max_rebound_pct is None else max_rebound_pct
+    )
+    now = now or datetime.now(timezone.utc)
+
+    parsed = []
+    for entry in price_points or []:
+        date = parse_iso_datetime(entry.get("recorded_at"))
+        price = entry.get("price")
+        if date is None or not isinstance(price, (int, float)) or price <= 0:
+            continue
+        parsed.append((date, price))
+    parsed.sort(key=lambda t: t[0])
+
+    cutoff = now - timedelta(days=lookback_days)
+    window = [(d, p) for d, p in parsed if d >= cutoff]
+    if len(window) < min_data_points:
+        return True, None  # sin base para juzgar tendencia -- falla ABIERTO, se corta igual
+
+    min_price = min(p for _, p in window)
+    last_price = window[-1][1]
+    rebound_pct = (last_price - min_price) / min_price if min_price > 0 else 0.0
+    if rebound_pct >= max_rebound_pct:
+        note = (
+            f"corte de pérdidas pospuesto: repuntó +{rebound_pct:.1%} desde el mínimo reciente "
+            f"({min_price}) en los últimos {lookback_days:.0f} días -- puede ser ruido en reversión, "
+            "se reevalúa en la siguiente pasada"
+        )
+        return False, note
+
+    return True, None
 
 
 def compute_revaluation_premium_pct(

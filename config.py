@@ -411,6 +411,51 @@ SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
 # resultados reales.
 SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.10"))
 
+# Nº mínimo de datos de precio dentro de SELLING_LOSS_CONFIRMATION_LOOKBACK_
+# DAYS para poder juzgar si un corte de pérdidas (SELLING_MAX_LOSS_PCT) es
+# una tendencia sostenida o ruido de un solo dato reciente (a petición del
+# usuario, evaluación del trigger de venta 2026-09-11, ver docstring de
+# engine.selling_strategy.confirm_loss_is_sustained()). Con menos datos que
+# esto, FALLA ABIERTO -- se corta igual que hoy, nunca se bloquea un corte
+# de pérdidas real solo por falta de histórico (al contrario que la prima
+# de revalorización, que falla cerrado hacia "sin prima": aquí el sesgo de
+# seguridad es el opuesto).
+SELLING_LOSS_CONFIRMATION_MIN_DATA_POINTS = int(os.getenv("SELLING_LOSS_CONFIRMATION_MIN_DATA_POINTS", "2"))
+
+# Ventana hacia atrás (en días) sobre la que se busca esa confirmación --
+# deliberadamente más corta que SELLING_REVALUATION_LOOKBACK_DAYS (7): un
+# corte de pérdidas debe reaccionar rápido, aquí solo se busca filtrar el
+# ruido de un dato puntual, no exigir una tendencia de varias semanas.
+SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS = float(os.getenv("SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS", "3"))
+
+# % máximo de repunte desde el mínimo de esa ventana que se tolera antes de
+# considerar que la caída ya se está revirtiendo y posponer el corte esta
+# pasada (se reevalúa en la siguiente, no se descarta para siempre). No se
+# exige una serie estrictamente no-creciente (a diferencia de la prima de
+# revalorización): un valor puede oscilar día a día incluso en una caída
+# real, así que comparar contra el mínimo de la ventana es más robusto que
+# invalidar la confirmación ante cualquier repunte de un solo día.
+SELLING_LOSS_CONFIRMATION_MAX_REBOUND_PCT = float(os.getenv("SELLING_LOSS_CONFIRMATION_MAX_REBOUND_PCT", "0.05"))
+
+# % máximo de caída (positivo, ej. 0.15 = 15%) desde el valor MÁS ALTO
+# observado desde que el bot compró al jugador (no desde el precio de
+# compra, ver SELLING_MAX_LOSS_PCT) antes de venderlo igualmente, AUNQUE
+# siga en positivo frente al precio de compra -- "corte por reversión desde
+# máximo" (a petición del usuario, evaluación del trigger de venta
+# 2026-09-11, ver docstring de engine/selling_strategy.py): sin esto, un
+# jugador que subió mucho y luego empieza a caer no se toca hasta que la
+# caída acumulada desde la COMPRA cruce SELLING_MAX_LOSS_PCT, dejando que
+# se evapore buena parte de una plusvalía ya generada antes de reaccionar.
+# Deliberadamente más laxo que SELLING_MAX_LOSS_PCT (10%): el objetivo aquí
+# no es cortar una mala operación sino no dejar que se esfume una buena, así
+# que conviene algo más de margen frente a la oscilación normal de un
+# jugador que sigue siendo rentable. No necesita una confirmación de
+# tendencia propia (a diferencia de SELLING_MAX_LOSS_PCT, ver arriba): al
+# compararse contra un máximo HISTÓRICO ya exige una caída sostenida por
+# construcción, no un solo dato de ruido. Sin calibrar todavía con
+# resultados reales.
+SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT = float(os.getenv("SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT", "0.15"))
+
 # % máximo (positivo, ej. 0.15 = 15%) del capital TOTAL del equipo (suma
 # del valor de mercado de toda la plantilla + presupuesto disponible) que
 # puede estar inmovilizado en UN solo jugador con lesión CONFIRMADA (no
