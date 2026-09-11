@@ -260,18 +260,31 @@ def test_run_sales_empty_roster_notifies_without_crashing(tmp_db):
     assert "plantilla vino vacía" in captured[0]
 
 
-def _offer_listing(player_id=25, name="Fer Niño", listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000, is_clause=False, bidder_name="", bidder_slug=""):
+def _offer_listing(
+    player_id=25,
+    name="Fer Niño",
+    listing_price=2_623_496,
+    bid_id="bid1",
+    offer_price=2_700_000,
+    is_clause=False,
+    bidder_name="",
+    bidder_slug="",
+    status="",
+):
     """
     Item de get_my_players_in_market()["answer"] con una única oferta -- ver
     TODO.md #15. Por defecto la oferta es "de Futmondo" (bidder_name/slug
     vacíos, ver _is_futmondo_offer()) -- pasa un bidder_name/slug real para
-    simular una oferta de otro manager.
+    simular una oferta de otro manager. `status`: sano por defecto -- pasa
+    "injured2"/"doubt" para simular un candidato ya lesionado/en duda (ver
+    excepción de riesgo de plantilla en `_process_received_offers()`).
     """
     return {
         "id": player_id,
         "name": name,
         "price": listing_price,
         "isClause": is_clause,
+        "status": status,
         "bids": [{"id": bid_id, "price": offer_price, "userTeam": {"name": bidder_name, "slug": bidder_slug}}],
     }
 
@@ -593,6 +606,131 @@ def test_run_sales_skips_offer_that_would_leave_position_in_real_deficit(tmp_db)
     with get_connection() as conn:
         row = conn.execute("SELECT accepted FROM received_sale_offers WHERE futmondo_bid_id = 'bid_por2'").fetchone()
     assert row["accepted"] == 0
+
+
+def test_run_sales_accepts_offer_on_injured_player_despite_low_bench(tmp_db):
+    """
+    Regresión (2026-09-11, bug real detectado por el usuario): un jugador
+    YA lesionado nunca contaba como "disponible" para el margen de
+    banquillo (ver docstring de engine.squad_risk.assess_squad_depth) --
+    así que aceptar una oferta sobre él no empeora la cobertura real de la
+    posición, aunque el resto de la plantilla en esa posición esté al
+    límite. Con solo 2 porteros (1 sano titular, 1 lesionado listado con
+    oferta) el bench "real" ya es 0 (el lesionado nunca contó como
+    disponible) -- ANTES de este fix, eso bloqueaba la oferta por "riesgo
+    de banquillo" que no era real; ahora se acepta igual.
+    """
+    roster = (
+        [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
+        + [{"id": 2, "role": "portero", "status": "injured2", "value": 300_000}]
+        + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+    )
+    _mark_won(2, 300_000)
+
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_my_players_in_market(self):
+            return {
+                "answer": [
+                    _offer_listing(
+                        player_id=2, name="PorteroLesionado", listing_price=300_000, bid_id="bid_por2",
+                        offer_price=300_000, status="injured2",
+                    )
+                ]
+            }
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid_por2", "2")]
+    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+    assert "NO aceptada(s)" not in captured[0]
+
+
+def test_run_sales_injured_acceptance_does_not_reduce_bench_for_healthy_candidate(tmp_db):
+    """
+    Un candidato lesionado aceptado no debe descontar margen de banquillo
+    "fantasma" que afecte a otro candidato SANO de la misma posición
+    procesado después en la misma pasada -- ambos casos se evalúan de
+    forma independiente. Con 3 porteros (1 titular sano, 1 suplente sano,
+    1 lesionado) el bench real es 1 -- se acepta la oferta del lesionado
+    (no consume margen) y la del suplente sano se sigue evaluando con
+    bench=1 (necesitaría swap para bajar a bench=0, aquí no hay ninguno
+    registrado, así que esa SÍ se omite -- comportamiento correcto,
+    inalterado por la venta del lesionado).
+    """
+    roster = (
+        [{"id": 1, "role": "portero", "status": "", "value": 1_000_000}]
+        + [{"id": 2, "role": "portero", "status": "", "value": 400_000}]
+        + [{"id": 3, "role": "portero", "status": "injured2", "value": 300_000}]
+        + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+        + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+    )
+    _mark_won(2, 400_000)
+    _mark_won(3, 300_000)
+
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_my_players_in_market(self):
+            return {
+                "answer": [
+                    _offer_listing(player_id=2, name="PorteroSano", listing_price=400_000, bid_id="bid_por2", offer_price=400_000),
+                    _offer_listing(
+                        player_id=3, name="PorteroLesionado", listing_price=300_000, bid_id="bid_por3",
+                        offer_price=300_000, status="injured2",
+                    ),
+                ]
+            }
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    # El lesionado se acepta (nunca contó como disponible); el sano se
+    # omite porque bajarlo SÍ dejaría la posición en bench=0 real, sin
+    # swap registrado que lo justifique -- inalterado por la aceptación
+    # del lesionado.
+    assert accept_calls == [("bid_por3", "3")]
+    assert "1 oferta(s) recibida(s) ACEPTADA(S)" in captured[0]
+    assert "1 oferta(s) recibida(s) NO aceptada(s)" in captured[0]
 
 
 def _future_iso(hours):

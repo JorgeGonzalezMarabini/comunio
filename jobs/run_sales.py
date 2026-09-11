@@ -70,7 +70,10 @@ ANTES de aceptar (bench_después >= 1, al menos un suplente sano) salvo
 que sea un "swap" verificado en marcha, el ÚNICO caso en que se permite
 bajar a bench=0 al aceptar -- nunca se acepta si eso dejara la posición
 en déficit real (bench <= 0 antes de aceptar), swap o no, eso NUNCA se
-permite.
+permite. Excepción para lesión/duda (ver docstring de
+`_process_received_offers()`): un candidato ya lesionado/en duda nunca se
+bloquea por este chequeo -- ya estaba excluido de "disponible" antes de
+ponerlo en venta, así que aceptar su oferta no resta cobertura real.
 
 "Swap": una venta que calificó ÚNICAMENTE por "oportunidad de mercado"
 (`only_market_reason` en `engine/selling_strategy.py`) ya identifica, al
@@ -165,7 +168,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 import config
-from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, FutmondoOfferError
+from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, FutmondoOfferError, is_injury_status
 from db.models import (
     get_connection,
     get_player_features,
@@ -406,6 +409,26 @@ def _process_received_offers(
     de un candidato concreto -> ese candidato no se bloquea (permisivo,
     sin dato para evaluar el riesgo).
 
+    Excepción para lesión/duda (bug real detectado 2026-09-11, a petición
+    del usuario: oferta sobre un jugador YA lesionado bloqueada por
+    "riesgo de banquillo" que no era real): `bench_by_position` sale de
+    `_bench_by_position_now()` -> `assess_squad_depth()`, que YA excluye a
+    los lesionados/en duda de "disponible" con independencia de si están
+    listados (ver docstring de esa función) -- así que un candidato
+    lesionado/en duda NUNCA contaba como protección real de la posición, y
+    aceptar su oferta no empeora la cobertura real ni debe descontar
+    margen después, exactamente el mismo principio que
+    `engine.selling_strategy.decide_sales()` ya aplicaba al LISTAR (ver su
+    docstring: "un lesionado nunca contó como disponible, así que no hace
+    falta descontar margen por él"). Antes de este fix, el chequeo bench
+    <= 1 y el decremento posterior se aplicaban por igual a TODOS los
+    candidatos, lesionados incluidos -- bloqueando ofertas reales sin
+    motivo, y pudiendo además descontar margen fantasma que afectaba a
+    otros candidatos SANOS de la misma posición procesados después en la
+    misma pasada. Ahora, con `is_injury_status(item.get("status"))`, un
+    candidato lesionado/en duda se acepta siempre que cualifique por
+    precio (nunca se bloquea por bench, nunca decrementa `bench_by_position`).
+
     Devuelve (aceptadas, fallidas, omitidas_por_riesgo) para el resumen de
     notificación de `run()`. Un fallo al aceptar una oferta concreta (red
     o rechazo de negocio) no aborta el resto -- se audita en `fallidas` y
@@ -460,7 +483,19 @@ def _process_received_offers(
         position = position_by_player_id.get(str(item["id"]))
         bench = bench_by_position.get(position) if position is not None else None
 
-        if bench is not None and bench <= 1:
+        # Un jugador YA lesionado/en duda no contaba como "disponible" al
+        # calcular `bench_by_position` (`_bench_by_position_now()` ->
+        # `assess_squad_depth()`, ver docstring de esa función: excluye
+        # lesión/duda con independencia de si está listado) -- así que
+        # aceptar una oferta sobre él no empeora la cobertura real de la
+        # posición, ni hay que descontarle margen después (mismo principio
+        # que `engine.selling_strategy.decide_sales()`, ver su docstring:
+        # "un lesionado nunca contó como disponible, así que no hace falta
+        # descontar margen por él"). Sin esto, se bloqueaba/descontaba
+        # igual que si fuera un suplente sano real.
+        is_injured_or_doubtful = is_injury_status(item.get("status"))
+
+        if not is_injured_or_doubtful and bench is not None and bench <= 1:
             swap_target = None if bench <= 0 else get_swap_target_for_player(str(item["id"]))
             swap_in_progress = swap_target is not None and _resolve_swap_target(
                 swap_target, position, own_squad_features, market_candidates, live_market_expirations, now
@@ -472,7 +507,7 @@ def _process_received_offers(
         try:
             client.accept_sale_offer(str(best["id"]), str(item["id"]))
             mark_offer_accepted(best["id"])
-            if position is not None and position in bench_by_position:
+            if not is_injured_or_doubtful and position is not None and position in bench_by_position:
                 bench_by_position[position] -= 1  # para que el siguiente candidato de la misma posición lo vea
             accepted.append(
                 {
