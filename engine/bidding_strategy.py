@@ -294,6 +294,7 @@ def decide_bid(
     min_score_threshold: float = None,
     pending_committed: int = 0,
     player_cap: int = None,
+    min_average_points: float = None,
 ) -> dict | None:
     """
     Decide si pujar por `player` (debe incluir "id", "score" de
@@ -307,6 +308,17 @@ def decide_bid(
     topado siempre por max_biddable_amount(). Un jugador con score 0 no se
     puja por encima de su VM; uno con score 1.0 se puja hasta el máximo de
     prima configurado.
+
+    `min_average_points` (config.BIDDING_MIN_AVERAGE_POINTS, a petición del
+    usuario, 2026-09-21): filtro DURO, independiente del score -- descarta
+    a `player` si su `average_points` (puntos por partido YA demostrados,
+    no una proyección de score/xG/tendencia) está por debajo de este
+    mínimo, aunque el score combinado supere `min_score_threshold` (con o
+    sin boosts de prioridad, ver apply_position_priority). Necesario porque
+    ni el score ni sus boosts distinguen "pocos datos todavía" de "cuando
+    ha jugado, ha rendido mal de verdad" -- ver docstring completo en
+    config.py. `average_points` ausente (None) cuenta como 0, mismo
+    criterio que engine.evaluator.normalize_pool.
 
     `player["listing_price"]` (a petición del usuario, 2026-08-22): a
     diferencia del VM, que siempre lo calcula Futmondo, el precio de SALIDA
@@ -337,9 +349,18 @@ def decide_bid(
     listo para persistir en la tabla `bids` (auditoría).
     """
     min_score_threshold = config.BIDDING_MIN_SCORE_THRESHOLD if min_score_threshold is None else min_score_threshold
+    min_average_points = (
+        config.BIDDING_MIN_AVERAGE_POINTS if min_average_points is None else min_average_points
+    )
 
     score = player.get("score", 0)
     if score < min_score_threshold:
+        return None
+
+    if (player.get("average_points") or 0) < min_average_points:
+        # Filtro duro independiente del score (ver docstring de arriba y
+        # config.BIDDING_MIN_AVERAGE_POINTS) -- rendimiento YA demostrado
+        # pobre o nulo, sin lesión/duda que lo justifique.
         return None
 
     price = player.get("price") or 0
@@ -451,21 +472,34 @@ def decide_bids_for_market(
     return decisions
 
 
-def is_price_worth_bidding(player: dict, min_score_threshold: float = None) -> bool:
+def is_price_worth_bidding(
+    player: dict, min_score_threshold: float = None, min_average_points: float = None
+) -> bool:
     """
-    Repite SOLO los dos primeros checks de decide_bid() (score y precio),
-    sin el cap de presupuesto/tope -- para distinguir un candidato
-    "bueno pero bloqueado por límite" de uno simplemente malo. Ver
-    find_cancel_swap_candidates(), que usa esto para decidir qué
+    Repite SOLO los primeros checks de decide_bid() (score, media de
+    puntos y precio), sin el cap de presupuesto/tope -- para distinguir un
+    candidato "bueno pero bloqueado por límite" de uno simplemente malo.
+    Ver find_cancel_swap_candidates(), que usa esto para decidir qué
     candidatos merece la pena considerar para un swap (cancelar una puja
     floja para poder pujar por este) en vez de descartarlos sin más.
 
     Deliberadamente NO calcula `cap`/`amount` — solo evalúa si el
-    candidato PASARÍA esos dos filtros si hubiera presupuesto/tope
-    suficiente, no si de hecho lo hay.
+    candidato PASARÍA esos filtros si hubiera presupuesto/tope suficiente,
+    no si de hecho lo hay.
+
+    `min_average_points`: ver decide_bid()/config.BIDDING_MIN_AVERAGE_POINTS
+    -- se aplica igual aquí (incluido en find_deficit_rescue_swaps(), que
+    llama a esta función sin overridearlo: ni siquiera una urgencia real de
+    plantilla debería fichar a alguien con rendimiento ya demostrado nulo
+    o negativo).
     """
     min_score_threshold = config.BIDDING_MIN_SCORE_THRESHOLD if min_score_threshold is None else min_score_threshold
     if player.get("score", 0) < min_score_threshold:
+        return False
+    min_average_points = (
+        config.BIDDING_MIN_AVERAGE_POINTS if min_average_points is None else min_average_points
+    )
+    if (player.get("average_points") or 0) < min_average_points:
         return False
     return (player.get("price") or 0) > 0
 

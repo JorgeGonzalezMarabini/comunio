@@ -1040,7 +1040,7 @@ def test_run_market_executes_cancel_swap_end_to_end(tmp_db):
 
     fake_proposal = [
         {
-            "candidate": {"id": "new", "score": 0.9, "price": 500_000},
+            "candidate": {"id": "new", "score": 0.9, "price": 500_000, "average_points": 5.0},
             "sacrifice": {
                 "local_row_id": old_row_id,
                 "player_id": "old",
@@ -1109,7 +1109,7 @@ def test_run_market_cancel_swap_aborts_cleanly_when_cancel_bid_fails(tmp_db):
 
     fake_proposal = [
         {
-            "candidate": {"id": "new", "score": 0.9, "price": 500_000},
+            "candidate": {"id": "new", "score": 0.9, "price": 500_000, "average_points": 5.0},
             "sacrifice": {
                 "local_row_id": old_row_id,
                 "player_id": "old",
@@ -1186,7 +1186,7 @@ def test_run_market_executes_deficit_rescue_swap_end_to_end(tmp_db):
 
     fake_proposal = [
         {
-            "candidate": {"id": "med_new", "score": 0.20, "price": 500_000},
+            "candidate": {"id": "med_new", "score": 0.20, "price": 500_000, "average_points": 5.0},
             "sacrifice": {
                 "local_row_id": old_row_id,
                 "player_id": "old_def",
@@ -1259,7 +1259,7 @@ def test_run_market_deficit_rescue_aborts_cleanly_when_cancel_bid_fails(tmp_db):
 
     fake_proposal = [
         {
-            "candidate": {"id": "med_new", "score": 0.20, "price": 500_000},
+            "candidate": {"id": "med_new", "score": 0.20, "price": 500_000, "average_points": 5.0},
             "sacrifice": {
                 "local_row_id": old_row_id,
                 "player_id": "old_def",

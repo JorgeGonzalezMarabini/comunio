@@ -69,7 +69,7 @@ def test_decide_bid_never_bids_below_player_price():
 
 
 def test_decide_bid_anchors_amount_to_real_price_plus_premium():
-    player = {"id": "1", "score": 0.5, "price": 1_000_000}
+    player = {"id": "1", "score": 0.5, "price": 1_000_000, "average_points": 5.0}
     decision = decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0)
     assert decision is not None
     assert decision["amount"] >= player["price"]
@@ -83,8 +83,40 @@ def test_decide_bid_below_score_threshold_returns_none():
 
 
 def test_decide_bid_without_real_price_returns_none():
-    player = {"id": "1", "score": 0.9, "price": 0}
+    player = {"id": "1", "score": 0.9, "price": 0, "average_points": 5.0}
     assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0) is None
+
+
+def test_decide_bid_below_min_average_points_returns_none_even_with_good_score():
+    """
+    Filtro duro independiente del score (a petición del usuario, 2026-09-21,
+    ver config.BIDDING_MIN_AVERAGE_POINTS): rendimiento YA demostrado
+    nulo/negativo no debe pujarse aunque el score combinado sea alto -- casos
+    reales de producción confirmaron pujas por jugadores con average_points
+    negativo (score inflado por trend/xg/boosts, no por rendimiento real).
+    """
+    player = {"id": "1", "score": 0.9, "price": 1_000_000, "average_points": -2.0}
+    assert (
+        decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=1.0) is None
+    )
+
+
+def test_decide_bid_missing_average_points_treated_as_zero():
+    """`average_points` ausente cuenta como 0, mismo criterio que engine.evaluator.normalize_pool."""
+    player = {"id": "1", "score": 0.9, "price": 1_000_000}
+    assert (
+        decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=1.0) is None
+    )
+
+
+def test_decide_bid_uses_config_default_for_min_average_points(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "BIDDING_MIN_AVERAGE_POINTS", 3.0)
+    below = {"id": "1", "score": 0.9, "price": 1_000_000, "average_points": 2.0}
+    above = {"id": "2", "score": 0.9, "price": 1_000_000, "average_points": 3.0}
+    assert decide_bid(below, remaining_budget=20_000_000, already_risked_this_matchday=0) is None
+    assert decide_bid(above, remaining_budget=20_000_000, already_risked_this_matchday=0) is not None
 
 
 def test_decide_bid_rejects_listing_price_way_above_real_value():
@@ -102,7 +134,7 @@ def test_decide_bid_rejects_listing_price_way_above_real_value():
 
 def test_decide_bid_allows_listing_price_within_margin_over_real_value():
     """Un precio de salida algo por encima del VM (dentro del margen configurado) no bloquea la puja."""
-    player = {"id": "1", "score": 0.5, "price": 1_000_000, "listing_price": 1_300_000}
+    player = {"id": "1", "score": 0.5, "price": 1_000_000, "listing_price": 1_300_000, "average_points": 5.0}
     decision = decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0)
     assert decision is not None
     assert decision["amount"] == int(player["price"] * 1.10)  # el cálculo sigue anclado al VM, no al precio de salida
@@ -110,7 +142,7 @@ def test_decide_bid_allows_listing_price_within_margin_over_real_value():
 
 def test_decide_bid_ignores_missing_listing_price():
     """Roster/mercado sin `listing_price` informado (None) no debe activar el rechazo."""
-    player = {"id": "1", "score": 0.5, "price": 1_000_000}
+    player = {"id": "1", "score": 0.5, "price": 1_000_000, "average_points": 5.0}
     assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0) is not None
 
 
@@ -127,7 +159,14 @@ def test_apply_position_priority_boosts_at_risk_position_above_higher_base_score
 
 
 def test_decide_bid_reason_mentions_priority_when_boosted():
-    player = {"id": "1", "score": 0.5, "base_score": 0.35, "position_at_risk": True, "price": 1_000_000}
+    player = {
+        "id": "1",
+        "score": 0.5,
+        "base_score": 0.35,
+        "position_at_risk": True,
+        "price": 1_000_000,
+        "average_points": 5.0,
+    }
     decision = decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0)
     assert decision["position_at_risk"] is True
     assert "prioridad" in decision["reason"]
@@ -186,6 +225,7 @@ def test_decide_bid_reason_mentions_lineup_upgrade_when_boosted():
         "would_upgrade_lineup": True,
         "position_at_risk": False,
         "price": 1_000_000,
+        "average_points": 5.0,
     }
     decision = decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0)
     assert decision["would_upgrade_lineup"] is True
@@ -207,8 +247,8 @@ def test_decide_bids_for_market_accumulates_risk_across_pass():
     solas SÍ habría cabido de sobra en el cap original de 5.4M.
     """
     ranked = [
-        {"id": "primero", "score": 0.5, "price": 4_000_000},
-        {"id": "segundo", "score": 0.4, "price": 2_000_000},
+        {"id": "primero", "score": 0.5, "price": 4_000_000, "average_points": 5.0},
+        {"id": "segundo", "score": 0.4, "price": 2_000_000, "average_points": 5.0},
     ]
     decisions = decide_bids_for_market(ranked, remaining_budget=20_000_000)
     assert len(decisions) == 1
@@ -217,9 +257,9 @@ def test_decide_bids_for_market_accumulates_risk_across_pass():
 
 def test_decide_bids_for_market_respects_max_bids():
     ranked = [
-        {"id": "1", "score": 0.5, "price": 100_000},
-        {"id": "2", "score": 0.4, "price": 100_000},
-        {"id": "3", "score": 0.3, "price": 100_000},
+        {"id": "1", "score": 0.5, "price": 100_000, "average_points": 5.0},
+        {"id": "2", "score": 0.4, "price": 100_000, "average_points": 5.0},
+        {"id": "3", "score": 0.3, "price": 100_000, "average_points": 5.0},
     ]
     decisions = decide_bids_for_market(ranked, remaining_budget=20_000_000, max_bids=2)
     assert len(decisions) == 2
@@ -359,8 +399,8 @@ def test_dynamic_min_score_threshold_raises_bar_high_enough_to_filter_real_world
     # Caso real aproximado: plantilla ~48.7M de VM, presupuesto muy por
     # encima de eso tras varias ventas sin reinvertir (ver diagnóstico).
     threshold = dynamic_min_score_threshold(remaining_budget=150_000_000, squad_value_total=48_748_104)
-    filler_candidate = {"score": 0.20, "price": 1_200_000}  # relleno, score apenas sobre el umbral fijo
-    good_candidate = {"score": 0.70, "price": 12_000_000}  # rendimiento alto de verdad
+    filler_candidate = {"score": 0.20, "price": 1_200_000, "average_points": 5.0}  # relleno, score apenas sobre el umbral fijo
+    good_candidate = {"score": 0.70, "price": 12_000_000, "average_points": 5.0}  # rendimiento alto de verdad
     assert is_price_worth_bidding(filler_candidate, min_score_threshold=threshold) is False
     assert is_price_worth_bidding(good_candidate, min_score_threshold=threshold) is True
 
@@ -371,7 +411,7 @@ def test_decide_bid_uses_dynamic_player_cap_to_allow_bid_above_old_fixed_cap():
     20M con score alto, presupuesto de sobra -> con un player_cap dinámico
     por encima de 20M, decide_bid() SÍ debe pujar.
     """
-    player = {"id": "1", "score": 0.9, "price": 20_000_000}
+    player = {"id": "1", "score": 0.9, "price": 20_000_000, "average_points": 5.0}
     decision = decide_bid(
         player,
         remaining_budget=200_000_000,
@@ -386,17 +426,52 @@ def test_decide_bid_uses_dynamic_player_cap_to_allow_bid_above_old_fixed_cap():
 
 
 def test_is_price_worth_bidding_rejects_low_score_and_missing_price():
-    assert is_price_worth_bidding({"score": 0.9, "price": 0}, min_score_threshold=0.15) is False
-    assert is_price_worth_bidding({"score": 0.1, "price": 1_000_000}, min_score_threshold=0.15) is False
-    assert is_price_worth_bidding({"score": 0.5, "price": 1_000_000}, min_score_threshold=0.15) is True
+    assert is_price_worth_bidding({"score": 0.9, "price": 0, "average_points": 5.0}, min_score_threshold=0.15) is False
+    assert (
+        is_price_worth_bidding({"score": 0.1, "price": 1_000_000, "average_points": 5.0}, min_score_threshold=0.15)
+        is False
+    )
+    assert (
+        is_price_worth_bidding({"score": 0.5, "price": 1_000_000, "average_points": 5.0}, min_score_threshold=0.15)
+        is True
+    )
+
+
+def test_is_price_worth_bidding_rejects_low_average_points_even_with_good_score():
+    """
+    Filtro duro (a petición del usuario, 2026-09-21, ver
+    config.BIDDING_MIN_AVERAGE_POINTS): un candidato con score alto pero
+    rendimiento YA demostrado nulo/negativo no debe pasar, aunque supere el
+    umbral de score con margen.
+    """
+    assert (
+        is_price_worth_bidding(
+            {"score": 0.9, "price": 1_000_000, "average_points": 0.0}, min_score_threshold=0.15, min_average_points=1.0
+        )
+        is False
+    )
+    assert (
+        is_price_worth_bidding(
+            {"score": 0.9, "price": 1_000_000, "average_points": 1.0}, min_score_threshold=0.15, min_average_points=1.0
+        )
+        is True
+    )
 
 
 def test_is_price_worth_bidding_uses_config_default(monkeypatch):
     import config
 
     monkeypatch.setattr(config, "BIDDING_MIN_SCORE_THRESHOLD", 0.5)
-    assert is_price_worth_bidding({"score": 0.4, "price": 1_000_000}) is False
-    assert is_price_worth_bidding({"score": 0.6, "price": 1_000_000}) is True
+    assert is_price_worth_bidding({"score": 0.4, "price": 1_000_000, "average_points": 5.0}) is False
+    assert is_price_worth_bidding({"score": 0.6, "price": 1_000_000, "average_points": 5.0}) is True
+
+
+def test_is_price_worth_bidding_uses_config_default_for_average_points(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "BIDDING_MIN_AVERAGE_POINTS", 2.0)
+    assert is_price_worth_bidding({"score": 0.9, "price": 1_000_000, "average_points": 1.0}) is False
+    assert is_price_worth_bidding({"score": 0.9, "price": 1_000_000, "average_points": 2.0}) is True
 
 
 def _open_bid(player_id, score, bid_id, hours_to_expiry=48, amount=1_000_000, position=None):
@@ -505,8 +580,8 @@ def test_find_cancel_swap_candidates_uses_config_defaults(monkeypatch):
 # --- find_deficit_rescue_swaps (rescatar déficit de plantilla sacrificando una puja de compra) ---
 
 
-def _candidate(id_, position, score=0.5, price=1_000_000):
-    return {"id": id_, "position": position, "score": score, "price": price}
+def _candidate(id_, position, score=0.5, price=1_000_000, average_points=5.0):
+    return {"id": id_, "position": position, "score": score, "price": price, "average_points": average_points}
 
 
 def test_find_deficit_rescue_swaps_proposes_rescue_without_any_score_margin():
@@ -594,7 +669,7 @@ def test_find_deficit_rescue_swaps_no_candidate_for_position_leaves_it_unrescued
 # --- find_reprice_down_candidates (reajustar pujas a la baja si el VM cae) ---
 
 
-def _reprice_bid(player_id, price, score=0.5, amount=1_000_000, bid_id="bid-1", hours_to_expiry=48, **extra):
+def _reprice_bid(player_id, price, score=0.5, amount=1_000_000, bid_id="bid-1", hours_to_expiry=48, average_points=5.0, **extra):
     now = datetime(2026, 8, 18, tzinfo=timezone.utc)
     return {
         "id": player_id,
@@ -604,6 +679,7 @@ def _reprice_bid(player_id, price, score=0.5, amount=1_000_000, bid_id="bid-1", 
         "local_row_id": 1,
         "bid_id": bid_id,
         "expires_at": None if hours_to_expiry is None else now + timedelta(hours=hours_to_expiry),
+        "average_points": average_points,
         **extra,
     }
 

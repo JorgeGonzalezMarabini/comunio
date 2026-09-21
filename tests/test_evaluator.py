@@ -158,6 +158,57 @@ def test_normalize_pool_normalizes_xg_within_position_group_not_whole_pool():
     assert by_id["def_flojo"]["xg"] == 0.0
 
 
+def test_normalize_pool_shrinks_xg90_towards_zero_for_low_minutes(monkeypatch):
+    """
+    Regresión real de producción (2026-09-21): un jugador con pocos
+    minutos y un solo remate podía salir con xG/90 disparatado (xg /
+    minutes_played * 90 sin ningún suelo), fijando el 1.0 normalizado de
+    todo su grupo y aplastando a un compañero con minutos y rendimiento
+    reales. Con EVALUATOR_XG90_MIN_MINUTES=270 (3 partidos), un jugador con
+    1 minuto y 0.08 xG (xG/90 crudo=7.2, muy por encima del titular real)
+    debe encogerse hacia 0 -- muy por debajo del titular, no por encima.
+    """
+    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES", 270.0)
+    raw = [
+        {"id": "titular", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 0.9, "minutes_played": 900, "games": 10},
+        {"id": "ruido_1min", "position": "DEL", "price": 1_000_000, "average_points": 1.0, "xg": 0.08, "minutes_played": 1, "games": 1},
+    ]
+    normalized = normalize_pool(raw)
+    by_id = {p["id"]: p for p in normalized}
+
+    # Sin el suelo: ruido_1min (xG/90 crudo=7.2) normalizaría a 1.0 y
+    # titular (xG/90 crudo=0.09) a 0.0 -- justo al revés de lo esperado.
+    assert by_id["titular"]["xg"] == 1.0
+    assert by_id["ruido_1min"]["xg"] == 0.0
+
+
+def test_normalize_pool_xg90_shrinkage_scales_linearly_with_minutes_not_towards_group_average(monkeypatch):
+    """
+    El factor de encogimiento es `minutes_played / EVALUATOR_XG90_MIN_MINUTES`
+    (hacia 0), NO una mezcla con la tasa media del grupo -- con pools
+    pequeños (el propio mercado de candidatos de jobs/run_market.py, unos
+    20 jugadores en 4 posiciones) mezclar con la media del grupo puede
+    "contagiar" a un jugador de pocos minutos la tasa de OTRO compañero de
+    grupo con minutos reales, en vez de neutralizarlo.
+    """
+    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES", 200.0)
+    raw = [
+        # Con minutos de sobra: xG/90 crudo intacto, fija el suelo del grupo.
+        {"id": "suelo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 1.0, "minutes_played": 1000, "games": 10},
+        # A mitad del umbral (100/200): xG/90 crudo (0.9) escalado x0.5 -> 0.45.
+        {"id": "media_credibilidad", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 1.0, "minutes_played": 100, "games": 2},
+        # Con minutos de sobra: xG/90 crudo intacto, fija el techo del grupo.
+        {"id": "techo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 10.0, "minutes_played": 1000, "games": 10},
+    ]
+    normalized = normalize_pool(raw)
+    by_id = {p["id"]: p for p in normalized}
+    # xg90 crudo: suelo=0.09, media_credibilidad=0.9->0.45 (encogido), techo=0.9
+    # minmax sobre [0.09, 0.45, 0.9] -> media_credibilidad = (0.45-0.09)/(0.9-0.09) = 0.36/0.81
+    assert by_id["suelo"]["xg"] == pytest.approx(0.0)
+    assert by_id["techo"]["xg"] == pytest.approx(1.0)
+    assert by_id["media_credibilidad"]["xg"] == pytest.approx(0.36 / 0.81)
+
+
 def test_normalize_pool_minutes_ratio_uses_team_games_over_player_games_when_available():
     """
     Regresión de TODO.md #12: sin `team_games`, minutes_played_ratio se
@@ -240,6 +291,31 @@ def test_score_player_clean_sheet_rate_only_applies_to_por_and_def():
     assert score_player({**base, "position": "DEF"}, weights=weights) == pytest.approx(1.0)
     assert score_player({**base, "position": "MED"}, weights=weights) == pytest.approx(0.0)
     assert score_player({**base, "position": "DEL"}, weights=weights) == pytest.approx(0.0)
+
+
+def test_score_player_excludes_xg_only_for_por():
+    """
+    Revisión 2026-09-21 (a petición del usuario, tras 14 días con los
+    pesos rebalanceados de config.EVALUATOR_WEIGHTS): Understat no traquea
+    xG de porteros (su xg crudo siempre es 0), así que normalize_pool() les
+    da a TODOS el mismo 0.5 normalizado -- una señal sin ninguna
+    información que solo inflaba el score de POR frente al resto de
+    posiciones. score_player NO debe sumar "xg" cuando `position` es "POR",
+    pero SÍ debe seguir sumándolo para el resto de posiciones (a
+    diferencia de "clean_sheet_rate", que es al revés: solo POR/DEF).
+    """
+    weights = {
+        "futmondo_points_per_price": 0,
+        "futmondo_trend": 0,
+        "xg": 1.0,
+        "minutes_played": 0,
+    }
+    base = {"points_per_price": 0, "trend": 0, "xg": 1.0, "minutes_played_ratio": 0}
+
+    assert score_player({**base, "position": "POR"}, weights=weights) == pytest.approx(0.0)
+    assert score_player({**base, "position": "DEF"}, weights=weights) == pytest.approx(1.0)
+    assert score_player({**base, "position": "MED"}, weights=weights) == pytest.approx(1.0)
+    assert score_player({**base, "position": "DEL"}, weights=weights) == pytest.approx(1.0)
 
 
 def test_score_player_ignores_clean_sheet_rate_if_weight_not_configured():

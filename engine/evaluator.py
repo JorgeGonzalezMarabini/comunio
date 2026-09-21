@@ -63,10 +63,23 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
         aplicarlo también a MED/DEL premiaría a sus jugadores por algo que
         el juego no les puntúa a ellos.
 
+    "xg" (a diferencia de las anteriores, no es opcional -- se aplica
+    siempre que esté en `weights`) se excluye por completo para `position`
+    "POR" (revisión 2026-09-21, ver config.EVALUATOR_WEIGHTS): Understat no
+    traquea xG de porteros, así que su valor normalizado es siempre 0.5 (ver
+    `normalize_pool`, rango 0 dentro del grupo) -- sumarlo no aporta ninguna
+    información y solo distorsiona la comparación de score ENTRE posiciones
+    (jobs/run_market.py compara el score de todas las posiciones en la
+    misma escala). El resto de posiciones sí lo suman, con el xG/90
+    encogido hacia la media del grupo para minutos bajos -- ver
+    `config.EVALUATOR_XG90_MIN_MINUTES` y `normalize_pool`.
+
     Devuelve un score comparable entre jugadores (mayor = mejor). Con los
     pesos de EVALUATOR_WEIGHTS, el rango típico es aprox. [-0.20, 0.90] para
     MED/DEL (la suma de pesos positivos es 0.90, doubt_penalty resta hasta
-    0.20 más) y algo mayor para POR/DEF, que además suman "clean_sheet_rate".
+    0.20 más), [-0.20, 0.65] para POR (sin "xg", con "clean_sheet_rate": 0.90
+    - 0.40 + 0.15) y algo mayor para DEF, que suma ambas señales (0.90 +
+    0.15 = 1.05).
 
     TODO: los pesos son un punto de partida razonado, no calibrado todavía
     contra resultados reales de la liga — ajustar con el tiempo en
@@ -78,9 +91,10 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
     score = (
         w["futmondo_points_per_price"] * player_stats.get("points_per_price", 0)
         + w["futmondo_trend"] * player_stats.get("trend", 0)
-        + w["xg"] * player_stats.get("xg", 0)
         + w["minutes_played"] * player_stats.get("minutes_played_ratio", 0)
     )
+    if player_stats.get("position") != "POR":
+        score += w["xg"] * player_stats.get("xg", 0)
 
     if "clean_sheet_rate" in w and player_stats.get("position") in ("POR", "DEF"):
         score += w["clean_sheet_rate"] * player_stats.get("clean_sheet_rate", 0)
@@ -150,6 +164,21 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         ahora mismo), sin necesitar consultar el histórico completo.
       - xg: xG por 90 minutos (xg / minutes_played * 90). Comparar xG total
         penalizaría a quien ha jugado menos minutos sin ser peor jugador.
+        Con pocos minutos jugados, esa extrapolación a 90' es ruido -- un
+        único remate en 5 minutos puede dar un xG/90 disparatado, muy por
+        encima de cualquier titular real (confirmado con datos de
+        producción, 2026-09-21: un jugador con 1 minuto jugado y 0.08 xG
+        salía con xG/90=6.88, varias veces el de cualquier delantero con
+        minutos reales, fijando el 1.0 normalizado de su grupo entero).
+        Por debajo de `config.EVALUATOR_XG90_MIN_MINUTES` se ENCOGE HACIA
+        0 (no hacia la media del grupo -- con pools pequeños, como el
+        propio mercado de candidatos que evalúa jobs/run_market.py, esa
+        media puede estar dominada por un único jugador con minutos
+        reales, "contagiando" su tasa a un compañero de 0 minutos en vez
+        de neutralizarlo), en proporción LINEAL a cuántos minutos reales
+        respaldan el dato: con 0 minutos, factor 0 (mismo criterio que el
+        resto de features sin dato); con el umbral o más, factor 1 (valor
+        crudo intacto). Aplicado ANTES del minmax por grupo de abajo.
       - minutes_played_ratio: minutes_played / (team_games * 90) cuando se
         conoce `team_games` (partidos YA JUGADOS por el equipo esta
         temporada, ver `jobs/sync_data._team_games_by_title()` — resuelve
@@ -185,6 +214,8 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     minutes_ratio = [0.0] * n
     clean_sheet_rate = [0.0] * n
 
+    min_minutes = config.EVALUATOR_XG90_MIN_MINUTES
+
     for i, p in enumerate(raw_players):
         price = p.get("price") or 0
         avg_points = p.get("average_points") or 0
@@ -196,6 +227,16 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         minutes = p.get("minutes_played") or 0
         xg = p.get("xg") or 0
         xg90[i] = xg / minutes * 90 if minutes > 0 else 0
+        # Encoge xg90 hacia 0 (no hacia la media del grupo -- ver docstring
+        # de arriba: con pools pequeños, como el propio mercado de
+        # candidatos en jobs/run_market.py, la tasa media del grupo puede
+        # estar dominada por un único jugador con minutos reales, "contagiando"
+        # su xg90 a un compañero de 0 minutos en vez de neutralizarlo) en
+        # proporción lineal a cuántos minutos reales respaldan el dato: 0
+        # minutos -> factor 0 (igual que el resto de features sin dato); a
+        # partir de `min_minutes` -> factor 1 (valor crudo intacto).
+        if min_minutes > 0:
+            xg90[i] *= min(1.0, minutes / min_minutes)
 
         team_games = p.get("team_games") or 0
         if team_games > 0:

@@ -153,14 +153,48 @@ ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower(
 # MED/DEL el peso es irrelevante, así que no hace falta bajarles nada al
 # resto de pesos para dejarle sitio. Sin calibrar todavía con resultados
 # reales, igual que el resto de EVALUATOR_WEIGHTS.
+# "xg" excluido para POR (2026-09-21, revisión a petición del usuario tras
+# 14 días con los pesos rebalanceados de arriba): Understat no traquea xG
+# de porteros (su xg crudo es siempre 0), así que normalize_pool() les da
+# a TODOS el mismo 0.5 normalizado (rango 0 dentro del grupo, ver
+# _minmax_normalize) -- una señal SIN NINGUNA información que solo inflaba
+# el score de POR frente al resto de posiciones al comparar candidatos
+# entre sí (jobs/run_market.py compara el score de todas las posiciones en
+# la misma escala para umbral/prioridad/swap). Confirmado con datos reales
+# de producción: con "xg" peso 0.40 el score medio de POR (0.392) superaba
+# al de MED (0.218) pese a que Futmondo puntúa a los porteros sobre todo
+# por portería a cero -- señal que SÍ aporta información real y sigue
+# aplicando a POR vía "clean_sheet_rate" (ver engine.evaluator.score_player).
+# Ver también EVALUATOR_XG90_MIN_MINUTES más abajo (mismo análisis, xG con
+# pocos minutos jugados).
 EVALUATOR_WEIGHTS = {
     "futmondo_points_per_price": 0.10,  # rendimiento Futmondo relativo al precio
     "futmondo_trend": 0.20,             # tendencia de puntuación reciente
-    "xg": 0.40,                         # expected goals (Understat)
+    "xg": 0.40,                         # expected goals (Understat) -- no aplica a POR, ver comentario de arriba
     "minutes_played": 0.20,             # continuidad / peso en su equipo
     "clean_sheet_rate": 0.15,           # portería a cero del equipo -- solo aplica a POR/DEF
     "doubt_penalty": 0.20,              # penalización si en duda (no lesión confirmada, esa se descarta antes)
 }
+
+# Minutos jugados a partir de los cuales se confía por completo en el xG/90
+# CRUDO de un jugador (ver engine.evaluator.normalize_pool) -- por debajo,
+# se encoge HACIA 0 (no hacia la media del grupo: con pools pequeños, como
+# el propio mercado de candidatos que evalúa jobs/run_market.py -- unos 20
+# jugadores repartidos en 4 posiciones --, esa media puede estar dominada
+# por un único jugador con minutos reales, "contagiando" su tasa a un
+# compañero de 0 minutos en vez de neutralizarlo), en proporción lineal a
+# cuántos minutos reales respaldan el dato (0 minutos -> factor 0; este
+# umbral o más -> factor 1, valor crudo intacto). Punto de partida: 270
+# minutos = 3 partidos completos, un mínimo razonable antes de tratar una
+# extrapolación a 90' como representativa. Sin este suelo, un jugador con
+# 1-10 minutos jugados y un solo remate puede salir con xG/90 varias veces
+# mayor que el mejor delantero de la liga con minutos reales -- confirmado
+# con datos de producción (2026-09-21): un jugador con 1 minuto jugado y
+# 0.08 xG salía con xG/90=6.88 (vs. máximo real de un titular ~1.5),
+# fijando el 1.0 normalizado de su grupo entero y aplastando a cualquier
+# delantero con rendimiento genuino a lo largo de la temporada. Sin
+# calibrar todavía con resultados reales tras el cambio.
+EVALUATOR_XG90_MIN_MINUTES = float(os.getenv("EVALUATOR_XG90_MIN_MINUTES", "270"))
 
 # Para ELEGIR ALINEACIÓN: el precio NO debe importar — un jugador de la
 # plantilla ya está comprado, su precio es coste hundido. Reutilizar
@@ -257,6 +291,34 @@ BIDDING_DYNAMIC_CAP_WEIGHTS = {
 # Score mínimo (ver engine/evaluator.score_player) para considerar pujar por
 # un jugador. Punto de partida sin calibrar con datos reales todavía.
 BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.15"))
+
+# Media de puntos por partido mínima (a petición del usuario, 2026-09-21,
+# ver engine.bidding_strategy.decide_bid/is_price_worth_bidding) para
+# considerar pujar por un jugador -- filtro DURO, independiente del score:
+# ni el score combinado (ver EVALUATOR_WEIGHTS) ni sus boosts de
+# prioridad/mejora (BIDDING_POSITION_RISK_BOOST/BIDDING_UPGRADE_BOOST)
+# distinguen "pocos datos todavía" de "cuando ha jugado, ha rendido mal de
+# verdad" -- un jugador con `average_points` NEGATIVO o cercano a 0 puede
+# superar igualmente el umbral de score por trend/xg/minutos, sobre todo
+# con los boosts de riesgo de plantilla sumados. Confirmado con casos
+# reales de producción (2026-09-21): se pujó por un portero con
+# average_points=-2.0 (score=0.525, muy por encima del umbral de 0.15) y
+# por un defensa con average_points=0.0 (score=0.857) -- ninguno de los
+# dos tenía lesión/duda que lo descartase antes, y su rendimiento real ya
+# demostrado (no una hipótesis de xG/tendencia) era malo o nulo.
+# `player.get("average_points")` ausente (None, sin snapshot todavía) se
+# trata como 0 -- mismo criterio conservador que el resto de features sin
+# dato en engine.evaluator.normalize_pool -- así que un jugador sin
+# ninguna jornada registrada tampoco pasa este filtro hasta tener datos.
+# Aplica también al rescate de déficit de plantilla (find_deficit_rescue_
+# swaps usa is_price_worth_bidding() sin overridear esto) -- incluso con
+# urgencia real, no tiene sentido fichar a alguien con rendimiento
+# demostrado nulo o negativo solo por rellenar un hueco. Punto de partida:
+# 1.0 excluye solo la cola de rendimiento verificado muy pobre (negativo o
+# cero en varias jornadas), sin tocar fichajes baratos con pocos minutos
+# pero puntuación media modesta/decente. Sin calibrar todavía con
+# resultados reales.
+BIDDING_MIN_AVERAGE_POINTS = float(os.getenv("BIDDING_MIN_AVERAGE_POINTS", "1.0"))
 
 # --- "Presupuesto objetivo" (a petición del usuario, 2026-09-07) ---
 # Hasta ahora el presupuesto disponible solo subía un TECHO pasivo (cuánto
