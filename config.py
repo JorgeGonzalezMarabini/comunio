@@ -306,9 +306,35 @@ BIDDING_SAFETY_LIMITS = {
 # sumar 1.0.
 BIDDING_DYNAMIC_CAP_WEIGHTS = {
     "squad_value": 0.40,   # precio medio de TU plantilla -- estable, no depende de qué haya a la venta hoy
-    "market_value": 0.35,  # precio medio del mercado ponderado por score -- inflación general sin dejarse desviar por un outlier puntual
+    "market_value": 0.35,  # precio medio del mercado ponderado por score, ver BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER más abajo
     "budget_pct": 0.25,    # % del saldo disponible ahora -- ligado a lo que de verdad puedes permitirte hoy
 }
+
+# "market_value" (arriba) pondera el precio de cada candidato del mercado
+# por su score -- pensado para que un candidato carísimo con score BAJO
+# (mal rendimiento, a la venta por casualidad) no desvíe la media, ya que
+# pesa casi 0. Pero NO protege el caso contrario, real y confirmado en
+# producción (2026-09-21, al revisar si el tope de precio necesitaba
+# subir tras exigir más calidad en la puja -- ver BIDDING_MIN_AVERAGE_
+# POINTS/EVALUATOR_XG90_MIN_MINUTES_RATIO): un jugador carísimo con score
+# ALTO (una estrella real, listada un día concreto a un precio que ningún
+# presupuesto de fantasy puede permitirse igual) pesa casi 1 en la media
+# ponderada -- un solo listado así puede disparar `avg_market_value`
+# varias veces (confirmado: de 4.6M a 16.1M en el mercado real de ese día,
+# solo por un candidato). El tope por jugador de TODOS los demás
+# candidatos ese día queda inflado por un precio que nunca se va a pagar.
+# Este multiplicador acota el precio de cada candidato ANTES de la media
+# ponderada a `avg_squad_value * este_valor` (nunca el score, que sigue
+# intacto) -- ningún jugador individual debería pesar en "cuánto vale el
+# mercado para TU equipo" con un precio varias veces el de tu propia
+# plantilla media; a partir de ahí ya no es una referencia realista, es un
+# caso aislado. `avg_squad_value <= 0` (plantilla vacía, caso degenerado)
+# no aplica ningún recorte -- sin plantilla propia no hay referencia
+# contra la que acotar. Punto de partida: 5x, sin calibrar todavía con
+# resultados reales.
+BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER = float(
+    os.getenv("BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER", "5.0")
+)
 
 # Score mínimo (ver engine/evaluator.score_player) para considerar pujar por
 # un jugador. Punto de partida sin calibrar con datos reales todavía.

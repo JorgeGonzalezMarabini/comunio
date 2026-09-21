@@ -64,7 +64,16 @@ def dynamic_player_cap(
         venta por casualidad un día concreto) descalibre el tope; los
         candidatos realmente atractivos (score alto) pesan más en la
         media. Scores negativos (penalización por lesión) se tratan como 0
-        de peso, no restan.
+        de peso, no restan. Esto NO protege el caso contrario -- un
+        jugador carísimo con score ALTO (una estrella real, listada un día
+        concreto a un precio que ningún presupuesto de fantasy puede
+        permitirse igual) pesa casi 1 en la media, así que su precio se
+        acota antes de entrar en la media a `avg_squad_value *
+        config.BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER` (ver
+        docstring de ese config): un solo listado así no debería disparar
+        el tope de TODOS los demás candidatos ese día (confirmado en datos
+        reales de producción, 2026-09-21). Solo acota el PRECIO usado en
+        la media -- el score que determina el peso no se toca.
       - budget_pct: `remaining_budget * max_pct_of_budget_per_player` — %
         del saldo disponible ahora, ligado a lo que de verdad se puede
         permitir hoy.
@@ -81,8 +90,22 @@ def dynamic_player_cap(
     squad_prices = [p["price"] for p in squad if p.get("price")]
     avg_squad_value = sum(squad_prices) / len(squad_prices) if squad_prices else 0.0
 
+    # Acota el precio de cada candidato ANTES de la media ponderada (ver
+    # docstring de arriba y config.BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_
+    # MULTIPLIER) -- sin plantilla propia (avg_squad_value<=0, caso
+    # degenerado) no hay referencia contra la que acotar, se deja el
+    # precio intacto, igual que el resto de casos degenerados de esta
+    # función.
+    price_cap_for_average = (
+        avg_squad_value * config.BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER if avg_squad_value > 0 else None
+    )
     market_priced = [
-        (p["price"], max(p.get("score", 0.0), 0.0)) for p in market_candidates if p.get("price")
+        (
+            min(p["price"], price_cap_for_average) if price_cap_for_average is not None else p["price"],
+            max(p.get("score", 0.0), 0.0),
+        )
+        for p in market_candidates
+        if p.get("price")
     ]
     avg_market_value = _weighted_average(market_priced)
 

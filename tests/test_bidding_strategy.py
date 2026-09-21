@@ -308,6 +308,51 @@ def test_dynamic_player_cap_market_component_weights_by_score_not_plain_price():
     assert cap_with_outlier - cap_without_outlier < 2_000_000
 
 
+def test_dynamic_player_cap_clips_high_score_high_price_outlier_before_averaging(monkeypatch):
+    """
+    Regresión real de producción (2026-09-21, al revisar si el tope de
+    precio necesitaba subir tras exigir más calidad en la puja): a
+    diferencia del test de arriba (outlier caro con score BAJO, ya
+    protegido porque pesa casi 0), un outlier caro con score ALTO -- una
+    estrella real listada un día concreto a un precio que ningún
+    presupuesto de fantasy puede permitirse -- pesa casi igual que
+    cualquier candidato normal y puede disparar `avg_market_value` varias
+    veces (confirmado con datos reales: de 4.6M a 16.1M solo por un
+    listado). BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER acota el
+    PRECIO de cada candidato (no su score/peso) a `avg_squad_value *
+    multiplicador` antes de la media -- con un multiplicador bajo el tope
+    resultante debe quedar muy por debajo del que saldría sin recorte
+    (multiplicador muy alto, efectivamente sin acotar).
+    """
+    import config
+
+    squad = [{"price": 6_000_000} for _ in range(10)]  # avg_squad_value = 6M
+    market = [
+        {"price": 3_000_000, "score": 0.7},
+        {"price": 5_000_000, "score": 0.6},
+        {"price": 100_000_000, "score": 0.9},  # estrella real, precio fuera de cualquier escala razonable
+    ]
+
+    monkeypatch.setattr(config, "BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER", 5.0)
+    cap_clipped = dynamic_player_cap(remaining_budget=250_000_000, squad=squad, market_candidates=market)
+
+    monkeypatch.setattr(config, "BIDDING_DYNAMIC_CAP_MARKET_OUTLIER_MULTIPLIER", 1000.0)  # efectivamente sin recorte
+    cap_effectively_unclipped = dynamic_player_cap(remaining_budget=250_000_000, squad=squad, market_candidates=market)
+
+    assert cap_clipped < cap_effectively_unclipped
+    assert cap_clipped < 25_000_000  # recorte a 5*6M=30M -> tope acotado
+    assert cap_effectively_unclipped > 25_000_000  # sin recorte, el precio bruto (100M) arrastra el tope al alza
+
+
+def test_dynamic_player_cap_market_outlier_clip_skipped_with_empty_squad():
+    """Sin plantilla propia (avg_squad_value<=0, caso degenerado) no hay referencia contra la que acotar -- no se recorta nada."""
+    market = [{"price": 100_000_000, "score": 0.9}]
+    cap_empty_squad = dynamic_player_cap(remaining_budget=250_000_000, squad=[], market_candidates=market)
+    # Sin recorte, el precio bruto del outlier arrastra el tope muy por
+    # encima de lo que cualquier avg_squad_value*multiplicador razonable daría.
+    assert cap_empty_squad > 25_000_000
+
+
 def test_dynamic_player_cap_budget_component_scales_with_remaining_budget():
     squad = [{"price": 1_000_000}]
     market = [{"price": 1_000_000, "score": 0.1}]
