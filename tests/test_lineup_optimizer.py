@@ -51,6 +51,21 @@ def test_pick_lineup_prefers_healthy_over_higher_scored_injured():
     assert "del_lesionado" in lineup["bench"]
 
 
+def test_pick_lineup_prefers_healthy_over_higher_scored_redcard():
+    """
+    Un jugador sancionado por tarjeta roja (`status="redcard"`, ver
+    clients/futmondo_client.py) tampoco debe entrar de titular si hay un
+    sano disponible en su posición -- mismo criterio que una lesión
+    confirmada, aunque el sancionado tenga mejor expected_score.
+    """
+    squad = _squad_442() + [
+        {"id": "del_sancionado", "position": "DEL", "expected_score": 0.99, "status": "redcard"},
+    ]
+    lineup = pick_lineup(squad, formation="4-4-2")
+    assert "del_sancionado" not in lineup["starters"]
+    assert "del_sancionado" in lineup["bench"]
+
+
 def test_pick_lineup_falls_back_to_injured_when_no_healthy_left():
     """Sin nadie sano en la posición, mejor un lesionado de titular que dejar el hueco sin cubrir."""
     squad = [{"id": "por1", "position": "POR", "expected_score": 0.9}]

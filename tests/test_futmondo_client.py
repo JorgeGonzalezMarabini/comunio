@@ -335,6 +335,10 @@ def test_futmondo_position_map_translates_spanish_roles_to_short_codes():
         ("doubt", True),
         ("DOUBT", True),
         ("injured2", True),
+        # Confirmado por el usuario 2026-09-21: la UI de Futmondo marca al
+        # sancionado por tarjeta roja con este status.
+        ("redcard", True),
+        ("REDCARD", True),
     ],
 )
 def test_is_injury_status(status, expected):
@@ -355,6 +359,7 @@ def test_is_injury_status(status, expected):
         ("injured2", False),
         ("lesion", False),
         ("lesión", False),
+        ("redcard", False),
     ],
 )
 def test_is_doubtful_status_only_matches_doubt(status, expected):
@@ -374,13 +379,15 @@ def test_is_doubtful_status_only_matches_doubt(status, expected):
         ("injured2", True),
         ("lesion", True),
         ("lesión", True),
+        ("redcard", True),
+        ("REDCARD", True),
     ],
 )
 def test_is_confirmed_injured_status_excludes_doubt(status, expected):
     assert is_confirmed_injured_status(status) is expected
 
 
-@pytest.mark.parametrize("status", ["doubt", "injured", "injured2", "lesion", "lesión", None, "", "ok"])
+@pytest.mark.parametrize("status", ["doubt", "injured", "injured2", "lesion", "lesión", "redcard", None, "", "ok"])
 def test_is_injury_status_is_the_union_of_doubtful_and_confirmed_injured(status):
     """
     Regresión: is_injury_status() debe seguir siendo exactamente el OR de

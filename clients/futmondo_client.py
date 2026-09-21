@@ -116,10 +116,15 @@ Nombres de campo reales confirmados por fetch autenticado real:
             (ambos sanos; por qué hay dos valores distintos para lo mismo
             sigue sin explicarse, pero ninguno se trata como lesión),
             "doubt" (duda — jugador en riesgo, Vivian/Athletic, Pablo
-            Durán/Celta, Boayar/Elche vistos con este valor) e "injuredN"
+            Durán/Celta, Boayar/Elche vistos con este valor), "injuredN"
             (lesionado, tier numerado — "injured2" visto en Sergi Canós/
             Valencia; no se ha visto todavía si existen otros tiers como
-            "injured1" o "injured3"). Esto CONTRADICE la referencia
+            "injured1" o "injured3") y "redcard" (sancionado por tarjeta
+            roja — confirmado por el usuario 2026-09-21 a partir del icono
+            que muestra la UI de Futmondo sobre el jugador; no capturado en
+            la sesión de reverse-engineering original porque ningún
+            jugador expulsado estaba en la muestra de esa liga en ese
+            momento, ver FUTMONDO_INJURY_STATUS_SUBSTRINGS). Esto CONTRADICE la referencia
             comunitaria en la que se basaba la heurística original
             (esperaba subcadenas en español, "lesion"/"lesión"): el campo
             real es en inglés. Ver FUTMONDO_INJURY_STATUSES/
@@ -229,8 +234,20 @@ FUTMONDO_POSITION_MAP = {
 # resto de módulos (engine/squad_risk.py, engine/lineup_optimizer.py,
 # engine/selling_strategy.py) sigue usando is_injury_status() sin
 # distinguir gravedad -- ahí solo importa sano/no-sano, no por qué.
+#
+# "redcard" (confirmado por el usuario, 2026-09-21 -- la UI de Futmondo
+# muestra un icono de tarjeta roja sobre el jugador con este `status`; no
+# capturado en la sesión de reverse-engineering original de 2026-08-17/18
+# porque ningún jugador expulsado estaba en la muestra de esa liga en ese
+# momento) es una SANCIÓN, no una lesión, pero para quien decide
+# alineación/suplentes/fichajes el efecto es el mismo que una lesión
+# CONFIRMADA: baja segura para el próximo partido. Se agrupa con
+# FUTMONDO_INJURED_STATUS_SUBSTRINGS (no con "doubt") por eso -- is_
+# confirmed_injured_status() pasa a cubrir "no juega seguro", sea por
+# lesión o por sanción, sin que haga falta un tercer nivel/función en
+# engine/lineup_optimizer.py ni en el resto de consumidores.
 FUTMONDO_DOUBT_STATUS_SUBSTRINGS = ("doubt",)
-FUTMONDO_INJURED_STATUS_SUBSTRINGS = ("injured", "lesion", "lesión")
+FUTMONDO_INJURED_STATUS_SUBSTRINGS = ("injured", "lesion", "lesión", "redcard")
 FUTMONDO_INJURY_STATUS_SUBSTRINGS = FUTMONDO_DOUBT_STATUS_SUBSTRINGS + FUTMONDO_INJURED_STATUS_SUBSTRINGS
 
 
@@ -259,11 +276,14 @@ def is_doubtful_status(status: str | None) -> bool:
 
 def is_confirmed_injured_status(status: str | None) -> bool:
     """
-    Lesión ya confirmada ("injuredN", tier numerado -- o "lesion"/"lesión"
-    como colchón defensivo, ver comentario de FUTMONDO_INJURY_STATUS_SUBSTRINGS),
-    a diferencia de is_doubtful_status() ("doubt", solo duda). Usado por
-    jobs/run_market.py para descartar directamente a un candidato de
-    fichaje del mercado, en vez de solo penalizarlo en el score.
+    Baja segura para el próximo partido: lesión ya confirmada ("injuredN",
+    tier numerado -- o "lesion"/"lesión" como colchón defensivo) O sanción
+    por tarjeta roja ("redcard", ver comentario de
+    FUTMONDO_INJURY_STATUS_SUBSTRINGS) -- a diferencia de
+    is_doubtful_status() ("doubt", el jugador todavía puede llegar a
+    jugar). Usado por jobs/run_market.py para descartar directamente a un
+    candidato de fichaje del mercado, en vez de solo penalizarlo en el
+    score.
     """
     if not status:
         return False
