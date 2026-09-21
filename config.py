@@ -165,7 +165,7 @@ ENABLE_REAL_LINEUP_CHECK = os.getenv("ENABLE_REAL_LINEUP_CHECK", "false").lower(
 # al de MED (0.218) pese a que Futmondo puntúa a los porteros sobre todo
 # por portería a cero -- señal que SÍ aporta información real y sigue
 # aplicando a POR vía "clean_sheet_rate" (ver engine.evaluator.score_player).
-# Ver también EVALUATOR_XG90_MIN_MINUTES más abajo (mismo análisis, xG con
+# Ver también EVALUATOR_XG90_MIN_MINUTES_RATIO más abajo (mismo análisis, xG con
 # pocos minutos jugados).
 EVALUATOR_WEIGHTS = {
     "futmondo_points_per_price": 0.10,  # rendimiento Futmondo relativo al precio
@@ -176,25 +176,47 @@ EVALUATOR_WEIGHTS = {
     "doubt_penalty": 0.20,              # penalización si en duda (no lesión confirmada, esa se descarta antes)
 }
 
-# Minutos jugados a partir de los cuales se confía por completo en el xG/90
-# CRUDO de un jugador (ver engine.evaluator.normalize_pool) -- por debajo,
-# se encoge HACIA 0 (no hacia la media del grupo: con pools pequeños, como
-# el propio mercado de candidatos que evalúa jobs/run_market.py -- unos 20
-# jugadores repartidos en 4 posiciones --, esa media puede estar dominada
-# por un único jugador con minutos reales, "contagiando" su tasa a un
-# compañero de 0 minutos en vez de neutralizarlo), en proporción lineal a
-# cuántos minutos reales respaldan el dato (0 minutos -> factor 0; este
-# umbral o más -> factor 1, valor crudo intacto). Punto de partida: 270
-# minutos = 3 partidos completos, un mínimo razonable antes de tratar una
-# extrapolación a 90' como representativa. Sin este suelo, un jugador con
-# 1-10 minutos jugados y un solo remate puede salir con xG/90 varias veces
-# mayor que el mejor delantero de la liga con minutos reales -- confirmado
-# con datos de producción (2026-09-21): un jugador con 1 minuto jugado y
-# 0.08 xG salía con xG/90=6.88 (vs. máximo real de un titular ~1.5),
-# fijando el 1.0 normalizado de su grupo entero y aplastando a cualquier
-# delantero con rendimiento genuino a lo largo de la temporada. Sin
-# calibrar todavía con resultados reales tras el cambio.
-EVALUATOR_XG90_MIN_MINUTES = float(os.getenv("EVALUATOR_XG90_MIN_MINUTES", "270"))
+# % de los minutos que el EQUIPO del jugador lleva disputados esta
+# temporada (`team_games * 90`, mismo dato que minutes_played_ratio/
+# clean_sheet_rate -- ver `jobs/sync_data._team_games_by_title()`) que el
+# jugador necesita haber jugado ÉL para confiar por completo en su xG/90
+# CRUDO (ver engine.evaluator.normalize_pool) -- por debajo, se encoge
+# HACIA 0 (no hacia la media del grupo: con pools pequeños, como el propio
+# mercado de candidatos que evalúa jobs/run_market.py -- unos 20 jugadores
+# repartidos en 4 posiciones --, esa media puede estar dominada por un
+# único jugador con minutos reales, "contagiando" su tasa a un compañero
+# de 0 minutos en vez de neutralizarlo), en proporción lineal a cuántos
+# minutos reales respaldan el dato (0 minutos -> factor 0; el umbral o más
+# -> factor 1, valor crudo intacto).
+#
+# DELIBERADAMENTE UN % Y NO UN NÚMERO FIJO DE MINUTOS (a petición del
+# usuario, 2026-09-21, corrigiendo el diseño anterior de este mismo día):
+# 270 minutos fijos (3 partidos) no representan lo mismo en la jornada 6
+# (el 50% de los 540 minutos que ha podido disputar el equipo) que en la
+# jornada 20 (solo el 15% de sus 1800 minutos) -- un umbral fijo se vuelve
+# cada vez más laxo según avanza la temporada, justo cuando hay MÁS
+# partidos con los que se podría exigir una muestra más representativa.
+# Con un %, el suelo escala con el calendario: en la jornada 6 sigue
+# pidiendo ~270 minutos (0.5 * 6 * 90 = 270, el mismo punto de partida ya
+# confirmado con datos reales de producción -- ver más abajo), pero en la
+# jornada 20 pide 900. Punto de partida: 50%, razonado como "que el
+# jugador haya participado en al menos la mitad de los minutos que el
+# equipo lleva jugados esta temporada" antes de tratar su xG/90
+# extrapolado como representativo. `team_games` ausente (0/None, Understat
+# todavía no publica el `history` del equipo) cae al mismo fallback que el
+# resto de features de normalize_pool: `games` del propio jugador.
+# `team_games`/`games` ambos en 0 (antes de la primera jornada) no se
+# puede juzgar nada -- se deja el valor crudo intacto (en ese caso
+# `minutes_played` también suele ser 0, así que el xG/90 crudo ya es 0 de
+# por sí). Sin el suelo (versión original, ya corregida el mismo día): un
+# jugador con 1-10 minutos jugados y un solo remate podía salir con xG/90
+# varias veces mayor que el mejor delantero de la liga con minutos reales
+# -- confirmado con datos de producción (2026-09-21): un jugador con 1
+# minuto jugado y 0.08 xG salía con xG/90=6.88 (vs. máximo real de un
+# titular ~1.5), fijando el 1.0 normalizado de su grupo entero y
+# aplastando a cualquier delantero con rendimiento genuino a lo largo de
+# la temporada. Sin calibrar todavía con resultados reales tras el cambio.
+EVALUATOR_XG90_MIN_MINUTES_RATIO = float(os.getenv("EVALUATOR_XG90_MIN_MINUTES_RATIO", "0.5"))
 
 # Para ELEGIR ALINEACIÓN: el precio NO debe importar — un jugador de la
 # plantilla ya está comprado, su precio es coste hundido. Reutilizar
@@ -313,12 +335,14 @@ BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.
 # Aplica también al rescate de déficit de plantilla (find_deficit_rescue_
 # swaps usa is_price_worth_bidding() sin overridear esto) -- incluso con
 # urgencia real, no tiene sentido fichar a alguien con rendimiento
-# demostrado nulo o negativo solo por rellenar un hueco. Punto de partida:
-# 1.0 excluye solo la cola de rendimiento verificado muy pobre (negativo o
-# cero en varias jornadas), sin tocar fichajes baratos con pocos minutos
-# pero puntuación media modesta/decente. Sin calibrar todavía con
-# resultados reales.
-BIDDING_MIN_AVERAGE_POINTS = float(os.getenv("BIDDING_MIN_AVERAGE_POINTS", "1.0"))
+# demostrado nulo o negativo solo por rellenar un hueco. Valor 3.0 (a
+# petición explícita del usuario, 2026-09-21) -- más estricto que el punto
+# de partida original (1.0, que solo excluía la cola de rendimiento
+# negativo o cero): con datos reales de producción, este umbral excluye
+# aprox. el 58% del pool completo de jugadores (la mayoría, suplentes con
+# apenas participación), no solo los casos extremos. Sin calibrar todavía
+# con resultados reales tras el cambio.
+BIDDING_MIN_AVERAGE_POINTS = float(os.getenv("BIDDING_MIN_AVERAGE_POINTS", "3.0"))
 
 # --- "Presupuesto objetivo" (a petición del usuario, 2026-09-07) ---
 # Hasta ahora el presupuesto disponible solo subía un TECHO pasivo (cuánto

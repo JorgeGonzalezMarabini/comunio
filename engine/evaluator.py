@@ -71,8 +71,8 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
     información y solo distorsiona la comparación de score ENTRE posiciones
     (jobs/run_market.py compara el score de todas las posiciones en la
     misma escala). El resto de posiciones sí lo suman, con el xG/90
-    encogido hacia la media del grupo para minutos bajos -- ver
-    `config.EVALUATOR_XG90_MIN_MINUTES` y `normalize_pool`.
+    encogido hacia 0 para minutos bajos -- ver
+    `config.EVALUATOR_XG90_MIN_MINUTES_RATIO` y `normalize_pool`.
 
     Devuelve un score comparable entre jugadores (mayor = mejor). Con los
     pesos de EVALUATOR_WEIGHTS, el rango típico es aprox. [-0.20, 0.90] para
@@ -170,15 +170,20 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         producción, 2026-09-21: un jugador con 1 minuto jugado y 0.08 xG
         salía con xG/90=6.88, varias veces el de cualquier delantero con
         minutos reales, fijando el 1.0 normalizado de su grupo entero).
-        Por debajo de `config.EVALUATOR_XG90_MIN_MINUTES` se ENCOGE HACIA
-        0 (no hacia la media del grupo -- con pools pequeños, como el
-        propio mercado de candidatos que evalúa jobs/run_market.py, esa
-        media puede estar dominada por un único jugador con minutos
-        reales, "contagiando" su tasa a un compañero de 0 minutos en vez
-        de neutralizarlo), en proporción LINEAL a cuántos minutos reales
-        respaldan el dato: con 0 minutos, factor 0 (mismo criterio que el
-        resto de features sin dato); con el umbral o más, factor 1 (valor
-        crudo intacto). Aplicado ANTES del minmax por grupo de abajo.
+        Por debajo de un umbral se ENCOGE HACIA 0 (no hacia la media del
+        grupo -- con pools pequeños, como el propio mercado de candidatos
+        que evalúa jobs/run_market.py, esa media puede estar dominada por
+        un único jugador con minutos reales, "contagiando" su tasa a un
+        compañero de 0 minutos en vez de neutralizarlo), en proporción
+        LINEAL a cuántos minutos reales respaldan el dato: con 0 minutos,
+        factor 0 (mismo criterio que el resto de features sin dato); con
+        el umbral o más, factor 1 (valor crudo intacto). El umbral NO es
+        fijo -- escala con el calendario: `config.EVALUATOR_XG90_MIN_
+        MINUTES_RATIO` (% de los minutos que el EQUIPO lleva disputados
+        esta temporada, mismo `team_games` que minutes_played_ratio de
+        abajo) por `team_games * 90` -- un número fijo de minutos no
+        representa lo mismo en la jornada 6 que en la 20 (a petición del
+        usuario, 2026-09-21). Aplicado ANTES del minmax por grupo de abajo.
       - minutes_played_ratio: minutes_played / (team_games * 90) cuando se
         conoce `team_games` (partidos YA JUGADOS por el equipo esta
         temporada, ver `jobs/sync_data._team_games_by_title()` — resuelve
@@ -214,7 +219,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     minutes_ratio = [0.0] * n
     clean_sheet_rate = [0.0] * n
 
-    min_minutes = config.EVALUATOR_XG90_MIN_MINUTES
+    xg90_min_minutes_ratio = config.EVALUATOR_XG90_MIN_MINUTES_RATIO
 
     for i, p in enumerate(raw_players):
         price = p.get("price") or 0
@@ -227,18 +232,34 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         minutes = p.get("minutes_played") or 0
         xg = p.get("xg") or 0
         xg90[i] = xg / minutes * 90 if minutes > 0 else 0
+
+        team_games = p.get("team_games") or 0
+        # Cuánto va de temporada, en minutos -- mismo dato que usa
+        # minutes_ratio/clean_sheet_rate más abajo (team_games, partidos YA
+        # JUGADOS por el EQUIPO) con el mismo fallback a los partidos del
+        # propio jugador si Understat aún no publica el `history` del
+        # equipo (ver docstring de arriba).
+        season_games_so_far = team_games if team_games > 0 else (p.get("games") or 0)
         # Encoge xg90 hacia 0 (no hacia la media del grupo -- ver docstring
         # de arriba: con pools pequeños, como el propio mercado de
         # candidatos en jobs/run_market.py, la tasa media del grupo puede
-        # estar dominada por un único jugador con minutos reales, "contagiando"
-        # su xg90 a un compañero de 0 minutos en vez de neutralizarlo) en
-        # proporción lineal a cuántos minutos reales respaldan el dato: 0
-        # minutos -> factor 0 (igual que el resto de features sin dato); a
-        # partir de `min_minutes` -> factor 1 (valor crudo intacto).
-        if min_minutes > 0:
-            xg90[i] *= min(1.0, minutes / min_minutes)
+        # estar dominada por un único jugador con minutos reales,
+        # "contagiando" su xg90 a un compañero de 0 minutos en vez de
+        # neutralizarlo) en proporción lineal a cuántos minutos reales
+        # respaldan el dato, frente al % configurado (EVALUATOR_XG90_MIN_
+        # MINUTES_RATIO) de los minutos que el EQUIPO lleva disputados esta
+        # temporada -- un umbral que ESCALA con el calendario, no fijo (ver
+        # docstring de config.EVALUATOR_XG90_MIN_MINUTES_RATIO: 270 minutos
+        # fijos no representan lo mismo en la jornada 6 que en la 20). Sin
+        # ninguna referencia de calendario (season_games_so_far=0, antes de
+        # la primera jornada) no se puede juzgar nada -- se deja el valor
+        # crudo intacto (en ese caso `minutes` también suele ser 0, así que
+        # xg90 ya es 0 de por sí).
+        if season_games_so_far > 0:
+            min_minutes = xg90_min_minutes_ratio * season_games_so_far * 90
+            credibility = min(1.0, minutes / min_minutes) if min_minutes > 0 else 1.0
+            xg90[i] *= credibility
 
-        team_games = p.get("team_games") or 0
         if team_games > 0:
             minutes_ratio[i] = minutes / (team_games * 90)
             team_clean_sheets = p.get("team_clean_sheets") or 0

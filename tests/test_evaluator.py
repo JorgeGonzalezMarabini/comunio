@@ -164,14 +164,33 @@ def test_normalize_pool_shrinks_xg90_towards_zero_for_low_minutes(monkeypatch):
     minutos y un solo remate podía salir con xG/90 disparatado (xg /
     minutes_played * 90 sin ningún suelo), fijando el 1.0 normalizado de
     todo su grupo y aplastando a un compañero con minutos y rendimiento
-    reales. Con EVALUATOR_XG90_MIN_MINUTES=270 (3 partidos), un jugador con
-    1 minuto y 0.08 xG (xG/90 crudo=7.2, muy por encima del titular real)
-    debe encogerse hacia 0 -- muy por debajo del titular, no por encima.
+    reales. Con EVALUATOR_XG90_MIN_MINUTES_RATIO=0.5 y team_games=10
+    (umbral=450 minutos), un jugador con 1 minuto y 0.08 xG (xG/90
+    crudo=7.2, muy por encima del titular real) debe encogerse hacia 0 --
+    muy por debajo del titular, no por encima.
     """
-    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES", 270.0)
+    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES_RATIO", 0.5)
     raw = [
-        {"id": "titular", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 0.9, "minutes_played": 900, "games": 10},
-        {"id": "ruido_1min", "position": "DEL", "price": 1_000_000, "average_points": 1.0, "xg": 0.08, "minutes_played": 1, "games": 1},
+        {
+            "id": "titular",
+            "position": "DEL",
+            "price": 1_000_000,
+            "average_points": 5.0,
+            "xg": 0.9,
+            "minutes_played": 900,
+            "games": 10,
+            "team_games": 10,
+        },
+        {
+            "id": "ruido_1min",
+            "position": "DEL",
+            "price": 1_000_000,
+            "average_points": 1.0,
+            "xg": 0.08,
+            "minutes_played": 1,
+            "games": 1,
+            "team_games": 10,
+        },
     ]
     normalized = normalize_pool(raw)
     by_id = {p["id"]: p for p in normalized}
@@ -184,29 +203,63 @@ def test_normalize_pool_shrinks_xg90_towards_zero_for_low_minutes(monkeypatch):
 
 def test_normalize_pool_xg90_shrinkage_scales_linearly_with_minutes_not_towards_group_average(monkeypatch):
     """
-    El factor de encogimiento es `minutes_played / EVALUATOR_XG90_MIN_MINUTES`
-    (hacia 0), NO una mezcla con la tasa media del grupo -- con pools
+    El factor de encogimiento es `minutes_played / (RATIO * team_games *
+    90)` (hacia 0), NO una mezcla con la tasa media del grupo -- con pools
     pequeños (el propio mercado de candidatos de jobs/run_market.py, unos
     20 jugadores en 4 posiciones) mezclar con la media del grupo puede
     "contagiar" a un jugador de pocos minutos la tasa de OTRO compañero de
     grupo con minutos reales, en vez de neutralizarlo.
     """
-    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES", 200.0)
+    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES_RATIO", 0.5)
+    # team_games=10 para los tres -> umbral = 0.5 * 10 * 90 = 450 minutos.
     raw = [
-        # Con minutos de sobra: xG/90 crudo intacto, fija el suelo del grupo.
-        {"id": "suelo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 1.0, "minutes_played": 1000, "games": 10},
-        # A mitad del umbral (100/200): xG/90 crudo (0.9) escalado x0.5 -> 0.45.
-        {"id": "media_credibilidad", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 1.0, "minutes_played": 100, "games": 2},
-        # Con minutos de sobra: xG/90 crudo intacto, fija el techo del grupo.
-        {"id": "techo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 10.0, "minutes_played": 1000, "games": 10},
+        # 0 minutos -> xG/90 crudo ya es 0 (fija el suelo del grupo).
+        {"id": "suelo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 0.0, "minutes_played": 0, "games": 0, "team_games": 10},
+        # A mitad del umbral (225/450): xG/90 crudo (0.4) escalado x0.5 -> 0.2.
+        {"id": "media_credibilidad", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 1.0, "minutes_played": 225, "games": 3, "team_games": 10},
+        # Con minutos de sobra (>=450): xG/90 crudo intacto, fija el techo del grupo.
+        {"id": "techo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 5.0, "minutes_played": 900, "games": 10, "team_games": 10},
     ]
     normalized = normalize_pool(raw)
     by_id = {p["id"]: p for p in normalized}
-    # xg90 crudo: suelo=0.09, media_credibilidad=0.9->0.45 (encogido), techo=0.9
-    # minmax sobre [0.09, 0.45, 0.9] -> media_credibilidad = (0.45-0.09)/(0.9-0.09) = 0.36/0.81
+    # xg90 crudo: suelo=0, media_credibilidad=0.4->0.2 (encogido x0.5), techo=0.5
+    # minmax sobre [0, 0.2, 0.5] -> media_credibilidad = 0.2/0.5 = 0.4
     assert by_id["suelo"]["xg"] == pytest.approx(0.0)
     assert by_id["techo"]["xg"] == pytest.approx(1.0)
-    assert by_id["media_credibilidad"]["xg"] == pytest.approx(0.36 / 0.81)
+    assert by_id["media_credibilidad"]["xg"] == pytest.approx(0.4)
+
+
+def test_normalize_pool_xg90_credibility_threshold_scales_with_matchday(monkeypatch):
+    """
+    A petición del usuario (2026-09-21): el suelo de minutos NO puede ser
+    una constante -- 270 minutos en la jornada 6 no representan lo mismo
+    que en la jornada 20. Con EVALUATOR_XG90_MIN_MINUTES_RATIO fijo, el
+    MISMO jugador con los MISMOS 270 minutos jugados debe normalizar más
+    alto en la jornada 6 (270 min sobre un umbral de 0.5*6*90=270 ->
+    credibilidad total) que en la jornada 20 (mismo umbral pero calculado
+    sobre 0.5*20*90=900 -> credibilidad parcial, 270/900=0.3).
+    """
+    monkeypatch.setattr(config, "EVALUATOR_XG90_MIN_MINUTES_RATIO", 0.5)
+
+    def _pool(team_games):
+        return [
+            # Jugador bajo estudio: mismos xg/minutos en ambos escenarios.
+            {"id": "sujeto", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 1.0, "minutes_played": 270, "games": 3, "team_games": team_games},
+            # Suelo del grupo (0 minutos, no depende de la jornada).
+            {"id": "suelo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 0.0, "minutes_played": 0, "games": 0, "team_games": team_games},
+            # Techo del grupo: minutos de sobra en CUALQUIER jornada -> credibilidad 1.0 en ambos escenarios.
+            {"id": "techo", "position": "DEL", "price": 1_000_000, "average_points": 5.0, "xg": 10.0, "minutes_played": 2000, "games": 20, "team_games": team_games},
+        ]
+
+    jornada_6 = {p["id"]: p for p in normalize_pool(_pool(team_games=6))}
+    jornada_20 = {p["id"]: p for p in normalize_pool(_pool(team_games=20))}
+
+    # jornada 6: umbral=270 -> credibilidad=270/270=1.0 -> xg90 crudo intacto (0.333)
+    # jornada 20: umbral=900 -> credibilidad=270/900=0.3 -> xg90 encogido a 0.333*0.3=0.1
+    # techo fija 0.45 en ambos casos (10/2000*90=0.45, credibilidad=1.0 siempre)
+    assert jornada_6["sujeto"]["xg"] == pytest.approx((1.0 / 270 * 90) / 0.45)
+    assert jornada_20["sujeto"]["xg"] == pytest.approx((1.0 / 270 * 90 * 0.3) / 0.45)
+    assert jornada_6["sujeto"]["xg"] > jornada_20["sujeto"]["xg"]
 
 
 def test_normalize_pool_minutes_ratio_uses_team_games_over_player_games_when_available():
