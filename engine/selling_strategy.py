@@ -186,7 +186,7 @@ eso, si `purchase_baselines` (mismo formato que
 `db.models.get_purchase_baselines()`) viene informado y trae "peak_price"
 para el jugador, también se pone en venta si ha caído
 `trailing_stop_max_drawdown_pct` (config.SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT,
-por defecto 15%, deliberadamente más laxo que `max_loss_pct` -- aquí no se
+por defecto 20%, deliberadamente más laxo que `max_loss_pct` -- aquí no se
 corta una mala operación, se protege una buena) desde ese máximo, AUNQUE
 siga en positivo frente al precio de compra. Sin `purchase_baselines` (o
 sin "peak_price" para ese jugador -- recién comprado, sin snapshot todavía

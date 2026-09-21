@@ -507,9 +507,19 @@ BIDDING_MAX_DEFICIT_RESCUES_PER_RUN = int(os.getenv("BIDDING_MAX_DEFICIT_RESCUES
 # "buyPrice" de roster) para considerar vender un jugador. Vender es la
 # ÚNICA fuente de ingresos en Futmondo, igual que en Comunio (no hay
 # salario pasivo) — la estrategia documentada es comprar barato y vender
-# cuando sube; 10% es un punto de partida razonable, sin calibrar todavía
-# con resultados reales.
-SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
+# cuando sube.
+#
+# SUBIDO 0.10 -> 0.15 (a petición del usuario, 2026-09-21, revisión de
+# umbrales de venta tras un mes de datos reales de producción -- ver
+# también SELLING_MAX_LOSS_PCT más abajo, mismo análisis): de las 30
+# ventas por esta vía en el primer mes (tabla `sales`, reason "pagado por
+# el bot..."), 8 jugadores distintos, la mitad (4) vendidos con una
+# plusvalía de apenas 10-15% -- el mismo patrón de "vender justo al rozar
+# el umbral" que en el corte de pérdidas, aunque menos extremo. 0.10
+# dejaba salir plusvalías todavía modestas que un margen algo mayor
+# habría dejado seguir creciendo, alimentando parte de la rotación de
+# plantilla observada.
+SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.15"))
 
 # Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
@@ -531,9 +541,27 @@ SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.10"))
 # generaliza sin más al resto de la plantilla: si empieza a caer, se corta
 # pronto, igual que si empieza a subir conviene vender (SELLING_MIN_
 # PROFIT_PCT). 10% (el valor antes exclusivo de lesión confirmada) es
-# ahora el único umbral, para todos los estados. Sin calibrar todavía con
-# resultados reales.
-SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.10"))
+# ahora el único umbral, para todos los estados.
+#
+# SUBIDO 0.10 -> 0.15 (a petición del usuario, 2026-09-21, revisión de
+# umbrales de venta -- "creo que son demasiado sensibles y hay mucha
+# rotación de plantilla" -- con un mes de datos reales de producción,
+# tabla `sales`, desde que se activó esta vía el 2026-08-22): el corte de
+# pérdidas es, con diferencia, la vía que más domina la actividad de venta
+# (137 de 171 filas totales de `sales` en el mes, 24 jugadores distintos
+# frente a 8 de rentabilidad normal y 7 de oportunidad de mercado). De
+# esos 24, 15 (63%) se cortaron con una pérdida de apenas 10-15% -- justo
+# rozando el umbral -- y solo 7 superaban el 20% de pérdida real. Con un
+# umbral de 10% el corte estaba capturando sobre todo la oscilación normal
+# de valor de Futmondo semana a semana, no manías de mala compra genuina,
+# y cada corte + recompra posterior es un ciclo completo de rotación. Este
+# cambio no toca `confirm_loss_is_sustained()` (SELLING_LOSS_CONFIRMATION_*
+# más abajo, filtra ruido de UN día puntual): el problema aquí era la
+# MAGNITUD exigida, no la persistencia -- una caída sostenida del 12% no
+# tiene nada que confirmar, simplemente no debería bastar por sí sola para
+# vender. 15% deja fuera esa franja de ruido y sigue cortando con margen
+# cualquier pérdida que empiece a ser preocupante de verdad.
+SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.15"))
 
 # Nº mínimo de datos de precio dentro de SELLING_LOSS_CONFIRMATION_LOOKBACK_
 # DAYS para poder juzgar si un corte de pérdidas (SELLING_MAX_LOSS_PCT) es
@@ -570,15 +598,25 @@ SELLING_LOSS_CONFIRMATION_MAX_REBOUND_PCT = float(os.getenv("SELLING_LOSS_CONFIR
 # jugador que subió mucho y luego empieza a caer no se toca hasta que la
 # caída acumulada desde la COMPRA cruce SELLING_MAX_LOSS_PCT, dejando que
 # se evapore buena parte de una plusvalía ya generada antes de reaccionar.
-# Deliberadamente más laxo que SELLING_MAX_LOSS_PCT (10%): el objetivo aquí
+# Deliberadamente más laxo que SELLING_MAX_LOSS_PCT: el objetivo aquí
 # no es cortar una mala operación sino no dejar que se esfume una buena, así
 # que conviene algo más de margen frente a la oscilación normal de un
 # jugador que sigue siendo rentable. No necesita una confirmación de
 # tendencia propia (a diferencia de SELLING_MAX_LOSS_PCT, ver arriba): al
 # compararse contra un máximo HISTÓRICO ya exige una caída sostenida por
-# construcción, no un solo dato de ruido. Sin calibrar todavía con
-# resultados reales.
-SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT = float(os.getenv("SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT", "0.15"))
+# construcción, no un solo dato de ruido.
+#
+# SUBIDO 0.15 -> 0.20 (a petición del usuario, 2026-09-21, mismo análisis
+# que SELLING_MAX_LOSS_PCT más arriba): al subir ese umbral de 0.10 a
+# 0.15, mantener este en 0.15 lo habría dejado IGUAL de agresivo que el
+# corte de pérdidas -- rompiendo la relación deliberada de "esto protege
+# una plusvalía ya buena, así que debe tolerar más oscilación que un corte
+# de una mala operación". Solo hubo 1 venta real por esta vía en el primer
+# mes (muestra todavía pequeña para calibrar con datos propios), así que
+# el ajuste aquí es para preservar el margen de +5 puntos porcentuales
+# original sobre SELLING_MAX_LOSS_PCT, no una lectura directa de datos de
+# esta vía en concreto.
+SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT = float(os.getenv("SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT", "0.20"))
 
 # % máximo (positivo, ej. 0.15 = 15%) del capital TOTAL del equipo (suma
 # del valor de mercado de toda la plantilla + presupuesto disponible) que
