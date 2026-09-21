@@ -351,14 +351,29 @@ cambio de `lineupType` de "predicted" a "standard" son representativos; (b)
 es una API no oficial y no documentada, que podría cambiar de forma o
 bloquear sin aviso, como ya pasó con SofaScore.
 
-**Por qué importa**: menos urgente que el resto porque
-`config.ENABLE_REAL_LINEUP_CHECK` está en `false` por defecto — el bot no
-depende de esto todavía en producción.
+**Actualizado 2026-09-21**: `ENABLE_REAL_LINEUP_CHECK` SÍ está activo en
+producción (GitHub Actions Variable), desde el 2026-08-28 — la nota
+anterior ("el bot no depende de esto todavía") quedó desactualizada.
+Verificado contra la BD real: 661 ejecuciones de `manage_substitutes` desde
+esa fecha, 0 errores en `job_runs`, 187 filas en `real_lineup_checks` (22
+con alineación real confirmada), 32 sustituciones reales generadas a partir
+de esta señal — sin ningún fallo atribuible a Fotmob en sí. Sí hubo un
+incidente real el 2026-08-29/30 (bucle infinito de sustitución Guillén <->
+Yangel Herrera, 18 filas en `substitution_decisions` esos dos días), pero
+fue un bug de lógica en `jobs/manage_substitutes.py` (no comprobaba también
+el banquillo contra esta señal, solo los titulares) — ya corregido, ver el
+comentario "bug 2026-09-01" en `jobs/manage_substitutes.py:90-109`. Sin
+incidentes desde entonces.
+
+**Por qué importa**: baja prioridad — casi un mes de uso real sin fallos de
+Fotmob. Sigue siendo una API no oficial sin SLA (podría bloquear sin aviso
+en cualquier momento, igual que SofaScore), así que merece vigilancia, pero
+ya no es una incertidumbre sin datos.
 
 **Afecta a**: `jobs/manage_substitutes.py` (detección de titulares sanos
 fuera del once real).
 
-**Dónde**: `clients/football_lineups_client.py:75-95`, `config.py:103`.
+**Dónde**: `clients/football_lineups_client.py:75-95`, `config.py:106`.
 
 ---
 
