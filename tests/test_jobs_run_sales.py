@@ -894,7 +894,7 @@ def test_run_sales_applies_revaluation_premium_when_flag_is_on(tmp_db, monkeypat
     monkeypatch.setattr(
         config,
         "SELLING_REVALUATION_LOOKBACK_DAYS",
-        30,  # las fechas fijas de abajo (2026-08-*) deben caer dentro de la ventana, sea cual sea "hoy" al correr el test
+        3650,  # las fechas fijas de abajo (2026-08-*) deben caer dentro de la ventana, sea cual sea "hoy" al correr el test
     )
     roster = [dict(p) for p in ROSTER_442_BASE]
     roster.append({"id": 25, "role": "centrocampista", "status": "", "value": 900_000})

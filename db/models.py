@@ -481,8 +481,19 @@ def get_purchase_baselines() -> dict[str, dict]:
         este valor). Puramente informativo en el `reason`: no participa en
         ninguna condición de venta (ver docstring de decide_sales sobre
         por qué no debe hacerlo).
+      - "value_at_purchase": valor de mercado del ÚLTIMO snapshot ANTERIOR
+        (o simultáneo) a la puja -- referencia del corte de pérdidas de
+        decide_sales() en lugar del importe pagado (a petición del usuario,
+        2026-09-23: la puja se gana de media ~11% por ENCIMA del VM, así
+        que medir la pérdida contra lo pagado disparaba el corte casi solo
+        con esa prima, ver config.SELLING_MAX_LOSS_PCT). None si no hay
+        ningún snapshot previo a la compra.
+      - "purchased_at": `created_at` de esa puja (ISO) -- antigüedad del
+        fichaje, para el multiplicador por tiempo del corte de pérdidas y
+        la antigüedad mínima de la vía "oportunidad de mercado".
 
-    Devuelve {player_id: {"peak_price": int, "points_at_purchase": int|None}}
+    Devuelve {player_id: {"peak_price": int, "points_at_purchase": int|None,
+    "value_at_purchase": int|None, "purchased_at": str}}
     -- solo para jugadores con al menos un snapshot de precio desde la
     compra; sin eso ambas señales quedan sin dato para ese jugador esta
     pasada (decide_sales() lo trata como "vía/nota desactivada", nunca
@@ -505,15 +516,27 @@ def get_purchase_baselines() -> dict[str, dict]:
                 WHERE s.recorded_at >= w.created_at
             )
             SELECT
-                player_id,
-                MAX(CASE WHEN price > 0 THEN price END) AS peak_price,
-                MAX(CASE WHEN rn_asc = 1 THEN points END) AS points_at_purchase
-            FROM since_purchase
-            GROUP BY player_id
+                sp.player_id,
+                MAX(CASE WHEN sp.price > 0 THEN sp.price END) AS peak_price,
+                MAX(CASE WHEN sp.rn_asc = 1 THEN sp.points END) AS points_at_purchase,
+                w.created_at AS purchased_at,
+                (
+                    SELECT s2.price FROM futmondo_snapshots s2
+                    WHERE s2.player_id = sp.player_id AND s2.recorded_at <= w.created_at AND s2.price > 0
+                    ORDER BY s2.recorded_at DESC LIMIT 1
+                ) AS value_at_purchase
+            FROM since_purchase sp
+            JOIN latest_won w ON w.player_id = sp.player_id AND w.rn = 1
+            GROUP BY sp.player_id
             """
         ).fetchall()
         return {
-            row["player_id"]: {"peak_price": row["peak_price"], "points_at_purchase": row["points_at_purchase"]}
+            row["player_id"]: {
+                "peak_price": row["peak_price"],
+                "points_at_purchase": row["points_at_purchase"],
+                "value_at_purchase": row["value_at_purchase"],
+                "purchased_at": row["purchased_at"],
+            }
             for row in rows
             if row["peak_price"] is not None
         }

@@ -5,6 +5,7 @@ from engine.selling_strategy import (
     compute_revaluation_premium_pct,
     confirm_loss_is_sustained,
     decide_sales,
+    effective_loss_cut_threshold,
 )
 
 NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
@@ -1161,3 +1162,138 @@ def test_decide_sales_reason_has_no_points_note_without_points_at_purchase():
     )
     assert len(decisions) == 1
     assert "para contexto" not in decisions[0]["reason"]
+
+
+# --- Corte de pérdidas frente al VM de compra, con multiplicadores por
+# antigüedad y media de puntos (a petición del usuario, 2026-09-23, ver
+# docstring del módulo) ---
+
+_MULT_KWARGS = dict(
+    loss_time_mult_max=2.0,
+    loss_time_decay_days=14,
+    loss_avg_points_ref=3.0,
+    loss_avg_points_max_mult=1.5,
+    loss_max_effective_pct=0.40,
+)
+
+
+def _days_ago(days):
+    return (NOW - timedelta(days=days)).isoformat()
+
+
+def test_effective_loss_cut_threshold_without_data_is_the_base():
+    assert effective_loss_cut_threshold(0.15, time_mult_max=2.0, time_decay_days=14) == 0.15
+
+
+def test_effective_loss_cut_threshold_time_multiplier_decays_linearly():
+    kw = dict(time_mult_max=2.0, time_decay_days=14, max_effective_pct=1.0)
+    assert effective_loss_cut_threshold(0.15, days_held=0, **kw) == 0.30
+    assert abs(effective_loss_cut_threshold(0.15, days_held=7, **kw) - 0.225) < 1e-9
+    assert effective_loss_cut_threshold(0.15, days_held=14, **kw) == 0.15
+    assert effective_loss_cut_threshold(0.15, days_held=60, **kw) == 0.15
+
+
+def test_effective_loss_cut_threshold_average_multiplier_is_clamped():
+    kw = dict(avg_points_ref=3.0, avg_points_max_mult=1.5, max_effective_pct=1.0)
+    assert effective_loss_cut_threshold(0.15, average_points=1.0, **kw) == 0.15  # nunca por debajo del base
+    assert abs(effective_loss_cut_threshold(0.15, average_points=4.0, **kw) - 0.20) < 1e-9
+    assert abs(effective_loss_cut_threshold(0.15, average_points=9.0, **kw) - 0.225) < 1e-9  # tope x1.5
+
+
+def test_effective_loss_cut_threshold_is_capped():
+    assert effective_loss_cut_threshold(
+        0.15, days_held=0, average_points=9.0, time_mult_max=2.0, time_decay_days=14,
+        avg_points_ref=3.0, avg_points_max_mult=1.5, max_effective_pct=0.40,
+    ) == 0.40
+
+
+def test_decide_sales_loss_cut_ignores_the_auction_premium():
+    """
+    Pagado 1.15M por un jugador que valía 1.0M: a 0.95M es -17% frente a lo
+    pagado (antes cortaba), pero solo -5% frente al VM de compra -- no se vende.
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_150_000}
+    squad[9]["value"] = 950_000
+    baselines = {str(squad[9]["id"]): {"peak_price": 1_000_000, "value_at_purchase": 1_000_000,
+                                         "purchased_at": _days_ago(30)}}
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.15, max_loss_pct=0.15,
+        purchase_baselines=baselines, trailing_stop_max_drawdown_pct=999, now=NOW, **_MULT_KWARGS,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_loss_cut_against_purchase_value_after_the_grace_decay():
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_150_000}
+    squad[9]["value"] = 820_000  # -18% frente al VM de compra, fichado hace 30 días -> umbral base 15%
+    baselines = {str(squad[9]["id"]): {"peak_price": 1_000_000, "value_at_purchase": 1_000_000,
+                                         "purchased_at": _days_ago(30)}}
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.15, max_loss_pct=0.15,
+        purchase_baselines=baselines, trailing_stop_max_drawdown_pct=999, now=NOW, **_MULT_KWARGS,
+    )
+    assert len(decisions) == 1
+    assert "corte de pérdidas" in decisions[0]["reason"]
+    assert "VM en la compra 1000000" in decisions[0]["reason"]
+    assert "-18.0% frente al VM de compra" in decisions[0]["reason"]
+
+
+def test_decide_sales_recent_signing_gets_more_room_before_loss_cut():
+    """La misma caída del 18% a los 2 días de ficharlo no corta (umbral ~27.9%)."""
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    bought_by_bot = {str(squad[9]["id"]): 1_000_000}
+    squad[9]["value"] = 820_000
+    baselines = {str(squad[9]["id"]): {"peak_price": 1_000_000, "value_at_purchase": 1_000_000,
+                                         "purchased_at": _days_ago(2)}}
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought_by_bot, min_profit_pct=0.15, max_loss_pct=0.15,
+        purchase_baselines=baselines, trailing_stop_max_drawdown_pct=999, now=NOW, **_MULT_KWARGS,
+    )
+    assert decisions == []
+
+
+def test_decide_sales_good_average_gets_more_room_before_loss_cut():
+    """Media 4.5 (x1.5): una caída del 18% ya veterana no corta (umbral 22.5%); con media 2 sí."""
+    def run(average):
+        squad = _full_442_squad()
+        squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+        squad[9]["value"] = 820_000
+        squad[9]["average"] = {"average": average}
+        baselines = {str(squad[9]["id"]): {"peak_price": 1_000_000, "value_at_purchase": 1_000_000,
+                                             "purchased_at": _days_ago(30)}}
+        return decide_sales(
+            squad, formation="4-4-2", bought_by_bot={str(squad[9]["id"]): 1_000_000},
+            min_profit_pct=0.15, max_loss_pct=0.15, purchase_baselines=baselines,
+            trailing_stop_max_drawdown_pct=999, now=NOW, **_MULT_KWARGS,
+        )
+
+    assert run(4.5) == []
+    assert len(run(2.0)) == 1
+
+
+def test_decide_sales_market_upgrade_blocked_for_a_recent_signing():
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    own_squad_features = [_feature_row(10, "DEF", xg=0.0, minutes_played=10)]
+    market_candidates = [_feature_row("mercado1", "DEF", xg=5.0, minutes_played=900)]
+
+    def run(days_held):
+        baselines = {"10": {"peak_price": 500_000, "value_at_purchase": 500_000, "purchased_at": _days_ago(days_held)}}
+        return decide_sales(
+            squad, formation="4-4-2", bought_by_bot={"10": 500_000},
+            own_squad_features=own_squad_features, market_candidates=market_candidates,
+            purchase_baselines=baselines, upgrade_min_hold_days=7, now=NOW,
+        )
+
+    assert run(1) == []
+    decisions = run(10)
+    assert len(decisions) == 1
+    assert "oportunidad de mercado" in decisions[0]["reason"]

@@ -563,6 +563,53 @@ SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.15"))
 # cualquier pérdida que empiece a ser preocupante de verdad.
 SELLING_MAX_LOSS_PCT = float(os.getenv("SELLING_MAX_LOSS_PCT", "0.15"))
 
+# Corte de pérdidas medido contra el VALOR DE MERCADO en la compra y con
+# multiplicador por antigüedad y media de puntos (a petición del usuario,
+# 2026-09-23, "me preocupa la alta rotación de fichajes"). Análisis del
+# primer mes real (34 ciclos compra->venta en `bids`/`sales`, mediana de
+# tenencia 7 días, 10 vendidos en menos de 3): el corte de pérdidas explica
+# -11.9M de los -8.4M netos de todas las ventas (16 ciclos, -12.8%), y 7.8M
+# de esa pérdida es PRIMA DE PUJA -- ganamos la puja de media un +10.8% por
+# encima del VM (mediana +13%), así que el -15% "frente a lo pagado"
+# saltaba con apenas un -2/-5% de caída real del jugador (Cancelo, Borja
+# Iglesias, Salinas, Areso, Buonanotte: cortados en 1-3 días). Esa prima
+# ya está pagada -- es exactamente el coste hundido que este mismo corte
+# pretende ignorar -- y cada corte obliga a reponer pagando otra prima. En
+# el backtest sobre las 56 compras (`futmondo_snapshots`), el corte
+# vigente dejaba un neto de -13.5% (incluido el coste de reposición) frente
+# a -10.4% con estos cambios y -9.8% sin corte ninguno: en un mes de datos
+# el corte no se adelanta a caídas mayores (el precio de los cortados solo
+# siguió bajando un -3.9% de media tras venderlos), solo materializa la
+# prima. Se mantiene el corte (con más histórico puede haber caídas largas
+# que sí merezca cortar), pero bastante más laxo:
+#   umbral_efectivo = min(SELLING_LOSS_MAX_EFFECTIVE_PCT,
+#                         SELLING_MAX_LOSS_PCT * mult_tiempo * mult_media)
+#   pérdida = (VM_actual - VM_en_la_compra) / VM_en_la_compra
+# Sin VM en la compra (no hay snapshot previo), se usa lo pagado; sin
+# fecha de compra, mult_tiempo = 1 (comportamiento previo). La plusvalía
+# de la vía normal (SELLING_MIN_PROFIT_PCT) sigue midiéndose contra lo
+# pagado: ahí lo que importa es el dinero real que se recupera.
+#
+# Multiplicador por antigüedad del fichaje: SELLING_LOSS_TIME_MULT_MAX el
+# día de la compra, decae linealmente hasta x1 a los
+# SELLING_LOSS_TIME_DECAY_DAYS días -- un fichaje reciente necesita tiempo
+# para demostrar si fue mala compra o solo ruido de la primera semana.
+SELLING_LOSS_TIME_MULT_MAX = float(os.getenv("SELLING_LOSS_TIME_MULT_MAX", "2.0"))
+SELLING_LOSS_TIME_DECAY_DAYS = float(os.getenv("SELLING_LOSS_TIME_DECAY_DAYS", "14"))
+
+# Multiplicador por media de puntos (`average.average` del roster):
+# media / SELLING_LOSS_AVG_POINTS_REF, acotado a [1, SELLING_LOSS_AVG_POINTS_
+# MAX_MULT] -- un jugador que puntúa bien aporta cada jornada aunque su VM
+# oscile, así que se le da más margen; uno que puntúa por debajo de la
+# referencia (o sin media todavía) se queda en x1, nunca por debajo del
+# umbral base. 3.0 ~ media típica de un titular normal en los snapshots.
+SELLING_LOSS_AVG_POINTS_REF = float(os.getenv("SELLING_LOSS_AVG_POINTS_REF", "3.0"))
+SELLING_LOSS_AVG_POINTS_MAX_MULT = float(os.getenv("SELLING_LOSS_AVG_POINTS_MAX_MULT", "1.5"))
+
+# Tope del umbral efectivo tras aplicar ambos multiplicadores: por mucho
+# margen que den, una caída de más del 40% frente al VM de compra se corta.
+SELLING_LOSS_MAX_EFFECTIVE_PCT = float(os.getenv("SELLING_LOSS_MAX_EFFECTIVE_PCT", "0.40"))
+
 # Nº mínimo de datos de precio dentro de SELLING_LOSS_CONFIRMATION_LOOKBACK_
 # DAYS para poder juzgar si un corte de pérdidas (SELLING_MAX_LOSS_PCT) es
 # una tendencia sostenida o ruido de un solo dato reciente (a petición del
@@ -644,6 +691,16 @@ SELLING_INJURY_CONCENTRATION_MAX_PCT = float(os.getenv("SELLING_INJURY_CONCENTRA
 # margen de diferencia antes de disparar. Sin calibrar todavía con
 # resultados reales.
 SELLING_UPGRADE_AVAILABLE_MIN_MARGIN = float(os.getenv("SELLING_UPGRADE_AVAILABLE_MIN_MARGIN", "0.30"))
+
+# Antigüedad mínima (días desde la puja ganada) para que un jugador pueda
+# venderse SOLO por "oportunidad de mercado" (a petición del usuario,
+# 2026-09-23, misma revisión de rotación que SELLING_LOSS_TIME_MULT_MAX):
+# en el primer mes, Camavinga, Brugué e Ionuț Radu se pusieron en venta
+# por esta vía a las pocas HORAS de ficharlos -- un recién llegado todavía
+# no tiene estadísticas propias y su score de alineación sale bajo, así
+# que casi cualquier candidato de mercado le "supera". Sin fecha de compra
+# conocida, este filtro no bloquea. No afecta a las demás vías.
+SELLING_UPGRADE_MIN_HOLD_DAYS = float(os.getenv("SELLING_UPGRADE_MIN_HOLD_DAYS", "7"))
 
 # Máximo de ventas por POSICIÓN y ejecución que puede autorizar la vía
 # "oportunidad de mercado" (a petición del usuario, 2026-08-23, caso real:

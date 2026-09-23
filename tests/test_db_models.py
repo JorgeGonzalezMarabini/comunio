@@ -318,7 +318,13 @@ def test_get_purchase_baselines_peak_price_and_points_at_purchase(tmp_db):
         )
 
     baselines = get_purchase_baselines()
-    assert baselines["1"] == {"peak_price": 1_500_000, "points_at_purchase": 10}
+    assert baselines["1"] == {
+        "peak_price": 1_500_000,
+        "points_at_purchase": 10,
+        # VM del último snapshot ANTERIOR a la puja -- referencia del corte de pérdidas.
+        "value_at_purchase": 5_000_000,
+        "purchased_at": "2026-08-01T00:00:00+00:00",
+    }
 
 
 def test_get_purchase_baselines_uses_most_recent_won_bid(tmp_db):
@@ -342,7 +348,26 @@ def test_get_purchase_baselines_uses_most_recent_won_bid(tmp_db):
         )
 
     baselines = get_purchase_baselines()
-    assert baselines["1"] == {"peak_price": 800_000, "points_at_purchase": 5}
+    assert baselines["1"] == {
+        "peak_price": 800_000,
+        "points_at_purchase": 5,
+        "value_at_purchase": 9_000_000,  # último snapshot antes de la RECOMPRA
+        "purchased_at": "2026-08-01T00:00:00+00:00",
+    }
+
+
+def test_get_purchase_baselines_value_at_purchase_none_without_prior_snapshot(tmp_db):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("1", 1_000_000, "won", "2026-08-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO futmondo_snapshots (player_id, price, points, recorded_at) VALUES (?,?,?,?)",
+            ("1", 900_000, 10, "2026-08-02T00:00:00+00:00"),
+        )
+
+    assert get_purchase_baselines()["1"]["value_at_purchase"] is None
 
 
 def test_get_purchase_baselines_omits_players_without_snapshot_since_purchase(tmp_db):

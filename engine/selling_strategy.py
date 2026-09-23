@@ -211,6 +211,23 @@ absoluto, esta confirmación queda desactivada y el corte se dispara igual
 que hoy (falla ABIERTO: la falta de datos nunca debe bloquear un corte de
 pérdidas real).
 
+Corte de pérdidas frente al VM de compra, con multiplicadores (a petición
+del usuario, 2026-09-23, "me preocupa la alta rotación de fichajes"): el
+corte se medía contra lo PAGADO en la puja, que de media fue un ~11% más
+que el VM del jugador -- con -15% de umbral, el corte saltaba con una
+caída real de apenas unos puntos y vendía, sobre todo, esa prima (ver
+números en config.SELLING_MAX_LOSS_PCT). La prima ya es coste hundido,
+así que ahora la pérdida se mide contra "value_at_purchase" de
+`purchase_baselines` (VM del último snapshot previo a la puja; lo pagado
+si no hay) y el umbral se relaja con `effective_loss_cut_threshold()`:
+más margen cuanto más reciente es el fichaje (x2 el día de la compra,
+x1 a las dos semanas) y cuanto mejor puntúa (`average.average` del
+roster, hasta x1.5), con un tope absoluto (40% por defecto). La
+plusvalía de la vía 1 sigue midiéndose contra lo pagado. Por lo mismo,
+la vía 5 (oportunidad de mercado) exige una antigüedad mínima
+(config.SELLING_UPGRADE_MIN_HOLD_DAYS): un recién fichado no tiene aún
+estadísticas propias y su score de alineación sale artificialmente bajo.
+
 Nota informativa de puntos ya extraídos (a petición del usuario, misma
 evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
 disparan una venta, si `purchase_baselines` trae "points_at_purchase" para
@@ -315,6 +332,12 @@ def decide_sales(
     loss_confirmation_lookback_days: float = None,
     loss_confirmation_min_data_points: int = None,
     loss_confirmation_max_rebound_pct: float = None,
+    loss_time_mult_max: float = None,
+    loss_time_decay_days: float = None,
+    loss_avg_points_ref: float = None,
+    loss_avg_points_max_mult: float = None,
+    loss_max_effective_pct: float = None,
+    upgrade_min_hold_days: float = None,
     now: datetime = None,
 ) -> list[dict]:
     """
@@ -421,6 +444,19 @@ def decide_sales(
     `confirm_loss_is_sustained()`, todos por defecto de config
     (`SELLING_LOSS_CONFIRMATION_*`, ver su docstring).
 
+    `loss_time_mult_max`, `loss_time_decay_days`, `loss_avg_points_ref`,
+    `loss_avg_points_max_mult`, `loss_max_effective_pct`: multiplicadores
+    del umbral de corte de pérdidas (ver `effective_loss_cut_threshold()`
+    y docstring del módulo, "Corte de pérdidas frente al VM de compra"),
+    todos por defecto de config (`SELLING_LOSS_*`). El de tiempo necesita
+    "purchased_at" en `purchase_baselines`; el de media, `average.average`
+    en el item de roster -- sin cualquiera de los dos, ese factor queda en
+    x1.
+
+    `upgrade_min_hold_days`: por defecto config.SELLING_UPGRADE_MIN_HOLD_DAYS
+    — antigüedad mínima para que la vía 5 (oportunidad de mercado) pueda
+    aplicar. Sin "purchased_at" para ese jugador, no bloquea.
+
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
     comparación de tiempo del listado objetivo y a la confirmación de
@@ -433,8 +469,11 @@ def decide_sales(
       1. Su revalorización (`value` vs. el precio pagado en
          `bought_by_bot`) supera `min_profit_pct` (por defecto
          config.SELLING_MIN_PROFIT_PCT) — vía normal, para todos.
-      2. Ha perdido más de `max_loss_pct` — corte de pérdidas, mismo
-         umbral para cualquier estado (sano, en duda o lesionado).
+      2. Ha perdido más del umbral efectivo de corte (`max_loss_pct` con
+         los multiplicadores por antigüedad y media de puntos, ver
+         `effective_loss_cut_threshold()`) frente al VM en la compra
+         ("value_at_purchase", o lo pagado si no se conoce) — corte de
+         pérdidas, mismo umbral para cualquier estado.
       3. Tiene lesión CONFIRMADA y su valor supera
          `injury_concentration_max_pct` del capital total — concentración
          de capital, solo para lesión confirmada (no "doubt"), sin mirar
@@ -538,6 +577,16 @@ def decide_sales(
         if loss_confirmation_max_rebound_pct is None
         else loss_confirmation_max_rebound_pct
     )
+    loss_time_mult_max = config.SELLING_LOSS_TIME_MULT_MAX if loss_time_mult_max is None else loss_time_mult_max
+    loss_time_decay_days = config.SELLING_LOSS_TIME_DECAY_DAYS if loss_time_decay_days is None else loss_time_decay_days
+    loss_avg_points_ref = config.SELLING_LOSS_AVG_POINTS_REF if loss_avg_points_ref is None else loss_avg_points_ref
+    loss_avg_points_max_mult = (
+        config.SELLING_LOSS_AVG_POINTS_MAX_MULT if loss_avg_points_max_mult is None else loss_avg_points_max_mult
+    )
+    loss_max_effective_pct = (
+        config.SELLING_LOSS_MAX_EFFECTIVE_PCT if loss_max_effective_pct is None else loss_max_effective_pct
+    )
+    upgrade_min_hold_days = config.SELLING_UPGRADE_MIN_HOLD_DAYS if upgrade_min_hold_days is None else upgrade_min_hold_days
     now = now or datetime.now(timezone.utc)
     market_listing_expirations = market_listing_expirations or {}
     own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
@@ -597,16 +646,35 @@ def decide_sales(
         # módulo: unificado, la lesión confirmada ya tiene su propia vía
         # incondicional más abajo). Se vende aunque no llegue a
         # min_profit_pct, incluso con pérdidas.
+        #
+        # Referencia = VM en la compra, no lo pagado, y umbral con
+        # multiplicadores por antigüedad y media de puntos (ver docstring
+        # del módulo, "Corte de pérdidas frente al VM de compra"): la prima
+        # pagada en la puja ya es coste hundido.
         is_confirmed_injured = is_confirmed_injured_status(player.get("status"))
         is_injured_or_doubtful = is_injury_status(player.get("status"))
-        loss_threshold = max_loss_pct
-        cutting_losses = profit_pct <= -loss_threshold
+        baseline = purchase_baselines.get(str(player["id"])) or {}
+        loss_reference_price = baseline.get("value_at_purchase") or purchase_price
+        loss_pct = (current_price - loss_reference_price) / loss_reference_price
+        purchased_at = parse_iso_datetime(baseline.get("purchased_at"))
+        days_held = (now - purchased_at).total_seconds() / 86400 if purchased_at else None
+        average_points = (player.get("average") or {}).get("average") if isinstance(player.get("average"), dict) else None
+        loss_threshold = effective_loss_cut_threshold(
+            max_loss_pct,
+            days_held=days_held,
+            average_points=average_points,
+            time_mult_max=loss_time_mult_max,
+            time_decay_days=loss_time_decay_days,
+            avg_points_ref=loss_avg_points_ref,
+            avg_points_max_mult=loss_avg_points_max_mult,
+            max_effective_pct=loss_max_effective_pct,
+        )
+        cutting_losses = loss_pct <= -loss_threshold
 
         # Trailing-stop / corte por reversión desde máximo (ver docstring
         # del módulo): compara contra el valor MÁS ALTO observado desde la
         # compra ("peak_price" de purchase_baselines), no contra el precio
         # de compra -- puede disparar aunque profit_pct siga en positivo.
-        baseline = purchase_baselines.get(str(player["id"])) or {}
         peak_price = baseline.get("peak_price")
         points_at_purchase = baseline.get("points_at_purchase")
         drawdown_from_peak_pct = (
@@ -634,8 +702,13 @@ def decide_sales(
         own_lineup_score = lineup_score_by_id.get(str(player["id"]))
         best_market_candidate = best_market_candidate_by_position.get(position_key)
         best_available_lineup_score = best_market_candidate["score"] if best_market_candidate else None
+        # Antigüedad mínima (config.SELLING_UPGRADE_MIN_HOLD_DAYS): un
+        # recién fichado aún no tiene score representativo. Sin fecha de
+        # compra conocida, no bloquea.
+        held_long_enough_for_upgrade = days_held is None or days_held >= upgrade_min_hold_days
         market_upgrade_available = (
             not is_injured_or_doubtful
+            and held_long_enough_for_upgrade
             and own_lineup_score is not None
             and best_available_lineup_score is not None
             and (best_available_lineup_score - own_lineup_score) >= upgrade_available_min_margin
@@ -714,6 +787,8 @@ def decide_sales(
                 peak_price,
                 drawdown_from_peak_pct,
                 points_at_purchase,
+                loss_pct,
+                loss_reference_price,
             )
         )
 
@@ -804,6 +879,8 @@ def decide_sales(
         peak_price,
         drawdown_from_peak_pct,
         points_at_purchase,
+        loss_pct,
+        loss_reference_price,
     ) in candidates:
         if only_market_reason and str(player["id"]) not in approved_market_only_ids:
             continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
@@ -848,10 +925,11 @@ def decide_sales(
         elif cutting_losses:
             motivo = "corte de pérdidas (lesión confirmada)" if is_confirmed_injured else "corte de pérdidas"
             reason = (
-                f"{motivo}: pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
-                f"({profit_pct:+.1%}) -- pérdida >= umbral de corte {loss_threshold:.1%} (mismo umbral para "
-                "cualquier estado); se vende aunque no llegue al umbral de rentabilidad, para no caer en la "
-                f"falacia del coste hundido{points_note}"
+                f"{motivo}: VM en la compra {loss_reference_price} (pagado por el bot {purchase_price}), ahora "
+                f"{player.get('value', 0)} ({loss_pct:+.1%} frente al VM de compra, {profit_pct:+.1%} frente a lo "
+                f"pagado) -- pérdida >= umbral de corte efectivo {loss_threshold:.1%} (base {max_loss_pct:.1%} "
+                "con multiplicadores por antigüedad y media de puntos); se vende aunque no llegue al umbral de "
+                f"rentabilidad, para no caer en la falacia del coste hundido{points_note}"
             )
         elif trailing_stop_triggered:
             reason = (
@@ -910,6 +988,50 @@ def decide_sales(
             }
         )
     return decisions
+
+
+def effective_loss_cut_threshold(
+    base_pct: float,
+    days_held: float | None = None,
+    average_points: float | None = None,
+    time_mult_max: float = None,
+    time_decay_days: float = None,
+    avg_points_ref: float = None,
+    avg_points_max_mult: float = None,
+    max_effective_pct: float = None,
+) -> float:
+    """
+    Umbral de pérdida (positivo) a partir del cual `decide_sales()` corta
+    pérdidas (vía 2), ver docstring del módulo, "Corte de pérdidas frente
+    al VM de compra":
+
+        min(max_effective_pct, base_pct * mult_tiempo * mult_media)
+
+      - mult_tiempo: `time_mult_max` el día de la compra, decae linealmente
+        hasta 1 a los `time_decay_days` días. Sin `days_held` -> 1.
+      - mult_media: `average_points / avg_points_ref`, acotado a
+        [1, `avg_points_max_mult`]. Sin media (None/no numérica/<=0) -> 1.
+
+    Nunca devuelve menos que `base_pct` (ambos factores >= 1) salvo que
+    `max_effective_pct` sea menor que el propio base. Todos los parámetros
+    salvo `base_pct` por defecto de config (`SELLING_LOSS_*`).
+    """
+    time_mult_max = config.SELLING_LOSS_TIME_MULT_MAX if time_mult_max is None else time_mult_max
+    time_decay_days = config.SELLING_LOSS_TIME_DECAY_DAYS if time_decay_days is None else time_decay_days
+    avg_points_ref = config.SELLING_LOSS_AVG_POINTS_REF if avg_points_ref is None else avg_points_ref
+    avg_points_max_mult = config.SELLING_LOSS_AVG_POINTS_MAX_MULT if avg_points_max_mult is None else avg_points_max_mult
+    max_effective_pct = config.SELLING_LOSS_MAX_EFFECTIVE_PCT if max_effective_pct is None else max_effective_pct
+
+    time_mult = 1.0
+    if days_held is not None and time_decay_days > 0:
+        remaining = max(0.0, min(1.0, (time_decay_days - max(0.0, days_held)) / time_decay_days))
+        time_mult = 1.0 + (max(1.0, time_mult_max) - 1.0) * remaining
+
+    avg_mult = 1.0
+    if isinstance(average_points, (int, float)) and average_points > 0 and avg_points_ref > 0:
+        avg_mult = min(max(1.0, avg_points_max_mult), max(1.0, average_points / avg_points_ref))
+
+    return min(max_effective_pct, base_pct * time_mult * avg_mult)
 
 
 def parse_iso_datetime(value) -> datetime | None:
