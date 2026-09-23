@@ -1593,6 +1593,49 @@ def test_decide_sales_third_of_six_forwards_is_now_protected():
     assert len(decide_sales(squad, **{**kwargs, "top_players_require_replacement": False})) == 1
 
 
+def _worst_protected_upgrade_run(sellable_ids, market_form=10.0, market_price=400_000):
+    """
+    4 DEL con medias [6, 5, 2, 1] -> protegidos 30 y 31 (el peor de ellos, 31).
+    Los `sellable_ids` son del bot y tienen score de alineación bajo; el
+    mercado ofrece un DEL claramente mejor (y con más forma y mejor ratio).
+    """
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    own = [_feature_row(int(pid), "DEL", xg=0.0, minutes_played=10) for pid in sellable_ids]
+    own += [_feature_row(pid, "DEL", xg=2.0, minutes_played=800) for pid in (30, 31, 35, 36) if str(pid) not in sellable_ids]
+    market = [_feature_row("m1", "DEL", price=market_price, points=market_form, xg=5.0, minutes_played=900)]
+    return decide_sales(
+        squad, formation="4-4-2", bought_by_bot={pid: 500_000 for pid in sellable_ids}, budget=10_000_000,
+        own_squad_features=own, market_candidates=market, upgrade_available_min_margin=0.05,
+        upgrade_only_worst_per_position=True, top_players_require_replacement=True,
+        protect_top_players_from_profit=True, enable_weekend_lineup_guard=False, now=NOW,
+    )
+
+
+def test_decide_sales_worst_protected_can_be_upgraded_buying_first():
+    decisions = _worst_protected_upgrade_run(["31"])
+    assert [d["player_id"] for d in decisions] == [31]
+    assert decisions[0]["replacement_target_player_id"] == "m1"
+    assert decisions[0]["swap_target_player_id"] is None
+    assert "oportunidad de mercado" in decisions[0]["reason"]
+
+
+def test_decide_sales_worst_protected_upgrade_still_needs_a_valid_replacement():
+    """El candidato mejora el score de alineación pero tiene menos forma (4 < 5): no se cambia."""
+    assert _worst_protected_upgrade_run(["31"], market_form=4.0) == []
+
+
+def test_decide_sales_best_protected_is_not_upgradeable():
+    """El 30 (el mejor) no es el peor de los protegidos: no se cambia por oportunidad de mercado."""
+    assert _worst_protected_upgrade_run(["30"]) == []
+
+
+def test_decide_sales_unprotected_worst_takes_priority_over_worst_protected():
+    """Si el peor no protegido (36) también puede cambiarse, se vende él y el 31 espera."""
+    decisions = _worst_protected_upgrade_run(["31", "36"])
+    assert [d["player_id"] for d in decisions] == [36]
+    assert decisions[0]["replacement_target_player_id"] is None
+
+
 def test_decide_sales_market_upgrade_only_replaces_the_worst_of_the_position():
     """
     Dos DEF propios peores que el candidato de mercado: solo el PEOR es

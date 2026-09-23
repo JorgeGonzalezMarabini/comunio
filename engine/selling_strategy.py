@@ -253,7 +253,14 @@ se venden por plusvalía, ni siquiera con sustituto
 trailing-stop y el corte de pérdidas solo con sustituto (ver abajo), las
 vías de lesión siempre --, y la vía 5 (oportunidad de mercado) solo puede vender al
 PEOR de su posición (config.ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION):
-si ese no es vendible esta pasada, no se vende a otro mejor en su lugar.
+si ese no es vendible esta pasada, no se vende a otro mejor en su lugar. La
+única excepción es el PEOR de los protegidos (a petición del usuario,
+2026-09-23: "de los protegidos, el peor sí que puede cambiarse en una
+oportunidad de mercado, asegurando siempre antes la compra y priorizando la
+venta de los no protegidos"): también puede venderse por esta vía, con
+sustituto fichado antes (ver abajo), después de los no protegidos en el
+tope por posición y solo si ningún no protegido de su posición se vende en
+esa pasada.
 
 Los mejores solo se venden con sustituto (a petición del usuario,
 2026-09-23: "que los mejores del equipo solo se vendan si hay un candidato
@@ -882,11 +889,25 @@ def decide_sales(
     # CONFIRMADA es excepción -- y solo con forma real de puntos (sin el
     # respaldo del score de alineación, otra escala): es la que se compara
     # contra la del sustituto.
+    form_scores = own_quality_scores(squad)
     replacement_protected_ids = (
-        rank_positions(squad, own_quality_scores(squad), formation=formation, include_doubtful=True)[0]
+        rank_positions(squad, form_scores, formation=formation, include_doubtful=True)[0]
         if top_players_require_replacement
         else set()
     )
+    # El PEOR de los protegidos (sano) de cada posición sí puede cambiarse
+    # por oportunidad de mercado (vía 5), siempre con sustituto fichado antes
+    # (ver docstring del módulo) y solo si ningún no protegido de su
+    # posición se vende en esta pasada.
+    worst_protected_id_by_position = {}
+    for p in squad:
+        pid = str(p["id"])
+        if pid not in replacement_protected_ids or is_injury_status(p.get("status")):
+            continue
+        position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
+        current = worst_protected_id_by_position.get(position)
+        if current is None or form_scores[pid] < form_scores[current]:
+            worst_protected_id_by_position[position] = pid
 
     candidates = []
     for player in squad:
@@ -1020,6 +1041,7 @@ def decide_sales(
         is_worst_of_position = (
             not upgrade_only_worst_per_position
             or worst_id_by_position.get(position_key_for_rank) == str(player["id"])
+            or worst_protected_id_by_position.get(position_key_for_rank) == str(player["id"])
         )
         market_upgrade_available = (
             not is_injured_or_doubtful
@@ -1119,7 +1141,10 @@ def decide_sales(
     # muy negativo) quedan naturalmente al final de este orden, pero no
     # compiten por margen de banquillo de todos modos (ver más abajo: un
     # lesionado nunca contó como "disponible", así que no descuenta bench).
-    candidates.sort(key=lambda c: c[3], reverse=True)
+    #
+    # Un protegido que solo cualifica por oportunidad de mercado va al final
+    # (prioridad a vender a los no protegidos, ver docstring del módulo).
+    candidates.sort(key=lambda c: (bool(c[14] and c[25]), -c[3]))
 
     # Refinamientos de la vía 5 (ver docstring del módulo) -- SOLO para
     # candidatos donde "oportunidad de mercado" es la ÚNICA vía que
@@ -1129,16 +1154,18 @@ def decide_sales(
     # posición (el de mayor margen se queda la plaza), luego b)+c)+d) en
     # ese mismo orden de mayor margen, para que la oportunidad más clara
     # se quede el presupuesto compartido si varias compiten a la vez.
+    # No protegidos primero: en su posición se quedan la plaza de (a) antes
+    # que el peor de los protegidos, aunque este tenga más margen.
     market_only_entries = [
-        (c[12] - c[11], FUTMONDO_POSITION_MAP.get(c[0].get("role"), c[0].get("role")), c[0], c[15])
+        (c[12] - c[11], FUTMONDO_POSITION_MAP.get(c[0].get("role"), c[0].get("role")), c[0], c[15], c[25])
         for c in candidates
         if c[14]  # only_market_reason
     ]
-    market_only_entries.sort(key=lambda t: t[0], reverse=True)
+    market_only_entries.sort(key=lambda t: (t[4], -t[0]))
 
     count_by_position = {}
     shortlisted = []
-    for margin, position_key, player, best_candidate in market_only_entries:
+    for margin, position_key, player, best_candidate, _protected in market_only_entries:
         if count_by_position.get(position_key, 0) >= max_upgrade_sales_per_position:
             continue  # ya se autorizó el máximo para esta posición esta vez (a)
         count_by_position[position_key] = count_by_position.get(position_key, 0) + 1
@@ -1182,6 +1209,7 @@ def decide_sales(
     replacement_budget_left = max(0, replacement_budget)
     squad_ids = {str(p["id"]) for p in squad}
 
+    unprotected_sold_positions: set = set()
     decisions = []
     for (
         player,
@@ -1216,6 +1244,9 @@ def decide_sales(
             continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
 
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
+
+        if only_market_reason and requires_replacement and position in unprotected_sold_positions:
+            continue  # ya se vende un no protegido de su posición: el peor protegido espera
 
         # Top de su posición (ver docstring del módulo, "Los mejores solo se
         # venden con sustituto"): sin sustituto con mejor ratio precio/punto
@@ -1342,6 +1373,8 @@ def decide_sales(
         # un reemplazo concreto identificado, así que no hay swap que
         # registrar. None en el resto de casos; jobs/run_sales.py solo
         # guarda el swap en `db.models.sale_swap_targets` si viene relleno.
+        if not requires_replacement:
+            unprotected_sold_positions.add(position)
         decisions.append(
             {
                 "player_id": player["id"],
