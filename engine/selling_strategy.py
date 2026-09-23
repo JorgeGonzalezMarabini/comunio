@@ -241,6 +241,19 @@ plena subida deja dinero en la mesa, y si la subida se da la vuelta el
 trailing-stop protege la plusvalía. Ver números en
 config.SELLING_PROFIT_AVG_POINTS_REF.
 
+Protección de los mejores y rotación sobre los peores, por posición (a
+petición del usuario, 2026-09-23: "priorizar sustituir a los peores por
+mejores que cambiar a los mejores por otros mejores"): se rankea la
+plantilla propia por calidad (`own_quality_scores()`: forma ponderada por
+recencia de sus puntos de Futmondo) dentro de cada posición, solo entre
+jugadores sanos (`rank_positions()`). Los N mejores de cada posición (N =
+titulares que pide la formación) nunca se venden por plusvalía
+(config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT) -- el
+trailing-stop, el corte de pérdidas y las vías de lesión siguen
+aplicando --, y la vía 5 (oportunidad de mercado) solo puede vender al
+PEOR de su posición (config.ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION):
+si ese no es vendible esta pasada, no se vende a otro mejor en su lugar.
+
 Nota informativa de puntos ya extraídos (a petición del usuario, misma
 evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
 disparan una venta, si `purchase_baselines` trae "points_at_purchase" para
@@ -264,6 +277,7 @@ from datetime import datetime, timedelta, timezone
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
 from engine.evaluator import evaluate_players, weighted_recent_points
+from engine.lineup_optimizer import FORMATIONS
 from engine.squad_risk import assess_squad_depth
 
 
@@ -322,6 +336,70 @@ def score_market_upgrade_candidates(
     return lineup_score_by_id, best_market_candidate_by_position
 
 
+def own_quality_scores(
+    squad: list[dict], own_squad_features: list[dict] = None, lineup_score_by_id: dict[str, float] = None
+) -> dict[str, float]:
+    """
+    Score de calidad de cada jugador de `squad` para rankearlos dentro de
+    su posición (ver docstring del módulo, "Protección de los mejores"):
+    la forma ponderada por recencia de sus PUNTOS de Futmondo
+    (`average.fitness`/`average.average` del roster, ver
+    `engine.evaluator.weighted_recent_points`; 0 en las jornadas que no
+    jugó). Deliberadamente no el score de alineación
+    (config.LINEUP_EVALUATOR_WEIGHTS): ese no incluye el NIVEL de puntos,
+    solo tendencia/xG/minutos -- con datos reales (2026-09-23) ponía a
+    Sannadi (media 1.3) por delante de Jutglà (4.6). Solo si un jugador no
+    trae ninguna media en el roster se recurre a su score de alineación
+    (`lineup_score_by_id`, o `evaluate_players()` sobre `own_squad_features`)
+    -- en otra escala, así que solo sirve de respaldo. Jugadores sin
+    ningún dato no aparecen (ni protegidos ni "peores").
+    """
+    scores = {}
+    for p in squad:
+        average_info = p.get("average") if isinstance(p.get("average"), dict) else {}
+        form = weighted_recent_points(average_info.get("fitness"), average_info.get("average"))
+        if form is None:
+            form = average_info.get("average")
+        if isinstance(form, (int, float)) and not isinstance(form, bool):
+            scores[str(p["id"])] = float(form)
+    missing = {str(p["id"]) for p in squad} - set(scores)
+    if missing:
+        fallback = {i: v for i, v in (lineup_score_by_id or {}).items() if i in missing}
+        if not fallback and own_squad_features:
+            scored = evaluate_players(list(own_squad_features), weights=config.LINEUP_EVALUATOR_WEIGHTS)
+            fallback = {str(p["id"]): p["score"] for p in scored if str(p["id"]) in missing}
+        scores.update(fallback)
+    return scores
+
+
+def rank_positions(squad: list[dict], quality_scores: dict[str, float], formation: str = None) -> tuple[set, dict]:
+    """
+    Devuelve (`protected_ids`, `worst_id_by_position`) a partir de
+    `quality_scores` (ver `own_quality_scores()`), solo entre jugadores
+    SANOS (sin lesión/duda) con score:
+      - `protected_ids`: los N mejores de cada posición, N = titulares que
+        pide `formation` en esa posición (`engine.lineup_optimizer.FORMATIONS`).
+      - `worst_id_by_position`: {posición: id del peor}.
+    Incluye a los ya puestos en venta: si el peor ya está listado, nadie
+    más de su posición pasa a ser "el peor" en esta pasada.
+    """
+    slots = FORMATIONS.get(formation or config.DEFAULT_FORMATION, {})
+    by_position: dict[str, list] = {}
+    for p in squad:
+        pid = str(p["id"])
+        if pid not in quality_scores or is_injury_status(p.get("status")):
+            continue
+        position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
+        by_position.setdefault(position, []).append((quality_scores[pid], pid))
+    protected_ids = set()
+    worst_id_by_position = {}
+    for position, entries in by_position.items():
+        entries.sort(reverse=True)
+        protected_ids.update(pid for _, pid in entries[: slots.get(position, 0)])
+        worst_id_by_position[position] = entries[-1][1]
+    return protected_ids, worst_id_by_position
+
+
 def decide_sales(
     squad: list[dict],
     min_profit_pct: float = None,
@@ -351,6 +429,8 @@ def decide_sales(
     loss_avg_points_max_mult: float = None,
     loss_max_effective_pct: float = None,
     upgrade_min_hold_days: float = None,
+    protect_top_players_from_profit: bool = None,
+    upgrade_only_worst_per_position: bool = None,
     profit_avg_points_ref: float = None,
     profit_avg_points_max_mult: float = None,
     profit_starter_mult: float = None,
@@ -482,6 +562,11 @@ def decide_sales(
     mientras el precio siga subiendo (ver `price_momentum_pct()`, usa
     `recent_price_history`). Todos por defecto de config (`SELLING_PROFIT_*`).
     La titularidad sale de `own_lineup_player_ids`.
+
+    `protect_top_players_from_profit`, `upgrade_only_worst_per_position`:
+    por defecto config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT /
+    ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION (ver `rank_positions()`
+    y docstring del módulo, "Protección de los mejores").
 
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
@@ -629,6 +714,16 @@ def decide_sales(
         if profit_momentum_min_data_points is None
         else profit_momentum_min_data_points
     )
+    protect_top_players_from_profit = (
+        config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT
+        if protect_top_players_from_profit is None
+        else protect_top_players_from_profit
+    )
+    upgrade_only_worst_per_position = (
+        config.ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION
+        if upgrade_only_worst_per_position is None
+        else upgrade_only_worst_per_position
+    )
     now = now or datetime.now(timezone.utc)
     market_listing_expirations = market_listing_expirations or {}
     own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
@@ -652,6 +747,12 @@ def decide_sales(
     # la activa más abajo).
     lineup_score_by_id, best_market_candidate_by_position = score_market_upgrade_candidates(
         own_squad_features, market_candidates
+    )
+
+    # Protección de los mejores / rotación sobre los peores (ver docstring
+    # del módulo): ranking de calidad por posición de TODA la plantilla.
+    protected_ids, worst_id_by_position = rank_positions(
+        squad, own_quality_scores(squad, own_squad_features, lineup_score_by_id), formation=formation
     )
 
     candidates = []
@@ -739,7 +840,8 @@ def decide_sales(
             now=now,
         )
         still_rising = momentum_pct is not None and momentum_pct >= profit_momentum_min_pct
-        taking_profit = profit_pct >= profit_threshold and not still_rising
+        is_protected_top = protect_top_players_from_profit and str(player["id"]) in protected_ids
+        taking_profit = profit_pct >= profit_threshold and not still_rising and not is_protected_top
 
         # Trailing-stop / corte por reversión desde máximo (ver docstring
         # del módulo): compara contra el valor MÁS ALTO observado desde la
@@ -776,9 +878,17 @@ def decide_sales(
         # recién fichado aún no tiene score representativo. Sin fecha de
         # compra conocida, no bloquea.
         held_long_enough_for_upgrade = days_held is None or days_held >= upgrade_min_hold_days
+        # Solo el PEOR jugador sano de la posición puede venderse por esta
+        # vía (ver docstring del módulo, "Protección de los mejores").
+        position_key_for_rank = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
+        is_worst_of_position = (
+            not upgrade_only_worst_per_position
+            or worst_id_by_position.get(position_key_for_rank) == str(player["id"])
+        )
         market_upgrade_available = (
             not is_injured_or_doubtful
             and held_long_enough_for_upgrade
+            and is_worst_of_position
             and own_lineup_score is not None
             and best_available_lineup_score is not None
             and (best_available_lineup_score - own_lineup_score) >= upgrade_available_min_margin

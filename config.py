@@ -584,6 +584,28 @@ SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS = float(os.getenv("SELLING_PROFIT_MOMENTUM
 SELLING_PROFIT_MOMENTUM_MIN_PCT = float(os.getenv("SELLING_PROFIT_MOMENTUM_MIN_PCT", "0.03"))
 SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS = int(os.getenv("SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS", "2"))
 
+# Protección de los mejores y rotación sobre los peores, por posición (a
+# petición del usuario, 2026-09-23: "priorizar sustituir a los peores por
+# mejores que cambiar a los mejores por otros mejores"). Ranking por forma
+# ponderada por recencia de los PUNTOS de Futmondo (EVALUATOR_RECENT_POINTS_
+# DECAY; no el score de alineación, que no incluye el nivel de puntos -- ver
+# engine.selling_strategy.own_quality_scores) entre los jugadores SANOS de
+# cada posición:
+#   - SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT: los N mejores de cada
+#     posición (N = titulares que pide la formación, p. ej. 4 DEF en 4-4-2)
+#     nunca se venden por plusvalía, por alta que sea. El trailing-stop, el
+#     corte de pérdidas y las vías de lesión siguen aplicando.
+#   - SELLING_UPGRADE_ONLY_WORST_PER_POSITION: la vía "oportunidad de
+#     mercado" solo puede vender al PEOR jugador sano de su posición; si ese
+#     no es vendible esta pasada (recién fichado, ya en venta...), no se
+#     vende a otro mejor en su lugar.
+ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT = (
+    os.getenv("ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT", "true").lower() == "true"
+)
+ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION = (
+    os.getenv("ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION", "true").lower() == "true"
+)
+
 # Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
 # llegue a SELLING_MIN_PROFIT_PCT, incluso con pérdidas -- corte de

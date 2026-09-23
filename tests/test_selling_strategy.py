@@ -1314,6 +1314,7 @@ _PROFIT_KWARGS = dict(
     profit_momentum_min_data_points=2,
     trailing_stop_max_drawdown_pct=999,
     enable_weekend_lineup_guard=False,
+    protect_top_players_from_profit=False,  # estos tests miden los multiplicadores; la protección tiene los suyos
     now=NOW,
 )
 
@@ -1396,3 +1397,89 @@ def test_decide_sales_profit_multiplier_uses_recency_weighted_form():
     squad, bought = _profit_squad(1_200_000)
     squad[9]["average"] = {"average": 2.0, "fitness": [0, 0, 4, 7, 9]}  # en forma ahora -> umbral más alto
     assert decide_sales(squad, formation="4-4-2", bought_by_bot=bought, **_PROFIT_KWARGS) == []
+
+
+# --- Protección de los mejores y rotación sobre los peores, por posición (a
+# petición del usuario, 2026-09-23, ver docstring del módulo) ---
+
+
+def _del_squad_with_averages(averages):
+    """4-4-2 + delanteros extra; `averages` = medias de TODOS los delanteros (ids 30, 31, 35, 36...)."""
+    squad = _full_442_squad()
+    for extra_id in (35, 36)[: max(0, len(averages) - 2)]:
+        squad.append({"id": extra_id, "name": f"Delantero{extra_id}", "role": "delantero", "status": "", "value": 500_000})
+    delanteros = [p for p in squad if p["role"] == "delantero"]
+    for p, avg in zip(delanteros, averages):
+        p["average"] = {"average": avg}
+    return squad
+
+
+def test_decide_sales_top_players_are_protected_from_profit_sale():
+    """4 delanteros, 2 titulares en 4-4-2: el mejor (media 6) no se vende por plusvalía; el peor sí."""
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    squad[9]["value"] = 1_300_000   # id 30, el mejor, +30%
+    squad[-1]["value"] = 1_300_000  # id 36, el peor, +30%
+    bought = {"30": 1_000_000, "36": 1_000_000}
+
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought, min_profit_pct=0.15, profit_avg_points_max_mult=1.0,
+        protect_top_players_from_profit=True, enable_weekend_lineup_guard=False, now=NOW,
+    )
+    assert [d["player_id"] for d in decisions] == [36]
+
+
+def test_decide_sales_protection_can_be_disabled():
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    squad[9]["value"] = 1_300_000
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15, profit_avg_points_max_mult=1.0,
+        protect_top_players_from_profit=False, enable_weekend_lineup_guard=False, now=NOW,
+    )
+    assert [d["player_id"] for d in decisions] == [30]
+
+
+def test_decide_sales_protected_top_player_still_has_trailing_stop():
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    squad[9]["value"] = 1_200_000  # +20% vs compra, pero -25% desde un pico de 1.6M
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15,
+        purchase_baselines={"30": {"peak_price": 1_600_000}}, trailing_stop_max_drawdown_pct=0.20,
+        protect_top_players_from_profit=True, enable_weekend_lineup_guard=False, now=NOW,
+    )
+    assert len(decisions) == 1
+    assert "reversión desde máximo" in decisions[0]["reason"]
+
+
+def test_decide_sales_market_upgrade_only_replaces_the_worst_of_the_position():
+    """
+    Dos DEF propios peores que el candidato de mercado: solo el PEOR es
+    vendible por oportunidad de mercado. Si el peor está recién fichado, no
+    se vende al otro en su lugar.
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
+    squad.append({"id": 16, "name": "Defensa Extra2", "role": "defensa", "status": "", "value": 500_000})
+    own = [
+        _feature_row(10, "DEF", xg=0.0, minutes_played=10),   # el peor
+        _feature_row(15, "DEF", xg=1.0, minutes_played=300),
+        _feature_row(11, "DEF", xg=2.0, minutes_played=800),
+        _feature_row(12, "DEF", xg=2.0, minutes_played=800),
+        _feature_row(13, "DEF", xg=2.0, minutes_played=800),
+        _feature_row(16, "DEF", xg=2.0, minutes_played=800),
+    ]
+    market = [_feature_row("mercado1", "DEF", xg=5.0, minutes_played=900)]
+    bought = {"10": 500_000, "15": 500_000}
+
+    def run(worst_days_held):
+        baselines = {
+            "10": {"peak_price": 500_000, "value_at_purchase": 500_000, "purchased_at": (NOW - timedelta(days=worst_days_held)).isoformat()},
+            "15": {"peak_price": 500_000, "value_at_purchase": 500_000, "purchased_at": (NOW - timedelta(days=30)).isoformat()},
+        }
+        return decide_sales(
+            squad, formation="4-4-2", bought_by_bot=bought, own_squad_features=own, market_candidates=market,
+            purchase_baselines=baselines, upgrade_available_min_margin=0.05, upgrade_min_hold_days=7,
+            upgrade_only_worst_per_position=True, enable_weekend_lineup_guard=False, now=NOW,
+        )
+
+    assert [d["player_id"] for d in run(30)] == [10]
+    assert run(1) == []  # el peor aún no es vendible -> no se vende al 15 en su lugar
