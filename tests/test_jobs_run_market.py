@@ -884,10 +884,13 @@ def test_run_market_prioritizes_candidate_that_would_upgrade_lineup(tmp_db):
     # su media -> trend alto bajo LINEUP_EVALUATOR_WEIGHTS, supera al
     # listón de los MED de plantilla, todos con trend=0) y un DEF con mejor
     # relación puntos/precio (EVALUATOR_WEIGHTS, el que de verdad decide
-    # cuánto pujar) para comprobar que la prioridad viene del boost, no de
-    # que ya tuviera mejor score de puja.
+    # cuánto pujar) pero la MISMA media que los DEF de plantilla -- desde que
+    # LINEUP_EVALUATOR_WEIGHTS incluye el nivel de puntos ("futmondo_form",
+    # 2026-09-23), un DEF con más media sí mejoraría el once de verdad --,
+    # para comprobar que la prioridad viene del boost, no de que ya tuviera
+    # mejor score de puja.
     _seed_player("med_upgrade", "MED", price=1_000_000, points=6, last_points=12, average_points=6.0)
-    _seed_player("def_normal", "DEF", price=1_000_000, points=12)
+    _seed_player("def_normal", "DEF", price=250_000, points=5)
 
     class FakeClient(FutmondoClient):
         def get_roster(self):

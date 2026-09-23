@@ -502,3 +502,22 @@ def test_normalize_pool_blends_recent_minutes(monkeypatch):
     no_history = {**base, "id": "c"}
     by_id = {p["id"]: p for p in normalize_pool([starter_now, benched_now, no_history])}
     assert by_id["a"]["minutes_played_ratio"] > by_id["c"]["minutes_played_ratio"] > by_id["b"]["minutes_played_ratio"]
+
+
+def test_lineup_score_includes_points_level():
+    """
+    Con config.LINEUP_EVALUATOR_WEIGHTS, a igualdad de xG/minutos/tendencia,
+    quien puntúa más en Futmondo sale mejor (antes solo contaba la tendencia).
+    """
+    base = {"position": "DEL", "price": 1_000_000, "status": "", "xg": 1.0, "minutes_played": 450, "team_games": 5}
+    good = {**base, "id": "good", "average_points": 5.0, "last_points": 5}
+    poor = {**base, "id": "poor", "average_points": 1.0, "last_points": 1}
+    by_id = {p["id"]: p["score"] for p in evaluate_players([good, poor], weights=config.LINEUP_EVALUATOR_WEIGHTS)}
+    assert by_id["good"] > by_id["poor"]
+
+
+def test_lineup_weights_keep_positive_sum_at_one():
+    """Los umbrales en escala de score de alineación asumen que los pesos positivos (sin clean sheet) suman 1.0."""
+    w = config.LINEUP_EVALUATOR_WEIGHTS
+    positive = sum(v for k, v in w.items() if k not in ("injury_penalty", "doubt_penalty", "clean_sheet_rate"))
+    assert positive == pytest.approx(1.0)

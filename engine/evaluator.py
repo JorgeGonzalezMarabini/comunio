@@ -75,6 +75,7 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
 
         {
             "points_per_price": float,   # normalizado 0..1 dentro del pool
+            "form": float,               # forma ponderada de puntos (form_points), normalizada 0..1 -- peso "futmondo_form", opcional
             "trend": float,              # normalizado 0..1 dentro del pool
             "xg": float,                 # normalizado 0..1 dentro del pool (xG/90)
             "minutes_played_ratio": float,  # normalizado 0..1 dentro del pool
@@ -137,6 +138,7 @@ def score_player(player_stats: dict, weights: dict = None) -> float:
 
     score = (
         w["futmondo_points_per_price"] * player_stats.get("points_per_price", 0)
+        + w.get("futmondo_form", 0) * player_stats.get("form", 0)
         + w["futmondo_trend"] * player_stats.get("trend", 0)
         + w["minutes_played"] * player_stats.get("minutes_played_ratio", 0)
     )
@@ -208,6 +210,9 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         `recent_points`) / precio_en_millones. Puntos por jornada (no el
         total), para no penalizar a quien lleva menos jornadas jugadas por
         lesión/fichaje tardío, dando más peso a las jornadas recientes.
+      - form: la propia forma ponderada (`form_points()`), sin dividir por
+        precio -- el NIVEL de puntos, peso "futmondo_form" (ver
+        config.LINEUP_EVALUATOR_WEIGHTS).
       - trend: forma ponderada - average_points (o last_points -
         average_points si no hay `recent_points`). Positivo si el
         rendimiento reciente es mejor que su media de temporada.
@@ -269,6 +274,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     """
     n = len(raw_players)
     points_per_price = [0.0] * n
+    form_level = [0.0] * n
     trend = [0.0] * n
     xg90 = [0.0] * n
     minutes_ratio = [0.0] * n
@@ -281,6 +287,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         avg_points = p.get("average_points") or 0
         recent_form = weighted_recent_points(p.get("recent_points"), p.get("average_points"))
         form = recent_form if recent_form is not None else avg_points
+        form_level[i] = form
         points_per_price[i] = form / (price / 1_000_000) if price > 0 else 0
 
         if recent_form is not None:
@@ -343,6 +350,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         groups_idx.setdefault(p.get("position"), []).append(i)
 
     norm_ppp = [0.0] * n
+    norm_form = [0.0] * n
     norm_trend = [0.0] * n
     norm_xg90 = [0.0] * n
     norm_minutes = [0.0] * n
@@ -350,12 +358,14 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
 
     for idxs in groups_idx.values():
         group_ppp = _minmax_normalize([points_per_price[i] for i in idxs])
+        group_form = _minmax_normalize([form_level[i] for i in idxs])
         group_trend = _minmax_normalize([trend[i] for i in idxs])
         group_xg90 = _minmax_normalize([xg90[i] for i in idxs])
         group_minutes = _minmax_normalize([minutes_ratio[i] for i in idxs])
         group_clean_sheet = _minmax_normalize([clean_sheet_rate[i] for i in idxs])
         for j, i in enumerate(idxs):
             norm_ppp[i] = group_ppp[j]
+            norm_form[i] = group_form[j]
             norm_trend[i] = group_trend[j]
             norm_xg90[i] = group_xg90[j]
             norm_minutes[i] = group_minutes[j]
@@ -367,6 +377,7 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
             {
                 **p,
                 "points_per_price": norm_ppp[i],
+                "form": norm_form[i],
                 "trend": norm_trend[i],
                 "xg": norm_xg90[i],
                 "minutes_played_ratio": norm_minutes[i],

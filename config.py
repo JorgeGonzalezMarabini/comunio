@@ -259,11 +259,23 @@ EVALUATOR_RECENT_MINUTES_WEIGHT = float(os.getenv("EVALUATOR_RECENT_MINUTES_WEIG
 # decide `engine.lineup_optimizer._rank_healthy_first()` (sanos siempre
 # primero, un lesionado solo si no queda ningún sano en su posición); este
 # peso solo afecta al score que ordena dentro de cada grupo.
+#
+# "futmondo_form" (a petición del usuario, 2026-09-23): hasta ahora este
+# score NO incluía el NIVEL de puntos de Futmondo -- solo su tendencia
+# (forma - media), xG y minutos --, así que con datos reales ponía a
+# Sannadi (media 1.3) por delante de Jutglà (4.6) y a Szczesny (-2) por
+# delante de Cárdenas (1.7). Ahora suma la forma ponderada por recencia de
+# los puntos (engine.evaluator.form_points, normalizada por posición),
+# redistribuyendo el resto para que la suma de pesos positivos siga en 1.0
+# y los umbrales que se miden en esta escala (SELLING_UPGRADE_AVAILABLE_MIN_
+# MARGIN, BIDDING_CANCEL_SWAP_MIN_MARGIN, BIDDING_UPGRADE_BOOST...) sigan
+# significando lo mismo. Sin calibrar todavía con resultados reales.
 LINEUP_EVALUATOR_WEIGHTS = {
     "futmondo_points_per_price": 0.0,
-    "futmondo_trend": 0.30,
-    "xg": 0.40,
-    "minutes_played": 0.30,
+    "futmondo_form": 0.35,
+    "futmondo_trend": 0.15,
+    "xg": 0.25,
+    "minutes_played": 0.25,
     "clean_sheet_rate": 0.20,  # solo aplica a POR/DEF, ver EVALUATOR_WEIGHTS arriba
     "injury_penalty": 0.10,
 }
