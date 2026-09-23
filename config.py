@@ -605,13 +605,19 @@ SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS = int(os.getenv("SELLING_PROFIT_MOMENTUM
 # cada posición:
 #   - SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT: los N mejores de cada
 #     posición (N = titulares que pide la formación, p. ej. 4 DEF en 4-4-2)
-#     nunca se venden por plusvalía, por alta que sea. El trailing-stop y el
-#     corte de pérdidas solo con sustituto (ver ENABLE_SELLING_TOP_PLAYERS_
+#     nunca se venden por plusvalía sin sustituto igual o mejor. El
+#     trailing-stop y el corte de pérdidas, igual: solo con sustituto (ver ENABLE_SELLING_TOP_PLAYERS_
 #     REQUIRE_REPLACEMENT abajo); las vías de lesión siguen aplicando.
 #   - SELLING_UPGRADE_ONLY_WORST_PER_POSITION: la vía "oportunidad de
 #     mercado" solo puede vender al PEOR jugador sano de su posición; si ese
 #     no es vendible esta pasada (recién fichado, ya en venta...), no se
 #     vende a otro mejor en su lugar.
+# Cuántos cuentan como "mejores" por posición: max(titulares de la
+# formación, esta fracción de los jugadores rankeados de la posición,
+# redondeando hacia arriba) -- a petición del usuario, 2026-09-23: "extender
+# la protección a la mitad superior de cada posición" (p. ej. 6 DEL en
+# 4-4-2 -> 3 protegidos en vez de 2; nunca menos que los titulares).
+SELLING_TOP_PLAYERS_PROTECTED_MIN_SHARE = float(os.getenv("SELLING_TOP_PLAYERS_PROTECTED_MIN_SHARE", "0.5"))
 ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT = (
     os.getenv("ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT", "true").lower() == "true"
 )
@@ -624,8 +630,8 @@ ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION = (
 # candidato en mercado disponible para sustituirles con un ratio de
 # precio/puntos mejor"). Aplica a los N mejores de cada posición (mismo
 # ranking que arriba, pero contando también a los "doubt"; la lesión
-# CONFIRMADA es la única excepción) en CUALQUIER vía de venta (corte de
-# pérdidas, trailing-stop, oportunidad de mercado). Se lista al top solo si
+# CONFIRMADA es la única excepción) en CUALQUIER vía de venta (plusvalía,
+# corte de pérdidas, trailing-stop, oportunidad de mercado). Se lista al top solo si
 # hay en mercado un sustituto de su posición, sano, con:
 #   - forma >= SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO x la del top (no baja
 #     la media de puntos de la posición),

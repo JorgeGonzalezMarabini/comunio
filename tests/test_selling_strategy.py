@@ -1552,6 +1552,53 @@ def test_decide_sales_two_tops_cannot_share_the_same_replacement():
     assert len(decisions) == 1
 
 
+def test_decide_sales_top_player_profit_sale_requires_replacement():
+    """El mejor delantero con +30%: sin sustituto se queda; con uno igual o mejor se lista a la espera de ficharlo."""
+    def run(market):
+        squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+        squad[9]["value"] = 1_300_000
+        return decide_sales(
+            squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15,
+            profit_avg_points_max_mult=1.0, budget=10_000_000, market_candidates=market,
+            protect_top_players_from_profit=True, top_players_require_replacement=True,
+            enable_weekend_lineup_guard=False, now=NOW,
+        )
+
+    assert run([]) == []
+    decisions = run([_market_row("m1", "DEL", 1_000_000, 7.0)])
+    assert [d["player_id"] for d in decisions] == [30]
+    assert decisions[0]["replacement_target_player_id"] == "m1"
+
+
+def test_rank_positions_protects_the_upper_half_but_never_fewer_than_starters():
+    from engine.selling_strategy import rank_positions
+
+    squad = [{"id": 30 + i, "role": "delantero", "status": ""} for i in range(6)]
+    squad += [{"id": 10 + i, "role": "defensa", "status": ""} for i in range(6)]
+    scores = {str(p["id"]): float(10 - (p["id"] % 10)) for p in squad}  # id más bajo = mejor
+    protected, _ = rank_positions(squad, scores, formation="4-4-2", min_share=0.5)
+    assert {"30", "31", "32"} <= protected and "33" not in protected  # 6 DEL: 3 (mitad) > 2 titulares
+    assert {"10", "11", "12", "13"} <= protected and "14" not in protected  # 6 DEF: 4 titulares > 3 (mitad)
+
+
+def test_decide_sales_third_of_six_forwards_is_now_protected():
+    """6 delanteros: el 3º (media 4) ya es de la mitad superior -> su trailing-stop exige sustituto."""
+    squad = _full_442_squad()
+    for extra_id in (35, 36, 37, 38):
+        squad.append({"id": extra_id, "name": f"Delantero{extra_id}", "role": "delantero", "status": "", "value": 500_000})
+    delanteros = [p for p in squad if p["role"] == "delantero"]
+    for p, avg in zip(delanteros, [6.0, 5.0, 4.0, 3.0, 2.0, 1.0]):
+        p["average"] = {"average": avg}
+    delanteros[2]["value"] = 1_200_000
+    kwargs = dict(
+        formation="4-4-2", bought_by_bot={str(delanteros[2]["id"]): 1_000_000}, min_profit_pct=0.15,
+        purchase_baselines={str(delanteros[2]["id"]): {"peak_price": 1_600_000}}, trailing_stop_max_drawdown_pct=0.20,
+        top_players_require_replacement=True, enable_weekend_lineup_guard=False, now=NOW,
+    )
+    assert decide_sales(squad, **kwargs) == []
+    assert len(decide_sales(squad, **{**kwargs, "top_players_require_replacement": False})) == 1
+
+
 def test_decide_sales_market_upgrade_only_replaces_the_worst_of_the_position():
     """
     Dos DEF propios peores que el candidato de mercado: solo el PEOR es

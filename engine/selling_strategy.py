@@ -247,7 +247,8 @@ mejores que cambiar a los mejores por otros mejores"): se rankea la
 plantilla propia por calidad (`own_quality_scores()`: forma ponderada por
 recencia de sus puntos de Futmondo) dentro de cada posición, solo entre
 jugadores sanos (`rank_positions()`). Los N mejores de cada posición (N =
-titulares que pide la formación) nunca se venden por plusvalía
+max(titulares que pide la formación, mitad superior de la posición)) nunca
+se venden por plusvalía sin sustituto
 (config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT) -- el
 trailing-stop y el corte de pérdidas solo con sustituto (ver abajo), las
 vías de lesión siempre --, y la vía 5 (oportunidad de mercado) solo puede vender al
@@ -263,8 +264,11 @@ lesión; "comprar la oportunidad de mercado antes de venderlo"; "se puede
 poner en venta pero no aceptar ofertas hasta haber ganado la compra, y en
 caso de perderla retirar la venta y volver a evaluar"). Los N mejores de
 cada posición por forma de puntos (mismo ranking, pero un "doubt" sigue
-contando; solo la lesión CONFIRMADA es excepción) no se venden por
-NINGUNA vía salvo que `find_top_player_replacement()` encuentre en el
+contando; solo la lesión CONFIRMADA es excepción; N = max(titulares,
+mitad superior), ver config.SELLING_TOP_PLAYERS_PROTECTED_MIN_SHARE) no se
+venden por NINGUNA vía, plusvalía incluida ("no nos interesa vender a un
+jugador bueno con plusvalía si no podemos sustituirlo por otro igual o
+mejor"), salvo que `find_top_player_replacement()` encuentre en el
 mercado un sustituto de su posición, sano, con forma >= la suya, mejor
 coste por punto y pagable con el presupuesto actual (config.
 ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT, SELLING_TOP_REPLACEMENT_*).
@@ -292,6 +296,7 @@ más arriba).
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import config
@@ -393,20 +398,27 @@ def own_quality_scores(
 
 
 def rank_positions(
-    squad: list[dict], quality_scores: dict[str, float], formation: str = None, include_doubtful: bool = False
+    squad: list[dict],
+    quality_scores: dict[str, float],
+    formation: str = None,
+    include_doubtful: bool = False,
+    min_share: float = None,
 ) -> tuple[set, dict]:
     """
     Devuelve (`protected_ids`, `worst_id_by_position`) a partir de
     `quality_scores` (ver `own_quality_scores()`), solo entre jugadores
     SANOS (sin lesión/duda; con `include_doubtful`, solo se excluye la
     lesión CONFIRMADA) con score:
-      - `protected_ids`: los N mejores de cada posición, N = titulares que
-        pide `formation` en esa posición (`engine.lineup_optimizer.FORMATIONS`).
+      - `protected_ids`: los N mejores de cada posición, N = max(titulares
+        que pide `formation` en esa posición (`engine.lineup_optimizer.
+        FORMATIONS`), mitad superior redondeada hacia arriba -- `min_share`,
+        config.SELLING_TOP_PLAYERS_PROTECTED_MIN_SHARE, de los rankeados).
       - `worst_id_by_position`: {posición: id del peor}.
     Incluye a los ya puestos en venta: si el peor ya está listado, nadie
     más de su posición pasa a ser "el peor" en esta pasada.
     """
     slots = FORMATIONS.get(formation or config.DEFAULT_FORMATION, {})
+    min_share = config.SELLING_TOP_PLAYERS_PROTECTED_MIN_SHARE if min_share is None else min_share
     by_position: dict[str, list] = {}
     for p in squad:
         pid = str(p["id"])
@@ -421,7 +433,8 @@ def rank_positions(
     worst_id_by_position = {}
     for position, entries in by_position.items():
         entries.sort(reverse=True)
-        protected_ids.update(pid for _, pid in entries[: slots.get(position, 0)])
+        n_protected = max(slots.get(position, 0), math.ceil(len(entries) * min_share))
+        protected_ids.update(pid for _, pid in entries[:n_protected])
         worst_id_by_position[position] = entries[-1][1]
     return protected_ids, worst_id_by_position
 
@@ -962,7 +975,15 @@ def decide_sales(
             now=now,
         )
         still_rising = momentum_pct is not None and momentum_pct >= profit_momentum_min_pct
-        is_protected_top = protect_top_players_from_profit and str(player["id"]) in protected_ids
+        # Un top con la regla del sustituto activa (ver docstring del módulo,
+        # "Los mejores solo se venden con sustituto") sí puede venderse por
+        # plusvalía, pero solo con sustituto igual o mejor -- se exige más
+        # abajo, como en el resto de vías. Sin esa regla (o sin forma propia
+        # para aplicarla), la protección bloquea la plusvalía sin más.
+        requires_replacement = str(player["id"]) in replacement_protected_ids and not is_confirmed_injured
+        is_protected_top = (
+            protect_top_players_from_profit and str(player["id"]) in protected_ids and not requires_replacement
+        )
         taking_profit = profit_pct >= profit_threshold and not still_rising and not is_protected_top
 
         # Trailing-stop / corte por reversión desde máximo (ver docstring
@@ -1094,7 +1115,7 @@ def decide_sales(
                 taking_profit,
                 profit_threshold,
                 momentum_pct,
-                str(player["id"]) in replacement_protected_ids and not is_confirmed_injured,
+                requires_replacement,
                 average_points,
             )
         )
