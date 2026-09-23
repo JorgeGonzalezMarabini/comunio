@@ -6,6 +6,8 @@ from engine.selling_strategy import (
     confirm_loss_is_sustained,
     decide_sales,
     effective_loss_cut_threshold,
+    effective_profit_threshold,
+    price_momentum_pct,
 )
 
 NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
@@ -1297,3 +1299,89 @@ def test_decide_sales_market_upgrade_blocked_for_a_recent_signing():
     decisions = run(10)
     assert len(decisions) == 1
     assert "oportunidad de mercado" in decisions[0]["reason"]
+
+
+# --- Venta por plusvalía ponderada por media, titularidad y tendencia (a
+# petición del usuario, 2026-09-23, caso Koski, ver docstring del módulo) ---
+
+_PROFIT_KWARGS = dict(
+    min_profit_pct=0.15,
+    profit_avg_points_ref=3.0,
+    profit_avg_points_max_mult=2.5,
+    profit_starter_mult=1.5,
+    profit_momentum_lookback_days=3,
+    profit_momentum_min_pct=0.03,
+    profit_momentum_min_data_points=2,
+    trailing_stop_max_drawdown_pct=999,
+    enable_weekend_lineup_guard=False,
+    now=NOW,
+)
+
+
+def test_effective_profit_threshold_multipliers():
+    kw = dict(avg_points_ref=3.0, avg_points_max_mult=2.5, starter_mult=1.5)
+    assert effective_profit_threshold(0.15, **kw) == 0.15
+    assert effective_profit_threshold(0.15, average_points=2.0, **kw) == 0.15  # nunca por debajo del base
+    assert abs(effective_profit_threshold(0.15, average_points=4.5, **kw) - 0.225) < 1e-9
+    assert abs(effective_profit_threshold(0.15, average_points=12, **kw) - 0.375) < 1e-9  # tope x2.5
+    assert abs(effective_profit_threshold(0.15, average_points=4.5, is_starter=True, **kw) - 0.3375) < 1e-9
+
+
+def test_price_momentum_pct_uses_first_point_in_window():
+    history = [_history_point(5, 500_000), _history_point(2.5, 1_000_000), _history_point(1, 1_050_000)]
+    assert abs(price_momentum_pct(history, 1_100_000, lookback_days=3, min_data_points=2, now=NOW) - 0.10) < 1e-9
+
+
+def test_price_momentum_pct_none_without_enough_data():
+    assert price_momentum_pct([_history_point(1, 1_000_000)], 1_100_000, lookback_days=3, min_data_points=2, now=NOW) is None
+    assert price_momentum_pct(None, 1_100_000, now=NOW) is None
+
+
+def _profit_squad(value=1_200_000, average=None):
+    squad = _full_442_squad()
+    squad.append({"id": 35, "name": "Delantero Extra", "role": "delantero", "status": "", "value": 500_000})
+    squad[9]["value"] = value
+    if average is not None:
+        squad[9]["average"] = {"average": average}
+    return squad, {str(squad[9]["id"]): 1_000_000}
+
+
+def test_decide_sales_profit_sale_unchanged_for_low_average_bench_player_with_flat_price():
+    squad, bought = _profit_squad(1_200_000, average=2.0)
+    history = {str(squad[9]["id"]): [_history_point(2, 1_190_000), _history_point(1, 1_200_000)]}
+
+    decisions = decide_sales(squad, formation="4-4-2", bought_by_bot=bought, recent_price_history=history, **_PROFIT_KWARGS)
+    assert len(decisions) == 1
+    assert "umbral 15.0%" in decisions[0]["reason"]
+
+
+def test_decide_sales_high_average_raises_the_profit_threshold():
+    squad, bought = _profit_squad(1_200_000, average=5.0)  # +20% < 25% (x1.67)
+
+    assert decide_sales(squad, formation="4-4-2", bought_by_bot=bought, **_PROFIT_KWARGS) == []
+
+
+def test_decide_sales_starter_raises_the_profit_threshold():
+    squad, bought = _profit_squad(1_200_000)  # +20% < 22.5% (titular x1.5)
+
+    assert decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought, own_lineup_player_ids={squad[9]["id"]}, **_PROFIT_KWARGS
+    ) == []
+
+
+def test_decide_sales_profit_sale_postponed_while_price_still_rising():
+    squad, bought = _profit_squad(1_300_000)  # +30%, muy por encima del 15%...
+    history = {str(squad[9]["id"]): [_history_point(2.5, 1_150_000), _history_point(1, 1_250_000)]}  # ...pero +13% en 3d
+
+    assert decide_sales(squad, formation="4-4-2", bought_by_bot=bought, recent_price_history=history, **_PROFIT_KWARGS) == []
+
+
+def test_decide_sales_koski_like_case_is_kept():
+    """Mejor media del equipo, titular, +16% frente a lo pagado y subiendo ~+7% diario -> no se vende."""
+    squad, bought = _profit_squad(1_160_000, average=5.14)
+    history = {str(squad[9]["id"]): [_history_point(2, 1_010_000), _history_point(1, 1_080_000)]}
+
+    assert decide_sales(
+        squad, formation="4-4-2", bought_by_bot=bought, own_lineup_player_ids={squad[9]["id"]},
+        recent_price_history=history, **_PROFIT_KWARGS,
+    ) == []

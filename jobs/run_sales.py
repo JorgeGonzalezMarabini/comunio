@@ -559,7 +559,8 @@ def run():
     # si el llamador no las pasara.
     purchase_baselines = get_purchase_baselines()
     recent_price_history = get_recent_price_history(
-        list(bought_by_bot.keys()), config.SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS
+        list(bought_by_bot.keys()),
+        max(config.SELLING_LOSS_CONFIRMATION_LOOKBACK_DAYS, config.SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS),
     )
 
     # Oportunidad de mercado / swaps (a petición del usuario, 2026-08-22 y

@@ -228,6 +228,19 @@ la vía 5 (oportunidad de mercado) exige una antigüedad mínima
 (config.SELLING_UPGRADE_MIN_HOLD_DAYS): un recién fichado no tiene aún
 estadísticas propias y su score de alineación sale artificialmente bajo.
 
+Venta por plusvalía ponderada (a petición del usuario, 2026-09-23, caso
+real: Koski listado por +16% siendo el de mejor media del equipo y
+subiendo ~+7% diario): la vía 1 solo miraba precio, y como los jugadores
+que puntúan bien son justo los que se revalorizan, vendía sobre todo a los
+mejores. Ahora el umbral se multiplica por la media de puntos
+(`average.average` del roster, hasta x2.5) y por titularidad
+(`own_lineup_player_ids`, x1.5) -- ver `effective_profit_threshold()` --, y
+la venta se aplaza mientras el precio siga subiendo (`price_momentum_pct()`
+sobre `recent_price_history`, config.SELLING_PROFIT_MOMENTUM_*): vender en
+plena subida deja dinero en la mesa, y si la subida se da la vuelta el
+trailing-stop protege la plusvalía. Ver números en
+config.SELLING_PROFIT_AVG_POINTS_REF.
+
 Nota informativa de puntos ya extraídos (a petición del usuario, misma
 evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
 disparan una venta, si `purchase_baselines` trae "points_at_purchase" para
@@ -338,6 +351,12 @@ def decide_sales(
     loss_avg_points_max_mult: float = None,
     loss_max_effective_pct: float = None,
     upgrade_min_hold_days: float = None,
+    profit_avg_points_ref: float = None,
+    profit_avg_points_max_mult: float = None,
+    profit_starter_mult: float = None,
+    profit_momentum_lookback_days: float = None,
+    profit_momentum_min_pct: float = None,
+    profit_momentum_min_data_points: int = None,
     now: datetime = None,
 ) -> list[dict]:
     """
@@ -457,6 +476,13 @@ def decide_sales(
     — antigüedad mínima para que la vía 5 (oportunidad de mercado) pueda
     aplicar. Sin "purchased_at" para ese jugador, no bloquea.
 
+    `profit_avg_points_ref`, `profit_avg_points_max_mult`,
+    `profit_starter_mult`: multiplicadores del umbral de plusvalía (vía 1,
+    ver `effective_profit_threshold()`); `profit_momentum_*`: aplazamiento
+    mientras el precio siga subiendo (ver `price_momentum_pct()`, usa
+    `recent_price_history`). Todos por defecto de config (`SELLING_PROFIT_*`).
+    La titularidad sale de `own_lineup_player_ids`.
+
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
     comparación de tiempo del listado objetivo y a la confirmación de
@@ -467,8 +493,11 @@ def decide_sales(
     sanos después de la venta, salvo que ya esté lesionado/en duda —
     ver más abajo):
       1. Su revalorización (`value` vs. el precio pagado en
-         `bought_by_bot`) supera `min_profit_pct` (por defecto
-         config.SELLING_MIN_PROFIT_PCT) — vía normal, para todos.
+         `bought_by_bot`) supera el umbral efectivo de plusvalía
+         (`min_profit_pct`, por defecto config.SELLING_MIN_PROFIT_PCT,
+         multiplicado por media de puntos y titularidad, ver
+         `effective_profit_threshold()`) y el precio NO sigue subiendo
+         (`price_momentum_pct()`) — vía normal, para todos.
       2. Ha perdido más del umbral efectivo de corte (`max_loss_pct` con
          los multiplicadores por antigüedad y media de puntos, ver
          `effective_loss_cut_threshold()`) frente al VM en la compra
@@ -587,6 +616,19 @@ def decide_sales(
         config.SELLING_LOSS_MAX_EFFECTIVE_PCT if loss_max_effective_pct is None else loss_max_effective_pct
     )
     upgrade_min_hold_days = config.SELLING_UPGRADE_MIN_HOLD_DAYS if upgrade_min_hold_days is None else upgrade_min_hold_days
+    profit_momentum_lookback_days = (
+        config.SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS
+        if profit_momentum_lookback_days is None
+        else profit_momentum_lookback_days
+    )
+    profit_momentum_min_pct = (
+        config.SELLING_PROFIT_MOMENTUM_MIN_PCT if profit_momentum_min_pct is None else profit_momentum_min_pct
+    )
+    profit_momentum_min_data_points = (
+        config.SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS
+        if profit_momentum_min_data_points is None
+        else profit_momentum_min_data_points
+    )
     now = now or datetime.now(timezone.utc)
     market_listing_expirations = market_listing_expirations or {}
     own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
@@ -671,6 +713,28 @@ def decide_sales(
         )
         cutting_losses = loss_pct <= -loss_threshold
 
+        # Plusvalía ponderada (ver docstring del módulo, "Venta por
+        # plusvalía ponderada"): umbral más alto para quien puntúa bien y
+        # para titulares, y aplazada mientras el precio siga subiendo.
+        is_starter = str(player["id"]) in own_lineup_ids
+        profit_threshold = effective_profit_threshold(
+            min_profit_pct,
+            average_points=average_points,
+            is_starter=is_starter,
+            avg_points_ref=profit_avg_points_ref,
+            avg_points_max_mult=profit_avg_points_max_mult,
+            starter_mult=profit_starter_mult,
+        )
+        momentum_pct = price_momentum_pct(
+            recent_price_history.get(str(player["id"])),
+            current_price,
+            lookback_days=profit_momentum_lookback_days,
+            min_data_points=profit_momentum_min_data_points,
+            now=now,
+        )
+        still_rising = momentum_pct is not None and momentum_pct >= profit_momentum_min_pct
+        taking_profit = profit_pct >= profit_threshold and not still_rising
+
         # Trailing-stop / corte por reversión desde máximo (ver docstring
         # del módulo): compara contra el valor MÁS ALTO observado desde la
         # compra ("peak_price" de purchase_baselines), no contra el precio
@@ -742,7 +806,7 @@ def decide_sales(
                     cutting_losses = False  # repuntó desde el mínimo reciente -- se pospone esta pasada
 
         if (
-            profit_pct < min_profit_pct
+            not taking_profit
             and not cutting_losses
             and not overconcentrated
             and not force_sell_confirmed_injury
@@ -758,7 +822,7 @@ def decide_sales(
         # objetivo en absoluto, esas vías se venden igual.
         only_market_reason = (
             market_upgrade_available
-            and profit_pct < min_profit_pct
+            and not taking_profit
             and not cutting_losses
             and not overconcentrated
             and not force_sell_confirmed_injury
@@ -789,6 +853,9 @@ def decide_sales(
                 points_at_purchase,
                 loss_pct,
                 loss_reference_price,
+                taking_profit,
+                profit_threshold,
+                momentum_pct,
             )
         )
 
@@ -881,6 +948,9 @@ def decide_sales(
         points_at_purchase,
         loss_pct,
         loss_reference_price,
+        taking_profit,
+        profit_threshold,
+        momentum_pct,
     ) in candidates:
         if only_market_reason and str(player["id"]) not in approved_market_only_ids:
             continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
@@ -917,10 +987,13 @@ def decide_sales(
         # pérdidas, luego trailing-stop, luego concentración de capital,
         # luego lesión confirmada, luego oportunidad de mercado (las
         # últimas tres ni siquiera miran profit_pct).
-        if profit_pct >= min_profit_pct:
+        if taking_profit:
+            tendencia = f"{momentum_pct:+.1%}" if momentum_pct is not None else "sin histórico"
             reason = (
                 f"pagado por el bot {purchase_price}, ahora {player.get('value', 0)} "
-                f"({profit_pct:+.1%}) >= umbral {min_profit_pct:.1%}; posición {position} con margen suficiente"
+                f"({profit_pct:+.1%}) >= umbral {profit_threshold:.1%} (base {min_profit_pct:.1%} con "
+                f"multiplicadores por media de puntos y titularidad); tendencia reciente {tendencia} (ya no "
+                f"sube); posición {position} con margen suficiente"
             )
         elif cutting_losses:
             motivo = "corte de pérdidas (lesión confirmada)" if is_confirmed_injured else "corte de pérdidas"
@@ -988,6 +1061,70 @@ def decide_sales(
             }
         )
     return decisions
+
+
+def effective_profit_threshold(
+    base_pct: float,
+    average_points: float | None = None,
+    is_starter: bool = False,
+    avg_points_ref: float = None,
+    avg_points_max_mult: float = None,
+    starter_mult: float = None,
+) -> float:
+    """
+    Umbral de plusvalía (vía 1 de `decide_sales()`, ver docstring del
+    módulo, "Venta por plusvalía ponderada"):
+
+        base_pct * mult_media * mult_titular
+
+      - mult_media: `average_points / avg_points_ref`, acotado a
+        [1, `avg_points_max_mult`]. Sin media (None/no numérica/<=0) -> 1.
+      - mult_titular: `starter_mult` si `is_starter`, si no 1.
+
+    Nunca por debajo de `base_pct`. Parámetros por defecto de config
+    (`SELLING_PROFIT_*`).
+    """
+    avg_points_ref = config.SELLING_PROFIT_AVG_POINTS_REF if avg_points_ref is None else avg_points_ref
+    avg_points_max_mult = (
+        config.SELLING_PROFIT_AVG_POINTS_MAX_MULT if avg_points_max_mult is None else avg_points_max_mult
+    )
+    starter_mult = config.SELLING_PROFIT_STARTER_MULT if starter_mult is None else starter_mult
+
+    avg_mult = 1.0
+    if isinstance(average_points, (int, float)) and average_points > 0 and avg_points_ref > 0:
+        avg_mult = min(max(1.0, avg_points_max_mult), max(1.0, average_points / avg_points_ref))
+    return base_pct * avg_mult * (max(1.0, starter_mult) if is_starter else 1.0)
+
+
+def price_momentum_pct(
+    price_points: list[dict] | None,
+    current_price: float,
+    lookback_days: float = None,
+    min_data_points: int = None,
+    now: datetime = None,
+) -> float | None:
+    """
+    Variación del VM actual (`current_price`) frente al PRIMER dato de
+    `price_points` (formato de `db.models.get_recent_price_history()`)
+    dentro de los últimos `lookback_days` días. None si hay menos de
+    `min_data_points` datos válidos en la ventana (sin base para juzgar
+    tendencia -- `decide_sales()` no aplaza nada en ese caso).
+    """
+    lookback_days = config.SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS if lookback_days is None else lookback_days
+    min_data_points = config.SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS if min_data_points is None else min_data_points
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=lookback_days)
+    window = []
+    for entry in price_points or []:
+        date = parse_iso_datetime(entry.get("recorded_at"))
+        price = entry.get("price")
+        if date is None or date < cutoff or not isinstance(price, (int, float)) or price <= 0:
+            continue
+        window.append((date, price))
+    if len(window) < min_data_points or not current_price or current_price <= 0:
+        return None
+    first_price = min(window, key=lambda t: t[0])[1]
+    return (current_price - first_price) / first_price
 
 
 def effective_loss_cut_threshold(

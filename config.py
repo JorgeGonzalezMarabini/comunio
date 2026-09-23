@@ -521,6 +521,40 @@ BIDDING_MAX_DEFICIT_RESCUES_PER_RUN = int(os.getenv("BIDDING_MAX_DEFICIT_RESCUES
 # plantilla observada.
 SELLING_MIN_PROFIT_PCT = float(os.getenv("SELLING_MIN_PROFIT_PCT", "0.15"))
 
+# Venta por plusvalía ponderada por calidad y tendencia (a petición del
+# usuario, 2026-09-23, caso real: Koski listado por +16% siendo el jugador
+# con MEJOR media del equipo, 5.1, y subiendo ~+7% diario). La vía de
+# plusvalía tenía un sesgo estructural: los jugadores que puntúan bien son
+# justo los que se revalorizan, así que vendía sobre todo a los mejores
+# (media de los vendidos por plusvalía en el backtest: 4.8). En los
+# snapshots (muestra pequeña, ~1 mes): con media >= 5 el precio sube de
+# media +2.7% la semana siguiente y con < 2 cae -6%; y tras subir +3/+20%
+# en 3 días, sube otro +7% de media los 3 siguientes (76% de las veces).
+# En dinero, el backtest no distingue variantes (-9.5%/-9.9%, solo 9
+# ventas por esta vía), así que retener no cuesta y vender a un titular
+# que puntúa cuesta puntos y otra prima de puja al reponer. Por eso:
+#   umbral_plusvalía = SELLING_MIN_PROFIT_PCT * mult_media * mult_titular
+# y además se APLAZA la venta mientras el precio siga subiendo (ver
+# SELLING_PROFIT_MOMENTUM_* abajo); el trailing-stop
+# (SELLING_TRAILING_STOP_MAX_DRAWDOWN_PCT) sigue protegiendo la plusvalía
+# si la subida se da la vuelta.
+#
+# mult_media: media / SELLING_PROFIT_AVG_POINTS_REF acotado a
+# [1, SELLING_PROFIT_AVG_POINTS_MAX_MULT] (media 5.1 -> x1.7; sin media o
+# por debajo de la referencia -> x1, se vende igual que antes).
+SELLING_PROFIT_AVG_POINTS_REF = float(os.getenv("SELLING_PROFIT_AVG_POINTS_REF", "3.0"))
+SELLING_PROFIT_AVG_POINTS_MAX_MULT = float(os.getenv("SELLING_PROFIT_AVG_POINTS_MAX_MULT", "2.5"))
+# mult_titular: si está en la alineación guardada (get_lineup()).
+SELLING_PROFIT_STARTER_MULT = float(os.getenv("SELLING_PROFIT_STARTER_MULT", "1.5"))
+# Aplazamiento por tendencia: si el VM actual supera en al menos
+# SELLING_PROFIT_MOMENTUM_MIN_PCT al primer dato de los últimos
+# SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS días (histórico local, mínimo
+# SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS datos), la venta por plusvalía se
+# pospone a la siguiente pasada. Sin histórico suficiente, no aplaza.
+SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS = float(os.getenv("SELLING_PROFIT_MOMENTUM_LOOKBACK_DAYS", "3"))
+SELLING_PROFIT_MOMENTUM_MIN_PCT = float(os.getenv("SELLING_PROFIT_MOMENTUM_MIN_PCT", "0.03"))
+SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS = int(os.getenv("SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS", "2"))
+
 # Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
 # llegue a SELLING_MIN_PROFIT_PCT, incluso con pérdidas -- corte de
