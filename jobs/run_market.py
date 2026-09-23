@@ -234,6 +234,7 @@ from clients.futmondo_client import (
     real_pending_bid_amount,
 )
 from db.models import (
+    init_db,
     get_connection,
     get_bids_risked_today,
     get_league_setting,
@@ -308,6 +309,9 @@ def run():
     if not config.ENABLE_BOT:
         print("run_market: ENABLE_BOT=false, no se ejecuta.")
         return
+    # Columnas nuevas del esquema (p. ej. futmondo_snapshots.recent_points)
+    # antes de consultar features, aunque este job corra antes que sync_data.
+    init_db()
 
     client = FutmondoClient()
 

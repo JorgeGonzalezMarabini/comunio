@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import config
+from engine.evaluator import form_points
 
 
 class BudgetExceededError(Exception):
@@ -334,7 +335,10 @@ def decide_bid(
 
     `min_average_points` (config.BIDDING_MIN_AVERAGE_POINTS, a petición del
     usuario, 2026-09-21): filtro DURO, independiente del score -- descarta
-    a `player` si su `average_points` (puntos por partido YA demostrados,
+    a `player` si su forma (`engine.evaluator.form_points()`: puntos por
+    partido YA demostrados, ponderados por recencia -- ver config.
+    EVALUATOR_RECENT_POINTS_DECAY; `average_points` de temporada si no hay
+    `recent_points`,
     no una proyección de score/xG/tendencia) está por debajo de este
     mínimo, aunque el score combinado supere `min_score_threshold` (con o
     sin boosts de prioridad, ver apply_position_priority). Necesario porque
@@ -380,7 +384,7 @@ def decide_bid(
     if score < min_score_threshold:
         return None
 
-    if (player.get("average_points") or 0) < min_average_points:
+    if form_points(player) < min_average_points:
         # Filtro duro independiente del score (ver docstring de arriba y
         # config.BIDDING_MIN_AVERAGE_POINTS) -- rendimiento YA demostrado
         # pobre o nulo, sin lesión/duda que lo justifique.
@@ -522,7 +526,7 @@ def is_price_worth_bidding(
     min_average_points = (
         config.BIDDING_MIN_AVERAGE_POINTS if min_average_points is None else min_average_points
     )
-    if (player.get("average_points") or 0) < min_average_points:
+    if form_points(player) < min_average_points:
         return False
     return (player.get("price") or 0) > 0
 

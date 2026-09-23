@@ -218,6 +218,35 @@ EVALUATOR_WEIGHTS = {
 # la temporada. Sin calibrar todavía con resultados reales tras el cambio.
 EVALUATOR_XG90_MIN_MINUTES_RATIO = float(os.getenv("EVALUATOR_XG90_MIN_MINUTES_RATIO", "0.5"))
 
+# Forma ponderada por recencia (a petición del usuario, 2026-09-23: "de
+# nada vale que hiciese mucha puntuación hace muchas jornadas y muy poco en
+# las últimas" -- la media de temporada pesa igual la jornada 1 que la
+# actual). Se usa en lugar de la media plana en el evaluador (pujas y
+# alineación), en el filtro BIDDING_MIN_AVERAGE_POINTS y en los
+# multiplicadores por media de las ventas (SELLING_PROFIT_*/SELLING_LOSS_*).
+#
+# Puntos: media ponderada de `average.fitness` (últimas 5 jornadas del
+# equipo, 0 si no jugó) con peso DECAY^k para la jornada de hace k (la
+# última pesa 1, la anterior 0.7, luego 0.49...). Las jornadas anteriores
+# a esas 5 entran a través de la media de temporada, con el peso que les
+# correspondería en la misma serie geométrica (DECAY^5 / (1 - DECAY)):
+# con 0.7, las 5 últimas suman el 83% del peso. Sin `fitness`, se usa la
+# media de temporada tal cual. Sin calibrar todavía: con solo ~30 jornadas
+# reconstruibles del histórico, ni la media plana ni la ponderada predicen
+# mejor la jornada siguiente (error medio 1.3-1.4 puntos en ambos casos);
+# el array completo se guarda desde ahora (futmondo_snapshots.recent_points)
+# para poder calibrarlo.
+EVALUATOR_RECENT_POINTS_DECAY = float(os.getenv("EVALUATOR_RECENT_POINTS_DECAY", "0.7"))
+
+# Minutos: el ratio de minutos se mezcla entre el de las últimas
+# EVALUATOR_RECENT_MINUTES_WINDOW_GAMES jornadas del equipo (reconstruido
+# del histórico local de external_stats) y el de temporada, con peso
+# EVALUATOR_RECENT_MINUTES_WEIGHT para el reciente. Sin histórico local
+# suficiente para ese jugador (p. ej. un candidato que aparece por primera
+# vez en el mercado), solo el de temporada, como antes.
+EVALUATOR_RECENT_MINUTES_WINDOW_GAMES = int(os.getenv("EVALUATOR_RECENT_MINUTES_WINDOW_GAMES", "3"))
+EVALUATOR_RECENT_MINUTES_WEIGHT = float(os.getenv("EVALUATOR_RECENT_MINUTES_WEIGHT", "0.6"))
+
 # Para ELEGIR ALINEACIÓN: el precio NO debe importar — un jugador de la
 # plantilla ya está comprado, su precio es coste hundido. Reutilizar
 # EVALUATOR_WEIGHTS aquí penalizaría injustamente a los fichajes caros

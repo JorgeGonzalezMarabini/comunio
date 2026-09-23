@@ -263,7 +263,7 @@ from datetime import datetime, timedelta, timezone
 
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
-from engine.evaluator import evaluate_players
+from engine.evaluator import evaluate_players, weighted_recent_points
 from engine.squad_risk import assess_squad_depth
 
 
@@ -700,7 +700,13 @@ def decide_sales(
         loss_pct = (current_price - loss_reference_price) / loss_reference_price
         purchased_at = parse_iso_datetime(baseline.get("purchased_at"))
         days_held = (now - purchased_at).total_seconds() / 86400 if purchased_at else None
-        average_points = (player.get("average") or {}).get("average") if isinstance(player.get("average"), dict) else None
+        # Forma ponderada por recencia (config.EVALUATOR_RECENT_POINTS_DECAY)
+        # a partir de `average.fitness` del roster; media de temporada si no
+        # viene el array.
+        average_info = player.get("average") if isinstance(player.get("average"), dict) else {}
+        average_points = weighted_recent_points(average_info.get("fitness"), average_info.get("average"))
+        if average_points is None:
+            average_points = average_info.get("average")
         loss_threshold = effective_loss_cut_threshold(
             max_loss_pct,
             days_held=days_held,

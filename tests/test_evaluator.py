@@ -445,3 +445,60 @@ def test_lineup_weights_dont_penalize_expensive_player_by_price():
     assert score_player(caro_mejor, weights=config.LINEUP_EVALUATOR_WEIGHTS) > score_player(
         barato_mediocre, weights=config.LINEUP_EVALUATOR_WEIGHTS
     )
+
+
+# --- Forma ponderada por recencia (a petición del usuario, 2026-09-23, ver
+# config.EVALUATOR_RECENT_POINTS_DECAY) ---
+
+from engine.evaluator import form_points, weighted_recent_points  # noqa: E402
+
+
+def test_weighted_recent_points_gives_more_weight_to_latest_matchdays():
+    # Mismos puntos, orden inverso: quien puntuó al FINAL (más reciente) sale mejor.
+    late = weighted_recent_points([0, 0, 0, 0, 10], decay=0.7)
+    early = weighted_recent_points([10, 0, 0, 0, 0], decay=0.7)
+    assert late > early
+    weights = [0.7 ** k for k in range(5)]
+    assert late == pytest.approx(10 / sum(weights))
+
+
+def test_weighted_recent_points_uses_season_average_as_tail():
+    decay = 0.7
+    tail = decay ** 5 / (1 - decay)
+    value = weighted_recent_points([2, 2, 2, 2, 2], season_average=8.0, decay=decay)
+    assert value == pytest.approx((2 * sum(decay ** k for k in range(5)) + 8.0 * tail) / (sum(decay ** k for k in range(5)) + tail))
+    assert 2 < value < 8
+
+
+def test_weighted_recent_points_accepts_json_and_rejects_missing():
+    assert weighted_recent_points("[1, 2, 3]", decay=0.7) == pytest.approx(weighted_recent_points([1, 2, 3], decay=0.7))
+    assert weighted_recent_points(None, season_average=5.0) is None
+    assert weighted_recent_points("not json", season_average=5.0) is None
+
+
+def test_form_points_falls_back_to_season_average():
+    assert form_points({"average_points": 4.0}) == 4.0
+    assert form_points({}) == 0
+    assert form_points({"average_points": 6.0, "recent_points": [0, 0, 0, 0, 0]}) < 1.5  # vs 6.0 de media plana
+
+
+def test_normalize_pool_prefers_recent_form_over_flat_average():
+    """Misma media de temporada: el que puntúa ahora sale con más points_per_price y trend."""
+    base = {"position": "MED", "price": 1_000_000, "average_points": 4.0, "status": ""}
+    hot = {**base, "id": "hot", "recent_points": [0, 0, 2, 8, 10]}
+    cold = {**base, "id": "cold", "recent_points": [10, 8, 2, 0, 0]}
+    by_id = {p["id"]: p for p in normalize_pool([hot, cold])}
+    assert by_id["hot"]["points_per_price"] > by_id["cold"]["points_per_price"]
+    assert by_id["hot"]["trend"] > by_id["cold"]["trend"]
+
+
+def test_normalize_pool_blends_recent_minutes(monkeypatch):
+    """Mismos minutos de temporada: quien ha dejado de jugar las últimas jornadas sale peor."""
+    monkeypatch.setattr(config, "EVALUATOR_RECENT_MINUTES_WEIGHT", 0.6)
+    base = {"position": "DEF", "price": 1_000_000, "average_points": 3.0, "status": "",
+            "minutes_played": 450, "team_games": 7}
+    starter_now = {**base, "id": "a", "minutes_played_ref": 180, "team_games_ref": 4}  # 270' en 3 partidos
+    benched_now = {**base, "id": "b", "minutes_played_ref": 450, "team_games_ref": 4}  # 0' en 3 partidos
+    no_history = {**base, "id": "c"}
+    by_id = {p["id"]: p for p in normalize_pool([starter_now, benched_now, no_history])}
+    assert by_id["a"]["minutes_played_ratio"] > by_id["c"]["minutes_played_ratio"] > by_id["b"]["minutes_played_ratio"]

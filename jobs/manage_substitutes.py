@@ -61,7 +61,7 @@ from datetime import datetime, timezone
 
 import config
 from clients.futmondo_client import FutmondoClient
-from db.models import get_connection, get_player_features
+from db.models import get_connection, get_player_features, init_db
 from engine.lineup_optimizer import build_substitution_changes
 from notifier import notify, track_job_run
 
@@ -70,6 +70,9 @@ def run():
     if not config.ENABLE_BOT:
         print("manage_substitutes: ENABLE_BOT=false, no se ejecuta.")
         return
+    # Columnas nuevas del esquema (p. ej. futmondo_snapshots.recent_points)
+    # antes de consultar features, aunque este job corra antes que sync_data.
+    init_db()
 
     client = FutmondoClient()
 

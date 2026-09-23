@@ -826,3 +826,11 @@ def test_find_reprice_down_candidates_uses_config_defaults(monkeypatch):
     bid = _reprice_bid("1", price=1_000_000, score=0.5, amount=1_500_000)
 
     assert find_reprice_down_candidates([bid], remaining_budget=20_000_000, already_risked_this_matchday=0, now=NOW) == []
+
+
+def test_decide_bid_min_average_uses_recency_weighted_form():
+    """Buena media de temporada pero sin puntuar en las últimas jornadas -> no pasa el filtro."""
+    faded = {"id": "1", "score": 0.9, "price": 1_000_000, "average_points": 5.0, "recent_points": [8, 6, 0, 0, 0]}
+    rising = {"id": "2", "score": 0.9, "price": 1_000_000, "average_points": 2.0, "recent_points": [0, 1, 4, 6, 7]}
+    assert decide_bid(faded, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=3.0) is None
+    assert decide_bid(rising, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=3.0) is not None

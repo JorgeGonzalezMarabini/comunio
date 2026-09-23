@@ -1385,3 +1385,14 @@ def test_decide_sales_koski_like_case_is_kept():
         squad, formation="4-4-2", bought_by_bot=bought, own_lineup_player_ids={squad[9]["id"]},
         recent_price_history=history, **_PROFIT_KWARGS,
     ) == []
+
+
+def test_decide_sales_profit_multiplier_uses_recency_weighted_form():
+    """Media de temporada alta pero apagado en las últimas jornadas: ya no protege la plusvalía."""
+    squad, bought = _profit_squad(1_200_000)  # +20%
+    squad[9]["average"] = {"average": 5.0, "fitness": [12, 10, 0, 0, 0]}
+    assert len(decide_sales(squad, formation="4-4-2", bought_by_bot=bought, **_PROFIT_KWARGS)) == 1
+
+    squad, bought = _profit_squad(1_200_000)
+    squad[9]["average"] = {"average": 2.0, "fitness": [0, 0, 4, 7, 9]}  # en forma ahora -> umbral más alto
+    assert decide_sales(squad, formation="4-4-2", bought_by_bot=bought, **_PROFIT_KWARGS) == []

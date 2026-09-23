@@ -130,17 +130,14 @@ Nombres de campo reales confirmados por fetch autenticado real:
             real es en inglés. Ver FUTMONDO_INJURY_STATUSES/
             is_injury_status()),
         average: {average, homeAverage, awayAverage, averageLastFive,
-            matches, fitness: [...]} — `fitness` parece ser la puntuación de
-            los últimos partidos (usado por la referencia comunitaria para
-            calcular una "forma" reciente). Ya NO viene siempre vacío
-            (CONFIRMADO 2026-08-18 contra la cuenta real: con la jornada 1
-            de LaLiga en curso, los jugadores que ya jugaron traen
-            `fitness` de longitud 1, p. ej. `matches: 1, fitness: [16]`),
-            pero con longitud máxima 1 vista hasta ahora sigue sin poder
-            confirmarse el orden cronológico (¿más reciente al final o al
-            principio?) — hace falta repetir la consulta en la jornada 2 y
-            comparar contra el `points` de la jornada 1 ya conocido (ver
-            TODO.md #7),
+            matches, fitness: [...]} — `fitness` son los puntos de las
+            últimas 5 jornadas del EQUIPO, de la más antigua a la más
+            reciente, con 0 si el jugador no jugó (CONFIRMADO 2026-09-23
+            contra la API real, resuelve TODO.md #7: Koski
+            `fitness: [4, 2, 14, 3, 6]` cuadra con los incrementos de su
+            `points` acumulado en los snapshots -- 14, luego +3, luego +6;
+            Rodri Mendoza `matches: 3, fitness: [0, 0, 0, 0, 0]`).
+            `averageLastFive` es la media PLANA de ese array,
         change (variación de valor reciente), computer (bool, si el
             propietario es el "Computer" del juego), teamId, rating,
         - solo en roster: buyPrice, market (bool: si TÚ lo has puesto en

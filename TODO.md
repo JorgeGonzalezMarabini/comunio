@@ -307,7 +307,19 @@ escrituras.
 
 ---
 
-## 7. Orden cronológico de `average.fitness` sin confirmar
+## 7. ~~Orden cronológico de `average.fitness` sin confirmar~~ (resuelto, 2026-09-23)
+
+**Resuelto** con una llamada de solo lectura (`get_roster()`, 2026-09-23,
+jornada 7): `fitness` son los puntos de las **últimas 5 jornadas del
+equipo, de la más antigua a la más reciente**, con 0 si el jugador no jugó
+(`averageLastFive` es su media plana). Koski `[4, 2, 14, 3, 6]` cuadra con
+los incrementos de su `points` acumulado en `futmondo_snapshots` (14 el
+14-sep, luego +3, luego +6); Rodri Mendoza `matches: 3, fitness: [0, 0, 0,
+0, 0]`. `last_points = fitness[-1]` era correcto. Desde este cambio se
+guarda el array completo (`futmondo_snapshots.recent_points`) y se usa
+para la forma ponderada por recencia (`engine.evaluator.weighted_recent_points`).
+
+Contexto original:
 
 **Qué pasa**: `fitness` (array usado para calcular `last_points`) parece ser
 la puntuación de los últimos partidos, pero no se ha podido confirmar si el

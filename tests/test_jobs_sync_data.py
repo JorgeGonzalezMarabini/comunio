@@ -676,3 +676,15 @@ def test_run_full_job_closes_stale_market_listing_and_notifies(tmp_db, roster_pl
 
     assert get_player_features(only_on_market=True) == []
     assert "1 candidato(s) de mercado obsoleto(s) invalidado(s)" in captured[-1]
+
+
+def test_upsert_player_and_snapshot_stores_full_fitness_array(tmp_db, roster_player_factory):
+    import json
+
+    roster_player = roster_player_factory(id=1001, role="defensa")
+    roster_player["average"]["fitness"] = [4, 2, 14, 3, 6]
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, roster_player, NOW)
+        row = conn.execute("SELECT recent_points, last_points FROM futmondo_snapshots").fetchone()
+    assert json.loads(row["recent_points"]) == [4, 2, 14, 3, 6]
+    assert row["last_points"] == 6

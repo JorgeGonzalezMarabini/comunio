@@ -49,13 +49,16 @@ CREATE TABLE IF NOT EXISTS futmondo_snapshots (
                                              -- solo se guarda para referencia/auditoría; para eso
                                              -- se usa get_won_bid_prices() (tabla `bids`) en su lugar
     points          INTEGER,                -- "points" acumulados
-    last_points     INTEGER,                -- último valor de "average.fitness" (orden cronológico sin confirmar)
+    last_points     INTEGER,                -- último valor de "average.fitness" = puntos de la jornada más reciente
     average_points  REAL,                   -- "average.average"
     on_market       INTEGER,                 -- 0/1: roster.market (puesto en venta) o 1 fijo si viene del mercado de fichajes
     status          TEXT,                    -- valor real de Futmondo, ver clients.futmondo_client.is_injury_status()
     listing_price   INTEGER,                 -- "price" del listado (precio de SALIDA que pone quien vende -- otro
                                               -- manager o el "Computer" -- NO el VM); NULL fuera de mercado (roster)
     is_clause       INTEGER,                 -- 0/1: "isClause" del listado (solo tiene sentido si listing_price no es NULL)
+    recent_points   TEXT,                    -- JSON de "average.fitness": puntos de las últimas 5 jornadas del
+                                              -- EQUIPO, de la más antigua a la más reciente, 0 si no jugó
+                                              -- (confirmado 2026-09-23, ver clients/futmondo_client.py)
     recorded_at     TEXT NOT NULL
 );
 
@@ -299,6 +302,7 @@ def init_db():
         _ensure_column(conn, "external_stats", "team_clean_sheets", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "listing_price", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "is_clause", "INTEGER")
+        _ensure_column(conn, "futmondo_snapshots", "recent_points", "TEXT")
         _ensure_column(conn, "bids", "error", "TEXT")
         _ensure_column(conn, "sales", "error", "TEXT")
 
@@ -317,8 +321,25 @@ latest_external AS (
 SELECT
     p.id, p.name, p.team, p.position,
     s.price, s.buy_price, s.points, s.last_points, s.average_points,
-    s.on_market, s.status, s.listing_price, s.is_clause,
-    e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.team_clean_sheets, e.non_penalty_goals, e.assists, e.understat_position
+    s.on_market, s.status, s.listing_price, s.is_clause, s.recent_points,
+    e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.team_clean_sheets, e.non_penalty_goals, e.assists, e.understat_position,
+    -- Minutos y partidos del equipo al cierre de la jornada (team_games) de
+    -- hace al menos {recent_window} partidos, misma temporada: permite a
+    -- engine.evaluator calcular el ratio de minutos de las jornadas
+    -- RECIENTES (ver normalize_pool, "minutes_played_ratio"). NULL si no
+    -- hay histórico local tan atrás para ese jugador.
+    (
+        SELECT e2.minutes_played FROM external_stats e2
+        WHERE e2.player_id = p.id AND e2.season = e.season AND e2.team_games IS NOT NULL
+          AND e2.team_games <= e.team_games - {recent_window}
+        ORDER BY e2.team_games DESC, e2.recorded_at DESC LIMIT 1
+    ) AS minutes_played_ref,
+    (
+        SELECT e2.team_games FROM external_stats e2
+        WHERE e2.player_id = p.id AND e2.season = e.season AND e2.team_games IS NOT NULL
+          AND e2.team_games <= e.team_games - {recent_window}
+        ORDER BY e2.team_games DESC, e2.recorded_at DESC LIMIT 1
+    ) AS team_games_ref
 FROM players p
 LEFT JOIN latest_snapshot s ON s.player_id = p.id AND s.rn = 1
 LEFT JOIN latest_external e ON e.player_id = p.id AND e.rn = 1
@@ -340,7 +361,8 @@ def get_player_features(only_on_market: bool = False) -> list[dict]:
     """
     where = "WHERE s.on_market = 1" if only_on_market else ""
     with get_connection() as conn:
-        rows = conn.execute(_PLAYER_FEATURES_SQL.format(where=where)).fetchall()
+        sql = _PLAYER_FEATURES_SQL.format(where=where, recent_window=int(config.EVALUATOR_RECENT_MINUTES_WINDOW_GAMES))
+        rows = conn.execute(sql).fetchall()
         return [dict(r) for r in rows]
 
 

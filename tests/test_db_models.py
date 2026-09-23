@@ -433,3 +433,18 @@ def test_save_real_lineup_check_overwrites_same_team_and_date(tmp_db):
             "SELECT COUNT(*) FROM real_lineup_checks WHERE team = ? AND match_date = ?", ("Athletic Club", "2026-08-17")
         ).fetchone()[0]
     assert count == 1
+
+
+def test_get_player_features_includes_recent_minutes_reference(tmp_db):
+    with get_connection() as conn:
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)", ("1", "J", "E", "DEF", NOW))
+        for tg, mins, at in [(3, 270, "2026-09-01T00:00:00+00:00"), (4, 360, "2026-09-08T00:00:00+00:00"),
+                             (4, 360, "2026-09-09T00:00:00+00:00"), (7, 400, "2026-09-23T00:00:00+00:00")]:
+            conn.execute(
+                "INSERT INTO external_stats (player_id, season, minutes_played, team_games, recorded_at) VALUES (?,?,?,?,?)",
+                ("1", "2026", mins, tg, at),
+            )
+    features = get_player_features()
+    assert features[0]["minutes_played"] == 400
+    assert features[0]["minutes_played_ref"] == 360  # cierre de la jornada 4 (7 - 3)
+    assert features[0]["team_games_ref"] == 4

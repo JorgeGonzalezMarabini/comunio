@@ -170,6 +170,7 @@ import requests
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, FutmondoOfferError, is_injury_status
 from db.models import (
+    init_db,
     get_connection,
     get_player_features,
     get_purchase_baselines,
@@ -528,6 +529,9 @@ def run():
     if not config.ENABLE_BOT:
         print("run_sales: ENABLE_BOT=false, no se ejecuta.")
         return
+    # Columnas nuevas del esquema (p. ej. futmondo_snapshots.recent_points)
+    # antes de consultar features, aunque este job corra antes que sync_data.
+    init_db()
 
     client = FutmondoClient()
     now_dt = datetime.now(timezone.utc)

@@ -15,8 +15,55 @@ para poder ajustarlos con el tiempo sin tocar esta lógica.
 """
 from __future__ import annotations
 
+import json
+
 import config
 from clients.futmondo_client import is_doubtful_status, is_injury_status
+
+
+def weighted_recent_points(recent_points, season_average=None, decay: float = None) -> float | None:
+    """
+    Forma ponderada por recencia (ver config.EVALUATOR_RECENT_POINTS_DECAY):
+    media de `recent_points` (`average.fitness` de Futmondo -- últimas
+    jornadas del equipo, de la más antigua a la más reciente, 0 si no jugó;
+    lista o JSON tal cual lo guarda `futmondo_snapshots.recent_points`) con
+    peso `decay**k` para la jornada de hace k, más `season_average` como
+    representante de las jornadas anteriores con el peso restante de la
+    misma serie geométrica (`decay**n / (1 - decay)`).
+
+    Devuelve None si no hay `recent_points` utilizables (el llamador cae a
+    la media de temporada); si falta `season_average`, solo el array.
+    """
+    decay = config.EVALUATOR_RECENT_POINTS_DECAY if decay is None else decay
+    if isinstance(recent_points, str):
+        try:
+            recent_points = json.loads(recent_points)
+        except ValueError:
+            return None
+    values = [float(x) for x in (recent_points or []) if isinstance(x, (int, float)) and not isinstance(x, bool)]
+    if not values or not 0 < decay < 1:
+        return None
+    n = len(values)
+    weights = [decay ** (n - 1 - i) for i in range(n)]  # la última (más reciente) pesa 1
+    total = sum(w * v for w, v in zip(weights, values))
+    weight_sum = sum(weights)
+    if isinstance(season_average, (int, float)) and not isinstance(season_average, bool):
+        tail_weight = decay ** n / (1 - decay)
+        total += tail_weight * season_average
+        weight_sum += tail_weight
+    return total / weight_sum
+
+
+def form_points(player: dict) -> float:
+    """
+    Puntos por jornada a usar en decisiones: forma ponderada
+    (`weighted_recent_points`) si el jugador trae `recent_points`, si no su
+    `average_points` de temporada (0 si tampoco).
+    """
+    form = weighted_recent_points(player.get("recent_points"), player.get("average_points"))
+    if form is not None:
+        return form
+    return player.get("average_points") or 0
 
 
 def score_player(player_stats: dict, weights: dict = None) -> float:
@@ -156,12 +203,14 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     demás jugadores sin posición conocida — nunca junto a un grupo real.
 
     Definición de cada feature (razonada, no perfecta — ver TODOs):
-      - points_per_price: average_points / precio_en_millones. Usa el
-        promedio de puntos por jornada (no el total), para no penalizar a
-        quien lleva menos jornadas jugadas por lesión/fichaje tardío.
-      - trend: last_points - average_points. Positivo si el último
-        rendimiento fue mejor que su media de temporada (jugador "caliente"
-        ahora mismo), sin necesitar consultar el histórico completo.
+      - points_per_price: forma ponderada (`form_points()`, ver
+        config.EVALUATOR_RECENT_POINTS_DECAY; media de temporada si no hay
+        `recent_points`) / precio_en_millones. Puntos por jornada (no el
+        total), para no penalizar a quien lleva menos jornadas jugadas por
+        lesión/fichaje tardío, dando más peso a las jornadas recientes.
+      - trend: forma ponderada - average_points (o last_points -
+        average_points si no hay `recent_points`). Positivo si el
+        rendimiento reciente es mejor que su media de temporada.
       - xg: xG por 90 minutos (xg / minutes_played * 90). Comparar xG total
         penalizaría a quien ha jugado menos minutos sin ser peor jugador.
         Con pocos minutos jugados, esa extrapolación a 90' es ruido -- un
@@ -184,7 +233,13 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         abajo) por `team_games * 90` -- un número fijo de minutos no
         representa lo mismo en la jornada 6 que en la 20 (a petición del
         usuario, 2026-09-21). Aplicado ANTES del minmax por grupo de abajo.
-      - minutes_played_ratio: minutes_played / (team_games * 90) cuando se
+      - minutes_played_ratio: mezcla (config.EVALUATOR_RECENT_MINUTES_WEIGHT)
+        del ratio de las últimas jornadas del equipo -- (minutes_played -
+        minutes_played_ref) / ((team_games - team_games_ref) * 90), con las
+        referencias de `db.models.get_player_features()` -- y el de
+        temporada descrito a continuación. Sin referencias (sin histórico
+        local tan atrás), solo el de temporada.
+        De temporada: minutes_played / (team_games * 90) cuando se
         conoce `team_games` (partidos YA JUGADOS por el equipo esta
         temporada, ver `jobs/sync_data._team_games_by_title()` — resuelve
         TODO.md #12, confirmado 2026-08-18 que
@@ -224,10 +279,15 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     for i, p in enumerate(raw_players):
         price = p.get("price") or 0
         avg_points = p.get("average_points") or 0
-        points_per_price[i] = avg_points / (price / 1_000_000) if price > 0 else 0
+        recent_form = weighted_recent_points(p.get("recent_points"), p.get("average_points"))
+        form = recent_form if recent_form is not None else avg_points
+        points_per_price[i] = form / (price / 1_000_000) if price > 0 else 0
 
-        last_points = p.get("last_points")
-        trend[i] = (last_points if last_points is not None else avg_points) - avg_points
+        if recent_form is not None:
+            trend[i] = recent_form - avg_points
+        else:
+            last_points = p.get("last_points")
+            trend[i] = (last_points if last_points is not None else avg_points) - avg_points
 
         minutes = p.get("minutes_played") or 0
         xg = p.get("xg") or 0
@@ -267,6 +327,16 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         else:
             games = p.get("games") or 0
             minutes_ratio[i] = minutes / (games * 90) if games > 0 else 0
+
+        # Minutos de las jornadas recientes (ver docstring), si hay
+        # histórico local suficiente para este jugador.
+        minutes_ref = p.get("minutes_played_ref")
+        team_games_ref = p.get("team_games_ref")
+        if minutes_ref is not None and team_games_ref is not None and team_games > team_games_ref:
+            recent_ratio = (minutes - minutes_ref) / ((team_games - team_games_ref) * 90)
+            recent_ratio = min(1.0, max(0.0, recent_ratio))
+            w_recent = config.EVALUATOR_RECENT_MINUTES_WEIGHT
+            minutes_ratio[i] = w_recent * recent_ratio + (1 - w_recent) * minutes_ratio[i]
 
     groups_idx: dict = {}
     for i, p in enumerate(raw_players):

@@ -102,7 +102,7 @@ from datetime import datetime, timezone
 import config
 from clients.futmondo_client import FutmondoClient
 from clients.laliga_stats_client import get_league_data, next_match_difficulty
-from db.models import get_connection, get_player_features
+from db.models import get_connection, get_player_features, init_db
 from engine.evaluator import evaluate_players
 from engine.lineup_optimizer import apply_fixture_difficulty, build_bench_changes, build_lineup_changes, pick_lineup, pick_substitutes
 from engine.squad_risk import assess_squad_depth, depth_warnings
@@ -123,6 +123,9 @@ def run():
     if not config.ENABLE_BOT:
         print("set_lineup: ENABLE_BOT=false, no se ejecuta.")
         return
+    # Columnas nuevas del esquema (p. ej. futmondo_snapshots.recent_points)
+    # antes de consultar features, aunque este job corra antes que sync_data.
+    init_db()
 
     client = FutmondoClient()
 

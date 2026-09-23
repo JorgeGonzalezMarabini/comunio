@@ -38,6 +38,7 @@ aquí (corre cada hora) y no en jobs/run_sales.py (cada 2h) para reaccionar
 lo antes posible -- cancelar tarde no deshace el riesgo si la venta ya se
 resolvió sola para entonces.
 """
+import json
 from datetime import datetime, timezone
 
 import requests
@@ -263,13 +264,16 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
     player_id = str(player["id"])
     position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
     average = player.get("average") or {}
-    # "fitness" parece ser la puntuación de los últimos partidos. Ya no
-    # viene siempre vacío (jornada 1 en curso, confirmado 2026-08-18), pero
-    # con longitud máxima 1 vista hasta ahora el orden cronológico sigue
-    # sin poder confirmarse — ver TODO.md #7 / docstring en
-    # clients/futmondo_client.py.
+    # "fitness": puntos de las últimas 5 jornadas del EQUIPO, de la más
+    # antigua a la más reciente, 0 si no jugó (confirmado 2026-09-23 contra
+    # la API real, resuelve TODO.md #7 -- ver docstring en
+    # clients/futmondo_client.py).
     fitness = average.get("fitness") or []
     last_points = fitness[-1] if fitness else None
+    # Array completo (ver engine.evaluator.weighted_recent_points): solo
+    # valores numéricos, en el orden de Futmondo (más antigua -> más reciente).
+    recent_points = [_parse_float(x) for x in fitness]
+    recent_points = [x for x in recent_points if x is not None]
 
     conn.execute(
         """
@@ -287,8 +291,8 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
         """
         INSERT INTO futmondo_snapshots
             (player_id, price, buy_price, points, last_points, average_points, on_market, status,
-             listing_price, is_clause, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             listing_price, is_clause, recent_points, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             player_id,
@@ -301,6 +305,7 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
             player.get("status") or None,
             player.get("price"),  # precio de SALIDA del listado, distinto del VM -- ver docstring arriba
             None if is_clause is None else (1 if is_clause else 0),
+            json.dumps(recent_points) if recent_points else None,
             now,
         ),
     )
@@ -358,12 +363,12 @@ def _close_stale_market_listings(conn, market_player_ids: set, roster_player_ids
             """
             INSERT INTO futmondo_snapshots
                 (player_id, price, buy_price, points, last_points, average_points, on_market, status,
-                 listing_price, is_clause, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                 listing_price, is_clause, recent_points, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
             """,
             (
                 r["player_id"], r["price"], r["buy_price"], r["points"], r["last_points"], r["average_points"],
-                r["status"], r["listing_price"], r["is_clause"], now,
+                r["status"], r["listing_price"], r["is_clause"], r["recent_points"], now,
             ),
         )
     return len(stale)
