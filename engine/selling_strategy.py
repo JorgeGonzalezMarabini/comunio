@@ -248,7 +248,7 @@ plantilla propia por calidad (`own_quality_scores()`: forma ponderada por
 recencia de sus puntos de Futmondo) dentro de cada posición, solo entre
 jugadores sanos (`rank_positions()`). Los N mejores de cada posición (N =
 max(titulares que pide la formación, mitad superior de la posición)) nunca
-se venden por plusvalía sin sustituto
+se venden por plusvalía, ni siquiera con sustituto
 (config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT) -- el
 trailing-stop y el corte de pérdidas solo con sustituto (ver abajo), las
 vías de lesión siempre --, y la vía 5 (oportunidad de mercado) solo puede vender al
@@ -266,9 +266,7 @@ caso de perderla retirar la venta y volver a evaluar"). Los N mejores de
 cada posición por forma de puntos (mismo ranking, pero un "doubt" sigue
 contando; solo la lesión CONFIRMADA es excepción; N = max(titulares,
 mitad superior), ver config.SELLING_TOP_PLAYERS_PROTECTED_MIN_SHARE) no se
-venden por NINGUNA vía, plusvalía incluida ("no nos interesa vender a un
-jugador bueno con plusvalía si no podemos sustituirlo por otro igual o
-mejor"), salvo que `find_top_player_replacement()` encuentre en el
+venden por el resto de vías (por plusvalía, nunca -- ver arriba) salvo que `find_top_player_replacement()` encuentre en el
 mercado un sustituto de su posición, sano, con forma >= la suya, mejor
 coste por punto y pagable con el presupuesto actual (config.
 ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT, SELLING_TOP_REPLACEMENT_*).
@@ -975,15 +973,10 @@ def decide_sales(
             now=now,
         )
         still_rising = momentum_pct is not None and momentum_pct >= profit_momentum_min_pct
-        # Un top con la regla del sustituto activa (ver docstring del módulo,
-        # "Los mejores solo se venden con sustituto") sí puede venderse por
-        # plusvalía, pero solo con sustituto igual o mejor -- se exige más
-        # abajo, como en el resto de vías. Sin esa regla (o sin forma propia
-        # para aplicarla), la protección bloquea la plusvalía sin más.
+        # Un top nunca se vende por plusvalía, ni siquiera con sustituto (ver
+        # docstring del módulo); el resto de vías sí, con sustituto.
         requires_replacement = str(player["id"]) in replacement_protected_ids and not is_confirmed_injured
-        is_protected_top = (
-            protect_top_players_from_profit and str(player["id"]) in protected_ids and not requires_replacement
-        )
+        is_protected_top = protect_top_players_from_profit and str(player["id"]) in protected_ids
         taking_profit = profit_pct >= profit_threshold and not still_rising and not is_protected_top
 
         # Trailing-stop / corte por reversión desde máximo (ver docstring

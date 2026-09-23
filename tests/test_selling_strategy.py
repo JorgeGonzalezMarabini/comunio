@@ -1552,22 +1552,16 @@ def test_decide_sales_two_tops_cannot_share_the_same_replacement():
     assert len(decisions) == 1
 
 
-def test_decide_sales_top_player_profit_sale_requires_replacement():
-    """El mejor delantero con +30%: sin sustituto se queda; con uno igual o mejor se lista a la espera de ficharlo."""
-    def run(market):
-        squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
-        squad[9]["value"] = 1_300_000
-        return decide_sales(
-            squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15,
-            profit_avg_points_max_mult=1.0, budget=10_000_000, market_candidates=market,
-            protect_top_players_from_profit=True, top_players_require_replacement=True,
-            enable_weekend_lineup_guard=False, now=NOW,
-        )
-
-    assert run([]) == []
-    decisions = run([_market_row("m1", "DEL", 1_000_000, 7.0)])
-    assert [d["player_id"] for d in decisions] == [30]
-    assert decisions[0]["replacement_target_player_id"] == "m1"
+def test_decide_sales_top_player_is_never_sold_for_profit_even_with_replacement():
+    """El mejor delantero con +30% se queda aunque el mercado ofrezca un sustituto igual o mejor."""
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    squad[9]["value"] = 1_300_000
+    assert decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15,
+        profit_avg_points_max_mult=1.0, budget=10_000_000, market_candidates=[_market_row("m1", "DEL", 1_000_000, 7.0)],
+        protect_top_players_from_profit=True, top_players_require_replacement=True,
+        enable_weekend_lineup_guard=False, now=NOW,
+    ) == []
 
 
 def test_rank_positions_protects_the_upper_half_but_never_fewer_than_starters():
