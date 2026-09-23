@@ -598,7 +598,7 @@ def get_open_sales() -> list[dict]:
     se asume que la venta sigue listada tal cual.
     """
     with get_connection() as conn:
-        rows = conn.execute("SELECT id, player_id FROM sales WHERE status = 'listed'").fetchall()
+        rows = conn.execute("SELECT id, player_id, created_at FROM sales WHERE status = 'listed'").fetchall()
         return [dict(r) for r in rows]
 
 

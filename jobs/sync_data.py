@@ -69,6 +69,42 @@ def _reconcile_sales(roster_player_ids: set) -> int:
     return sold
 
 
+def _reconcile_delisted_sales(roster_player_ids: set, roster_on_market_ids: set, fetched_at: str) -> int:
+    """
+    Marca 'delisted' las ventas que seguimos creyendo listadas pero que ya
+    no lo están (a petición del usuario, 2026-09-23, tras retirar a mano
+    en Futmondo varios listados que la nueva regla de corte de pérdidas ya
+    no habría creado -- `_reconcile_sales` solo detecta ventas completadas,
+    así que esas filas se quedaban en 'listed' indefinidamente):
+      - el jugador sigue en la plantilla con `market: false` -- el listado
+        caducó o se retiró a mano (la API no distingue);
+      - hay varias filas 'listed' del mismo jugador (listado caducado y
+        vuelto a listar) -- solo la más reciente puede seguir viva.
+    Solo toca filas creadas ANTES de `fetched_at` (momento en que se leyó
+    la plantilla), para no pisar un listado que `jobs/run_sales.py` haya
+    creado mientras este sync corría. Debe ir DESPUÉS de `_reconcile_sales`
+    (los que ya no están en la plantilla son 'sold', no 'delisted').
+
+    Devuelve cuántas filas se han marcado 'delisted'.
+    """
+    newest_by_player = {}
+    open_sales = get_open_sales()
+    for sale in open_sales:
+        current = newest_by_player.get(sale["player_id"])
+        if current is None or (sale["created_at"], sale["id"]) > (current["created_at"], current["id"]):
+            newest_by_player[sale["player_id"]] = sale
+
+    delisted = 0
+    for sale in open_sales:
+        if sale["created_at"] >= fetched_at or sale["player_id"] not in roster_player_ids:
+            continue
+        superseded = newest_by_player[sale["player_id"]]["id"] != sale["id"]
+        if superseded or sale["player_id"] not in roster_on_market_ids:
+            update_sale_status(sale["id"], "delisted")
+            delisted += 1
+    return delisted
+
+
 def _reconcile_bids(roster_player_ids: set, market_player_ids: set) -> dict:
     """
     Para cada puja que seguimos creyendo pendiente (status='placed' en
@@ -426,6 +462,9 @@ def run():
 
     client = FutmondoClient()
 
+    # Antes de leer la plantilla: límite de `_reconcile_delisted_sales` (un
+    # listado creado después no puede reflejarse todavía en `roster`).
+    roster_fetched_at = datetime.now(timezone.utc).isoformat()
     roster = client.get_roster()
     market = client.get_market()
 
@@ -539,6 +578,8 @@ def run():
     # ir después sin riesgo (ventas propias / rescate por riesgo de
     # plantilla, ninguna interactúa con el backfill de bids).
     sold = _reconcile_sales(roster_player_ids)
+    roster_on_market_ids = {str(p["id"]) for p in roster_players if p.get("market")}
+    delisted = _reconcile_delisted_sales(roster_player_ids, roster_on_market_ids, roster_fetched_at)
     rescued = _rescue_sales_at_risk(client, roster_players)
 
     total = len(roster_players) + len(market_players)
@@ -554,6 +595,8 @@ def run():
         message.append(f"Pujas 'won' sintéticas añadidas para plantilla inicial: {backfilled}.")
     if sold:
         message.append(f"Ventas completadas desde el último sync: {sold}.")
+    if delisted:
+        message.append(f"Venta(s) que ya no seguían listadas (caducadas o retiradas a mano), marcadas 'delisted': {delisted}.")
     if rescued:
         detail = ", ".join(f"{r['position']} #{r['player_id']}" for r in rescued)
         message.append(f"Venta(s) cancelada(s) por riesgo de plantilla ({detail}).")

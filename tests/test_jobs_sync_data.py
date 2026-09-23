@@ -129,6 +129,52 @@ def test_reconcile_sales_leaves_still_owned_players_listed(tmp_db):
     assert sold == 0
 
 
+def _insert_listed_sale(player_id, created_at):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+            (player_id, 1_000_000, "listed", created_at),
+        )
+
+
+def _sale_statuses():
+    with get_connection() as conn:
+        return [r["status"] for r in conn.execute("SELECT status FROM sales ORDER BY id").fetchall()]
+
+
+def test_reconcile_delisted_sales_marks_listing_no_longer_on_market(tmp_db):
+    """Sigue en plantilla con market=false (retirado a mano o caducado) -> 'delisted'."""
+    _insert_listed_sale("2748", "2026-09-23T05:00:00+00:00")
+
+    delisted = sync_data._reconcile_delisted_sales({"2748"}, set(), "2026-09-23T17:00:00+00:00")
+    assert delisted == 1
+    assert _sale_statuses() == ["delisted"]
+
+
+def test_reconcile_delisted_sales_keeps_live_listing_and_delists_older_duplicates(tmp_db):
+    _insert_listed_sale("2748", "2026-09-15T05:00:00+00:00")
+    _insert_listed_sale("2748", "2026-09-22T05:00:00+00:00")
+
+    delisted = sync_data._reconcile_delisted_sales({"2748"}, {"2748"}, "2026-09-23T17:00:00+00:00")
+    assert delisted == 1
+    assert _sale_statuses() == ["delisted", "listed"]
+
+
+def test_reconcile_delisted_sales_ignores_listings_created_after_the_roster_fetch(tmp_db):
+    """Listado creado por run_sales mientras corría el sync: la plantilla leída aún no lo refleja."""
+    _insert_listed_sale("2748", "2026-09-23T17:05:00+00:00")
+
+    assert sync_data._reconcile_delisted_sales({"2748"}, set(), "2026-09-23T17:00:00+00:00") == 0
+    assert _sale_statuses() == ["listed"]
+
+
+def test_reconcile_delisted_sales_leaves_players_out_of_roster_to_reconcile_sales(tmp_db):
+    _insert_listed_sale("2748", "2026-09-23T05:00:00+00:00")
+
+    assert sync_data._reconcile_delisted_sales(set(), set(), "2026-09-23T17:00:00+00:00") == 0
+    assert _sale_statuses() == ["listed"]
+
+
 def test_rescue_sales_at_risk_cancels_listing_when_position_left_understaffed(tmp_db, roster_player_factory):
     """
     Escenario real (clausulazo u otra baja de un jugador de la misma
