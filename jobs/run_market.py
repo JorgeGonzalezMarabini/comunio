@@ -239,6 +239,7 @@ from db.models import (
     get_bids_risked_today,
     get_league_setting,
     get_open_bids,
+    get_open_sale_replacements,
     get_pending_bid_amount,
     get_player_features,
     save_league_setting,
@@ -569,13 +570,46 @@ def run():
     squad_value_total = sum(p["price"] for p in squad_raw if p.get("price"))
     min_score_threshold = dynamic_min_score_threshold(remaining_budget, squad_value_total)
 
-    decisions = decide_bids_for_market(
-        prioritized,
+    # Sustitutos de tops ya puestos en venta (ver engine/selling_strategy.py,
+    # "Los mejores solo se venden con sustituto", y jobs/run_sales.py): se
+    # compra ANTES de vender, así que van primero, sin umbral de score (ya
+    # los eligió run_sales por forma y ratio precio/punto) ni tope dinámico
+    # por jugador -- el resto de límites de seguridad de saldo sí aplican.
+    # Si no cabe o no se puede pujar, el top sigue sin aceptar ofertas y,
+    # si el sustituto sale del mercado, run_sales retira la venta.
+    pending_replacement_targets = {
+        str(r["target_player_id"]): str(r["player_id"])
+        for r in get_open_sale_replacements()
+        if r["status"] == "pending"
+    }
+    replacement_decisions = []
+    for c in prioritized:
+        own_top_id = pending_replacement_targets.get(str(c["id"]))
+        if own_top_id is None or len(replacement_decisions) >= available_roster_slots:
+            continue
+        committed_now = sum(d["amount"] for d in replacement_decisions)
+        decision = decide_bid(
+            c,
+            remaining_budget,
+            already_risked + committed_now,
+            min_score_threshold=float("-inf"),
+            pending_committed=pending_committed + committed_now,
+            player_cap=remaining_budget,
+            min_average_points=0,
+        )
+        if decision is not None:
+            decision["reason"] = f"sustituto del top {own_top_id} puesto en venta; {decision['reason']}"
+            replacement_decisions.append(decision)
+    replacement_ids = {d["player_id"] for d in replacement_decisions}
+    replacement_committed = sum(d["amount"] for d in replacement_decisions)
+
+    decisions = replacement_decisions + decide_bids_for_market(
+        [c for c in prioritized if c["id"] not in replacement_ids],
         remaining_budget,
-        already_risked,
+        already_risked + replacement_committed,
         min_score_threshold=min_score_threshold,
-        max_bids=available_roster_slots,
-        pending_committed=pending_committed,
+        max_bids=max(0, available_roster_slots - len(replacement_decisions)),
+        pending_committed=pending_committed + replacement_committed,
         player_cap=player_cap,
     )
 

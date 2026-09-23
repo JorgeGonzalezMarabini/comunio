@@ -1176,6 +1176,7 @@ _MULT_KWARGS = dict(
     loss_avg_points_ref=3.0,
     loss_avg_points_max_mult=1.5,
     loss_max_effective_pct=0.40,
+    top_players_require_replacement=False,  # estos tests miden los multiplicadores; la regla del top tiene los suyos
 )
 
 
@@ -1315,6 +1316,7 @@ _PROFIT_KWARGS = dict(
     trailing_stop_max_drawdown_pct=999,
     enable_weekend_lineup_guard=False,
     protect_top_players_from_profit=False,  # estos tests miden los multiplicadores; la protección tiene los suyos
+    top_players_require_replacement=False,
     now=NOW,
 )
 
@@ -1433,21 +1435,121 @@ def test_decide_sales_protection_can_be_disabled():
     squad[9]["value"] = 1_300_000
     decisions = decide_sales(
         squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15, profit_avg_points_max_mult=1.0,
-        protect_top_players_from_profit=False, enable_weekend_lineup_guard=False, now=NOW,
+        protect_top_players_from_profit=False, top_players_require_replacement=False,
+        enable_weekend_lineup_guard=False, now=NOW,
     )
     assert [d["player_id"] for d in decisions] == [30]
 
 
-def test_decide_sales_protected_top_player_still_has_trailing_stop():
+def _market_row(player_id, position, price, average, status="", listing_price=None):
+    return {"id": player_id, "position": position, "price": price, "average_points": average,
+            "status": status, "listing_price": listing_price}
+
+
+def _top_trailing_stop_run(market, budget=10_000_000, status="", **kwargs):
+    """Delantero id 30 (el mejor, media 6, vale 1.2M) cae -25% desde su pico -> trailing-stop."""
     squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
-    squad[9]["value"] = 1_200_000  # +20% vs compra, pero -25% desde un pico de 1.6M
-    decisions = decide_sales(
-        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15,
+    squad[9]["value"] = 1_200_000
+    squad[9]["status"] = status
+    return decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000}, min_profit_pct=0.15, budget=budget,
         purchase_baselines={"30": {"peak_price": 1_600_000}}, trailing_stop_max_drawdown_pct=0.20,
-        protect_top_players_from_profit=True, enable_weekend_lineup_guard=False, now=NOW,
+        market_candidates=market, replacement_min_form_ratio=1.0, replacement_min_listing_hours=6,
+        protect_top_players_from_profit=True, top_players_require_replacement=True,
+        enable_weekend_lineup_guard=False, now=NOW, **kwargs,
+    )
+
+
+def test_decide_sales_top_player_is_kept_without_market_replacement():
+    """Top de su posición: el trailing-stop ya no basta, hace falta sustituto en mercado."""
+    assert _top_trailing_stop_run(market=[]) == []
+
+
+def test_decide_sales_top_player_listed_with_replacement_to_buy_first():
+    market = [_market_row("m1", "DEL", 1_000_000, 7.0)]  # más forma y 143k/punto < 200k/punto propio
+    decisions = _top_trailing_stop_run(market)
+    assert len(decisions) == 1
+    d = decisions[0]
+    assert d["player_id"] == 30
+    assert d["replacement_target_player_id"] == "m1"
+    assert d["replacement_target_price"] == 1_000_000
+    assert d["swap_target_player_id"] is None
+    assert "tras fichar al sustituto m1" in d["reason"]
+
+
+def test_decide_sales_top_replacement_must_not_lower_form():
+    """Más barato por punto pero con menos forma: bajaría la media de la posición -> no vale."""
+    assert _top_trailing_stop_run([_market_row("m1", "DEL", 500_000, 5.0)]) == []
+
+
+def test_decide_sales_top_replacement_must_have_better_price_per_point():
+    """Más forma pero más caro por punto (2.4M / 8 = 300k > 200k) -> no vale."""
+    assert _top_trailing_stop_run([_market_row("m1", "DEL", 2_400_000, 8.0)]) == []
+
+
+def test_decide_sales_top_replacement_cost_uses_listing_price_when_higher():
+    """VM barato pero precio de salida de 2M: 2M / 7 = 286k/punto > 200k -> no vale."""
+    assert _top_trailing_stop_run([_market_row("m1", "DEL", 1_000_000, 7.0, listing_price=2_000_000)]) == []
+
+
+def test_decide_sales_top_replacement_must_be_affordable_before_selling():
+    """Se compra ANTES de vender: el presupuesto actual tiene que cubrirlo sin contar la venta."""
+    market = [_market_row("m1", "DEL", 1_000_000, 7.0)]
+    assert _top_trailing_stop_run(market, budget=900_000) == []
+    assert len(_top_trailing_stop_run(market, budget=900_000, replacement_budget=1_000_000)) == 1
+
+
+def test_decide_sales_top_replacement_ignores_other_positions_injured_and_expiring_listings():
+    market = [
+        _market_row("m1", "MED", 500_000, 9.0),
+        _market_row("m2", "DEL", 500_000, 9.0, status="injured1"),
+        _market_row("m3", "DEL", 500_000, 9.0),
+    ]
+    expirations = {"m3": (NOW + timedelta(hours=2)).isoformat()}
+    assert _top_trailing_stop_run(market, market_listing_expirations=expirations) == []
+
+
+def test_decide_sales_top_replacement_respects_max_purchases():
+    market = [_market_row("m1", "DEL", 1_000_000, 7.0)]
+    assert _top_trailing_stop_run(market, max_replacement_purchases=0) == []
+
+
+def test_decide_sales_doubtful_top_player_still_requires_replacement():
+    """"doubt" no es excepción: un buen jugador en duda no se pierde por un corte sin sustituto."""
+    assert _top_trailing_stop_run(market=[], status="doubt") == []
+
+
+def test_decide_sales_confirmed_injured_top_player_is_sold_without_replacement():
+    """La lesión confirmada es la única excepción."""
+    decisions = _top_trailing_stop_run(market=[], status="injured2")
+    assert len(decisions) == 1
+    assert decisions[0]["replacement_target_player_id"] is None
+
+
+def test_decide_sales_non_top_player_needs_no_replacement():
+    """El peor delantero (media 1) sale por trailing-stop sin necesidad de sustituto."""
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    squad[-1]["value"] = 1_200_000
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"36": 1_000_000}, min_profit_pct=0.15,
+        purchase_baselines={"36": {"peak_price": 1_600_000}}, trailing_stop_max_drawdown_pct=0.20,
+        top_players_require_replacement=True, enable_weekend_lineup_guard=False, now=NOW,
+    )
+    assert [d["player_id"] for d in decisions] == [36]
+    assert decisions[0]["replacement_target_player_id"] is None
+
+
+def test_decide_sales_two_tops_cannot_share_the_same_replacement():
+    squad = _del_squad_with_averages([6.0, 6.0, 2.0, 1.0])
+    for p in squad[9:11]:
+        p["value"] = 1_200_000
+    decisions = decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000, "31": 1_000_000}, min_profit_pct=0.15,
+        budget=10_000_000, purchase_baselines={"30": {"peak_price": 1_600_000}, "31": {"peak_price": 1_600_000}},
+        trailing_stop_max_drawdown_pct=0.20, market_candidates=[_market_row("m1", "DEL", 1_000_000, 7.0)],
+        top_players_require_replacement=True, enable_weekend_lineup_guard=False, now=NOW,
     )
     assert len(decisions) == 1
-    assert "reversión desde máximo" in decisions[0]["reason"]
 
 
 def test_decide_sales_market_upgrade_only_replaces_the_worst_of_the_position():

@@ -962,3 +962,115 @@ def test_run_sales_main_does_not_record_job_run_when_bot_disabled(tmp_db, monkey
         count = conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
     assert count == 0
     assert "ENABLE_BOT=false" in capsys.readouterr().out
+
+
+# --- Tops en venta a la espera de fichar a su sustituto (a petición del
+# usuario, 2026-09-23, ver engine/selling_strategy.py, "Los mejores solo se
+# venden con sustituto") ---
+
+
+def _seed_top_listing_with_replacement(player_id=25, target_id="900", status="pending"):
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+            (str(player_id), 2_623_496, "listed", "2026-09-20T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO sale_replacements (sale_id, player_id, target_player_id, target_price, status, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (cur.lastrowid, str(player_id), target_id, 1_000_000, status, "2026-09-20T00:00:00+00:00", "2026-09-20T00:00:00+00:00"),
+        )
+        return cur.lastrowid
+
+
+def _replacement_status(sale_id):
+    with get_connection() as conn:
+        return (
+            conn.execute("SELECT status FROM sale_replacements WHERE sale_id = ?", (sale_id,)).fetchone()["status"],
+            conn.execute("SELECT status FROM sales WHERE id = ?", (sale_id,)).fetchone()["status"],
+        )
+
+
+def _replacement_fake_client(roster, market, accept_calls, cancel_calls):
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def cancel_sale(self, player_id):
+            cancel_calls.append(player_id)
+            return {"code": "api.general.ok"}
+
+        def get_market(self):
+            return {"answer": market}
+
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 25}}}
+
+    return FakeClient
+
+
+def test_run_sales_blocks_offers_on_top_until_replacement_is_bought(tmp_db):
+    sale_id = _seed_top_listing_with_replacement()
+    accept_calls, cancel_calls, captured = [], [], []
+    FakeClient = _replacement_fake_client([], [{"id": "900", "expirationDate": "2099-01-01T00:00:00.000Z"}], accept_calls, cancel_calls)
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [] and cancel_calls == []
+    assert "a la espera de fichar a su sustituto" in captured[0]
+    assert _replacement_status(sale_id) == ("pending", "listed")
+
+
+def test_run_sales_accepts_offer_on_top_once_replacement_is_in_roster(tmp_db):
+    sale_id = _seed_top_listing_with_replacement()
+    accept_calls, cancel_calls, captured = [], [], []
+    FakeClient = _replacement_fake_client([], [], accept_calls, cancel_calls)
+    FakeClient.get_roster = lambda self: {"answer": [{"id": "900", "role": "delantero", "status": "", "value": 1_000_000}]}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert accept_calls == [("bid1", "25")]
+    assert cancel_calls == []
+    assert _replacement_status(sale_id)[0] == "acquired"
+
+
+def test_run_sales_withdraws_top_listing_when_replacement_purchase_is_lost(tmp_db):
+    sale_id = _seed_top_listing_with_replacement()
+    accept_calls, cancel_calls, captured = [], [], []
+    FakeClient = _replacement_fake_client([], [], accept_calls, cancel_calls)  # el sustituto ya no está en el mercado
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)):
+        run_sales.run()
+
+    assert cancel_calls == ["25"]
+    assert accept_calls == []
+    assert _replacement_status(sale_id) == ("lost", "delisted")
+    assert "retirada la venta del top 25" in captured[0]
+
+
+def test_run_sales_keeps_offers_blocked_if_market_cannot_be_read(tmp_db):
+    """Sin mercado en vivo no se da por perdido el sustituto (ni se retira la venta), pero tampoco se acepta."""
+    import requests
+
+    sale_id = _seed_top_listing_with_replacement()
+    accept_calls, cancel_calls = [], []
+    FakeClient = _replacement_fake_client([], [], accept_calls, cancel_calls)
+
+    def failing_market(self):
+        raise requests.ConnectionError("sin red")
+
+    FakeClient.get_market = failing_market
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+
+    assert accept_calls == [] and cancel_calls == []
+    assert _replacement_status(sale_id) == ("pending", "listed")

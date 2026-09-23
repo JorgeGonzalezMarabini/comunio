@@ -192,6 +192,24 @@ CREATE TABLE IF NOT EXISTS sale_swap_targets (
     updated_at                 TEXT NOT NULL
 );
 
+-- Venta de un TOP de su posición condicionada a fichar antes a su
+-- sustituto (a petición del usuario, 2026-09-23, ver docstring de
+-- engine/selling_strategy.py, "Los mejores solo se venden con sustituto"):
+-- el top se lista ya, pero jobs/run_sales.py no acepta ninguna oferta
+-- sobre él hasta que `target_player_id` esté en la plantilla propia
+-- ('acquired'); jobs/run_market.py puja con prioridad por los 'pending'.
+-- Si el sustituto sale del mercado sin ser nuestro, se retira la venta
+-- ('lost') y el jugador vuelve a evaluarse.
+CREATE TABLE IF NOT EXISTS sale_replacements (
+    sale_id            INTEGER PRIMARY KEY REFERENCES sales(id),
+    player_id          TEXT NOT NULL REFERENCES players(id),  -- el top propio, puesto en venta
+    target_player_id   TEXT NOT NULL REFERENCES players(id),  -- sustituto a fichar ANTES de aceptar
+    target_price       INTEGER,
+    status             TEXT NOT NULL,          -- 'pending' | 'acquired' | 'lost'
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS lineup_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     matchday        INTEGER,                -- NULL de momento: no hay endpoint de jornada actual implementado todavía
@@ -749,6 +767,52 @@ def retarget_swap_target(sale_id: int, new_target_player_id, new_target_price: i
             WHERE sale_id = ?
             """,
             (str(new_target_player_id), new_target_price, now, sale_id),
+        )
+
+
+def save_sale_replacement(sale_id: int, player_id, target_player_id, target_price: int, now: str) -> None:
+    """
+    Registra el sustituto que hay que fichar ANTES de aceptar ofertas sobre
+    el top `player_id` recién listado (ver `sale_replacements` arriba) --
+    llamar tras persistir la fila de `sales` (necesita su `sale_id` real).
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sale_replacements
+                (sale_id, player_id, target_player_id, target_price, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (sale_id, str(player_id), str(target_player_id), target_price, now, now),
+        )
+
+
+def get_open_sale_replacements() -> list[dict]:
+    """
+    Sustitutos de ventas TODAVÍA listadas (`sales.status = 'listed'`), en
+    estado 'pending' o 'acquired' -- para jobs/run_sales.py (bloquear o
+    permitir aceptar ofertas, retirar la venta si se perdió la compra) y
+    jobs/run_market.py (pujar por los 'pending').
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.sale_id, r.player_id, r.target_player_id, r.target_price, r.status
+            FROM sale_replacements r
+            JOIN sales s ON s.id = r.sale_id
+            WHERE s.status = 'listed' AND r.status IN ('pending', 'acquired')
+            ORDER BY r.sale_id
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_sale_replacement_status(sale_id: int, status: str, now: str) -> None:
+    """Actualiza el estado ('pending' | 'acquired' | 'lost') de un sustituto registrado."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE sale_replacements SET status = ?, updated_at = ? WHERE sale_id = ?",
+            (status, now, sale_id),
         )
 
 

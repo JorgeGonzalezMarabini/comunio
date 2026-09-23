@@ -249,10 +249,30 @@ recencia de sus puntos de Futmondo) dentro de cada posición, solo entre
 jugadores sanos (`rank_positions()`). Los N mejores de cada posición (N =
 titulares que pide la formación) nunca se venden por plusvalía
 (config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT) -- el
-trailing-stop, el corte de pérdidas y las vías de lesión siguen
-aplicando --, y la vía 5 (oportunidad de mercado) solo puede vender al
+trailing-stop y el corte de pérdidas solo con sustituto (ver abajo), las
+vías de lesión siempre --, y la vía 5 (oportunidad de mercado) solo puede vender al
 PEOR de su posición (config.ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION):
 si ese no es vendible esta pasada, no se vende a otro mejor en su lugar.
+
+Los mejores solo se venden con sustituto (a petición del usuario,
+2026-09-23: "que los mejores del equipo solo se vendan si hay un candidato
+en mercado disponible para sustituirles con un ratio de precio/puntos
+mejor, evitando que un buen jugador se pierda para cortar pérdidas y que
+la media de puntos del equipo/posición descienda"; la excepción es la
+lesión; "comprar la oportunidad de mercado antes de venderlo"; "se puede
+poner en venta pero no aceptar ofertas hasta haber ganado la compra, y en
+caso de perderla retirar la venta y volver a evaluar"). Los N mejores de
+cada posición por forma de puntos (mismo ranking, pero un "doubt" sigue
+contando; solo la lesión CONFIRMADA es excepción) no se venden por
+NINGUNA vía salvo que `find_top_player_replacement()` encuentre en el
+mercado un sustituto de su posición, sano, con forma >= la suya, mejor
+coste por punto y pagable con el presupuesto actual (config.
+ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT, SELLING_TOP_REPLACEMENT_*).
+La decisión lleva "replacement_target_player_id": jobs/run_sales.py lista
+al top pero no acepta ofertas hasta que el sustituto esté en plantilla
+(jobs/run_market.py puja por él con prioridad) y, si el sustituto sale del
+mercado sin ser nuestro, retira la venta y lo reevalúa
+(`db.models.sale_replacements`).
 
 Nota informativa de puntos ya extraídos (a petición del usuario, misma
 evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
@@ -276,7 +296,7 @@ from datetime import datetime, timedelta, timezone
 
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
-from engine.evaluator import evaluate_players, weighted_recent_points
+from engine.evaluator import evaluate_players, form_points, weighted_recent_points
 from engine.lineup_optimizer import FORMATIONS
 from engine.squad_risk import assess_squad_depth
 
@@ -372,11 +392,14 @@ def own_quality_scores(
     return scores
 
 
-def rank_positions(squad: list[dict], quality_scores: dict[str, float], formation: str = None) -> tuple[set, dict]:
+def rank_positions(
+    squad: list[dict], quality_scores: dict[str, float], formation: str = None, include_doubtful: bool = False
+) -> tuple[set, dict]:
     """
     Devuelve (`protected_ids`, `worst_id_by_position`) a partir de
     `quality_scores` (ver `own_quality_scores()`), solo entre jugadores
-    SANOS (sin lesión/duda) con score:
+    SANOS (sin lesión/duda; con `include_doubtful`, solo se excluye la
+    lesión CONFIRMADA) con score:
       - `protected_ids`: los N mejores de cada posición, N = titulares que
         pide `formation` en esa posición (`engine.lineup_optimizer.FORMATIONS`).
       - `worst_id_by_position`: {posición: id del peor}.
@@ -387,7 +410,10 @@ def rank_positions(squad: list[dict], quality_scores: dict[str, float], formatio
     by_position: dict[str, list] = {}
     for p in squad:
         pid = str(p["id"])
-        if pid not in quality_scores or is_injury_status(p.get("status")):
+        excluded = (
+            is_confirmed_injured_status(p.get("status")) if include_doubtful else is_injury_status(p.get("status"))
+        )
+        if pid not in quality_scores or excluded:
             continue
         position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
         by_position.setdefault(position, []).append((quality_scores[pid], pid))
@@ -398,6 +424,65 @@ def rank_positions(squad: list[dict], quality_scores: dict[str, float], formatio
         protected_ids.update(pid for _, pid in entries[: slots.get(position, 0)])
         worst_id_by_position[position] = entries[-1][1]
     return protected_ids, worst_id_by_position
+
+
+def find_top_player_replacement(
+    own_form: float | None,
+    own_value: float,
+    position: str,
+    candidates: list[dict],
+    max_cost: float,
+    exclude_ids: set = frozenset(),
+    market_listing_expirations: dict[str, str] = None,
+    now: datetime = None,
+    min_form_ratio: float = None,
+    min_listing_hours: float = None,
+) -> dict | None:
+    """
+    Sustituto de mercado para un TOP de su posición (ver docstring del
+    módulo, "Los mejores solo se venden con sustituto"). `candidates`:
+    features crudas de mercado (formato de `db.models.get_player_features()`).
+    Válido si es de `position`, está sano, no está en `exclude_ids` y:
+      - su forma (`engine.evaluator.form_points()`, misma escala que la de
+        `own_form`) >= `own_form` * `min_form_ratio`;
+      - su coste (max(VM, precio de salida)) por punto es MENOR que
+        `own_value` / `own_form`;
+      - su coste <= `max_cost` (presupuesto disponible para comprar ANTES
+        de vender);
+      - le quedan al menos `min_listing_hours` de listado (sin
+        `expirationDate` conocido, no bloquea).
+    Entre los válidos, el de mejor ratio coste/punto. Sin `own_form`
+    (None) no hay con qué comparar -> None (el top se queda).
+
+    Devuelve {"id", "price", "form"} o None.
+    """
+    min_form_ratio = config.SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO if min_form_ratio is None else min_form_ratio
+    min_listing_hours = (
+        config.SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS if min_listing_hours is None else min_listing_hours
+    )
+    now = now or datetime.now(timezone.utc)
+    market_listing_expirations = market_listing_expirations or {}
+    if own_form is None:
+        return None
+    own_ratio = own_value / own_form if own_form > 0 else float("inf")
+
+    best = None
+    for c in candidates or []:
+        cid = str(c["id"])
+        if cid in exclude_ids or c.get("position") != position or is_injury_status(c.get("status")):
+            continue
+        form = form_points(c)
+        cost = max(c.get("price") or 0, c.get("listing_price") or 0)
+        if form <= 0 or cost <= 0 or cost > max_cost:
+            continue
+        if form < own_form * min_form_ratio or cost / form >= own_ratio:
+            continue
+        expiration = parse_iso_datetime(market_listing_expirations.get(cid))
+        if expiration is not None and expiration - now < timedelta(hours=min_listing_hours):
+            continue
+        if best is None or cost / form < best["price"] / best["form"]:
+            best = {"id": cid, "price": cost, "form": form}
+    return best
 
 
 def decide_sales(
@@ -437,6 +522,12 @@ def decide_sales(
     profit_momentum_lookback_days: float = None,
     profit_momentum_min_pct: float = None,
     profit_momentum_min_data_points: int = None,
+    top_players_require_replacement: bool = None,
+    replacement_candidates: list[dict] = None,
+    replacement_budget: int = None,
+    max_replacement_purchases: int = None,
+    replacement_min_form_ratio: float = None,
+    replacement_min_listing_hours: float = None,
     now: datetime = None,
 ) -> list[dict]:
     """
@@ -567,6 +658,21 @@ def decide_sales(
     por defecto config.ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT /
     ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION (ver `rank_positions()`
     y docstring del módulo, "Protección de los mejores").
+
+    `top_players_require_replacement`: por defecto
+    config.ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT (ver docstring del
+    módulo, "Los mejores solo se venden con sustituto"). Un top de su
+    posición (sano o "doubt") solo se lista si
+    `find_top_player_replacement()` encuentra sustituto en
+    `replacement_candidates` (por defecto `market_candidates`; el llamador
+    puede pasar solo los que de verdad se pueden comprar) con un coste
+    <= `replacement_budget` (por defecto `budget`; conviene descontar lo ya
+    comprometido en pujas), como mucho `max_replacement_purchases` por
+    pasada (plazas libres de plantilla; None = sin límite). La decisión
+    trae "replacement_target_player_id"/"replacement_target_price" y no
+    descuenta margen de banquillo (la venta solo se completa con el
+    sustituto ya en plantilla). `replacement_min_form_ratio`/
+    `replacement_min_listing_hours`: ver config.SELLING_TOP_REPLACEMENT_*.
 
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
@@ -724,6 +830,13 @@ def decide_sales(
         if upgrade_only_worst_per_position is None
         else upgrade_only_worst_per_position
     )
+    top_players_require_replacement = (
+        config.ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT
+        if top_players_require_replacement is None
+        else top_players_require_replacement
+    )
+    replacement_candidates = market_candidates if replacement_candidates is None else replacement_candidates
+    replacement_budget = budget if replacement_budget is None else replacement_budget
     now = now or datetime.now(timezone.utc)
     market_listing_expirations = market_listing_expirations or {}
     own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
@@ -751,8 +864,17 @@ def decide_sales(
 
     # Protección de los mejores / rotación sobre los peores (ver docstring
     # del módulo): ranking de calidad por posición de TODA la plantilla.
-    protected_ids, worst_id_by_position = rank_positions(
-        squad, own_quality_scores(squad, own_squad_features, lineup_score_by_id), formation=formation
+    quality_scores = own_quality_scores(squad, own_squad_features, lineup_score_by_id)
+    protected_ids, worst_id_by_position = rank_positions(squad, quality_scores, formation=formation)
+    # Tops que solo se venden con sustituto (ver docstring del módulo): mismo
+    # ranking, pero un "doubt" sigue contando como top -- solo la lesión
+    # CONFIRMADA es excepción -- y solo con forma real de puntos (sin el
+    # respaldo del score de alineación, otra escala): es la que se compara
+    # contra la del sustituto.
+    replacement_protected_ids = (
+        rank_positions(squad, own_quality_scores(squad), formation=formation, include_doubtful=True)[0]
+        if top_players_require_replacement
+        else set()
     )
 
     candidates = []
@@ -972,6 +1094,8 @@ def decide_sales(
                 taking_profit,
                 profit_threshold,
                 momentum_pct,
+                str(player["id"]) in replacement_protected_ids and not is_confirmed_injured,
+                average_points,
             )
         )
 
@@ -1040,6 +1164,10 @@ def decide_sales(
     depth = assess_squad_depth(normalized_squad, formation=formation)
     bench_remaining = {position: info["bench"] for position, info in depth.items()}
 
+    reserved_replacement_ids: set = set()
+    replacement_budget_left = max(0, replacement_budget)
+    squad_ids = {str(p["id"]) for p in squad}
+
     decisions = []
     for (
         player,
@@ -1067,16 +1195,44 @@ def decide_sales(
         taking_profit,
         profit_threshold,
         momentum_pct,
+        requires_replacement,
+        average_points,
     ) in candidates:
         if only_market_reason and str(player["id"]) not in approved_market_only_ids:
             continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
 
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
 
+        # Top de su posición (ver docstring del módulo, "Los mejores solo se
+        # venden con sustituto"): sin sustituto con mejor ratio precio/punto
+        # que se pueda fichar ANTES, no se vende, sea cual sea la vía.
+        replacement = None
+        if requires_replacement:
+            if max_replacement_purchases is not None and len(reserved_replacement_ids) >= max_replacement_purchases:
+                continue
+            replacement = find_top_player_replacement(
+                average_points,
+                player.get("value", 0),
+                position,
+                replacement_candidates,
+                max_cost=replacement_budget_left,
+                exclude_ids=reserved_replacement_ids | squad_ids,
+                market_listing_expirations=market_listing_expirations,
+                now=now,
+                min_form_ratio=replacement_min_form_ratio,
+                min_listing_hours=replacement_min_listing_hours,
+            )
+            if replacement is None:
+                continue  # sin sustituto válido: el top se queda
+            reserved_replacement_ids.add(replacement["id"])
+            replacement_budget_left -= replacement["price"]
+
         # Un jugador ya lesionado/sancionado no contaba como "disponible"
         # en assess_squad_depth, así que venderlo no empeora la cobertura
-        # real de la posición -- no hace falta descontar margen por él.
-        if not is_injured_or_doubtful:
+        # real de la posición -- no hace falta descontar margen por él. Un
+        # top con sustituto tampoco: la venta solo se acepta con el
+        # sustituto ya en plantilla.
+        if not is_injured_or_doubtful and replacement is None:
             if bench_remaining.get(position, 0) <= 0:
                 continue  # vender aquí dejaría la posición sin cubrir -- no se vende, por rentable que sea
             bench_remaining[position] -= 1
@@ -1157,6 +1313,14 @@ def decide_sales(
                 "libera la plaza de cara a esa oportunidad, aunque hoy no compense económicamente"
             )
 
+        if replacement is not None:
+            reason += (
+                f"; top de {position}: solo se aceptarán ofertas tras fichar al sustituto {replacement['id']} "
+                f"(forma {replacement['form']:.2f} vs {average_points:.2f} propia, coste {replacement['price']}, "
+                f"{replacement['price'] / replacement['form']:,.0f}/punto frente a "
+                + (f"{player.get('value', 0) / average_points:,.0f}/punto propio)" if average_points else "sin puntos propios)")
+            )
+
         # Candidato "swap" (a petición del usuario, 2026-08-29, ver
         # config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT): solo se persiste
         # para un candidato que cualifica ÚNICAMENTE por oportunidad de
@@ -1172,8 +1336,14 @@ def decide_sales(
                 "profit": profit,
                 "profit_pct": profit_pct,
                 "reason": reason,
-                "swap_target_player_id": (best_market_candidate or {}).get("id") if only_market_reason else None,
-                "swap_target_price": (best_market_candidate or {}).get("price") if only_market_reason else None,
+                "swap_target_player_id": (
+                    (best_market_candidate or {}).get("id") if only_market_reason and replacement is None else None
+                ),
+                "swap_target_price": (
+                    (best_market_candidate or {}).get("price") if only_market_reason and replacement is None else None
+                ),
+                "replacement_target_player_id": replacement["id"] if replacement else None,
+                "replacement_target_price": replacement["price"] if replacement else None,
             }
         )
     return decisions

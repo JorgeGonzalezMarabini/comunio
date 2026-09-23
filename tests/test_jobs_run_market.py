@@ -1482,3 +1482,51 @@ def test_format_id_list_truncates_long_lists():
 def test_format_id_list_no_truncation_note_when_short():
     ids = ["a", "b", "c"]
     assert run_market._format_id_list(ids) == "a, b, c"
+
+
+def test_run_market_bids_first_for_pending_replacement_of_listed_top(tmp_db, monkeypatch):
+    """
+    Sustituto de un top ya puesto en venta (ver engine/selling_strategy.py,
+    "Los mejores solo se venden con sustituto"): se puja por él aunque el
+    umbral de score dinámico descartara cualquier puja normal.
+    """
+    _seed_player("4069", "DEF", price=350_000)
+    _seed_player("5000", "DEF", price=350_000)
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+            ("25", 2_000_000, "listed", NOW),
+        )
+        conn.execute(
+            "INSERT INTO sale_replacements (sale_id, player_id, target_player_id, target_price, status, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (cur.lastrowid, "25", "4069", 350_000, "pending", NOW, NOW),
+        )
+    monkeypatch.setattr(run_market, "dynamic_min_score_threshold", lambda *a, **k: 99.0)
+
+    placed = []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 999}}}
+
+        def get_market(self):
+            return {"answer": [
+                {"id": "4069", "slug": "jugador-4069", "value": 350_000, "computer": True},
+                {"id": "5000", "slug": "jugador-5000", "value": 350_000, "computer": True},
+            ]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            placed.append(player_id)
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify"):
+        run_market.run()
+
+    assert placed == ["4069"]
+    with get_connection() as conn:
+        row = conn.execute("SELECT reason FROM bids WHERE player_id = '4069'").fetchone()
+    assert "sustituto del top 25" in row["reason"]

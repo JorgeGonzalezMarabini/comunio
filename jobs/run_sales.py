@@ -168,10 +168,19 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 import config
-from clients.futmondo_client import FUTMONDO_POSITION_MAP, FutmondoClient, FutmondoOfferError, is_injury_status
+from clients.futmondo_client import (
+    FUTMONDO_POSITION_MAP,
+    FutmondoClient,
+    FutmondoOfferError,
+    is_injury_status,
+    real_pending_bid_amount,
+)
 from db.models import (
     init_db,
     get_connection,
+    get_open_bids,
+    get_open_sale_replacements,
+    get_pending_bid_amount,
     get_player_features,
     get_purchase_baselines,
     get_recent_price_history,
@@ -180,7 +189,10 @@ from db.models import (
     mark_offer_accepted,
     record_received_offer,
     retarget_swap_target,
+    save_sale_replacement,
     save_swap_target,
+    update_sale_replacement_status,
+    update_sale_status,
 )
 from engine.selling_strategy import apply_revaluation_premium, decide_sales, parse_iso_datetime, score_market_upgrade_candidates
 from engine.squad_risk import assess_squad_depth
@@ -353,6 +365,51 @@ def _resolve_swap_target(
     return True
 
 
+def _reconcile_sale_replacements(
+    client: FutmondoClient,
+    roster_ids: set[str],
+    live_market_ids: set[str] | None,
+    now: str,
+) -> tuple[set[str], list[dict], list[dict], list[tuple[dict, str]]]:
+    """
+    Tops listados a la espera de fichar a su sustituto (ver
+    `db.models.sale_replacements` y docstring de engine/selling_strategy.py,
+    "Los mejores solo se venden con sustituto"):
+      - sustituto ya en plantilla -> 'acquired': sus ofertas se pueden
+        aceptar desde ya.
+      - sustituto fuera del mercado sin ser nuestro (compra perdida o
+        listado cerrado) -> se retira la venta (`cancel_sale()`), 'lost'; el
+        jugador vuelve a evaluarse en esta misma pasada.
+      - si no -> sigue 'pending': no se acepta ninguna oferta sobre él.
+    `live_market_ids` None (no se pudo leer el mercado en vivo) -> nada se
+    da por perdido esta pasada. Si la cancelación falla, sigue 'pending'
+    (ofertas bloqueadas) y se reintenta en la siguiente.
+
+    Devuelve (ids a la espera, adquiridos, retirados, fallos al retirar).
+    """
+    awaiting, acquired, lost, cancel_failed = set(), [], [], []
+    for r in get_open_sale_replacements():
+        target = str(r["target_player_id"])
+        if target in roster_ids:
+            if r["status"] != "acquired":
+                update_sale_replacement_status(r["sale_id"], "acquired", now)
+                acquired.append(r)
+            continue
+        if r["status"] == "pending" and live_market_ids is not None and target not in live_market_ids:
+            try:
+                client.cancel_sale(str(r["player_id"]))
+            except (requests.RequestException, FutmondoOfferError) as e:
+                cancel_failed.append((r, str(e)))
+                awaiting.add(str(r["player_id"]))
+                continue
+            update_sale_status(r["sale_id"], "delisted")
+            update_sale_replacement_status(r["sale_id"], "lost", now)
+            lost.append(r)
+            continue
+        awaiting.add(str(r["player_id"]))
+    return awaiting, acquired, lost, cancel_failed
+
+
 def _process_received_offers(
     client: FutmondoClient,
     seen_at: str,
@@ -363,6 +420,7 @@ def _process_received_offers(
     market_candidates: list[dict],
     live_market_expirations: dict[str, str],
     now: datetime,
+    awaiting_replacement_ids: set[str] = frozenset(),
 ) -> tuple[list[dict], list[tuple[dict, str]], list[dict]]:
     """
     Lee las ofertas de compra recibidas sobre jugadores propios puestos en
@@ -430,6 +488,10 @@ def _process_received_offers(
     candidato lesionado/en duda se acepta siempre que cualifique por
     precio (nunca se bloquea por bench, nunca decrementa `bench_by_position`).
 
+    `awaiting_replacement_ids`: tops cuyo sustituto todavía no está en
+    plantilla (ver `_reconcile_sale_replacements()`) -- sus ofertas se
+    registran pero nunca se aceptan (cuentan como omitidas por riesgo).
+
     Devuelve (aceptadas, fallidas, omitidas_por_riesgo) para el resumen de
     notificación de `run()`. Un fallo al aceptar una oferta concreta (red
     o rechazo de negocio) no aborta el resto -- se audita en `fallidas` y
@@ -458,6 +520,9 @@ def _process_received_offers(
                 bidder_slug=(bid.get("userTeam") or {}).get("slug"),
                 seen_at=seen_at,
             )
+
+        if str(item["id"]) in awaiting_replacement_ids:
+            continue  # top a la espera de fichar a su sustituto: no se acepta todavía
 
         futmondo_bids = [b for b in bids if _is_futmondo_offer(b)]
         if not futmondo_bids:
@@ -588,11 +653,35 @@ def run():
     # entrada aquí como "sin dato", esos refinamientos quedan desactivados
     # para ese candidato.
     try:
-        market_listing_expirations = {
-            str(p["id"]): p.get("expirationDate") for p in client.get_market().get("answer", [])
-        }
+        live_market_items = client.get_market().get("answer", [])
+        live_market_ids = {str(p["id"]) for p in live_market_items}
     except requests.RequestException:
-        market_listing_expirations = {}
+        live_market_items, live_market_ids = [], None
+    market_listing_expirations = {str(p["id"]): p.get("expirationDate") for p in live_market_items}
+
+    # Tops listados a la espera de su sustituto (ver
+    # `_reconcile_sale_replacements()`): antes de procesar ofertas, para
+    # bloquear las de quien aún no tiene sustituto en plantilla y retirar
+    # la venta de quien lo perdió (vuelve a evaluarse en esta pasada).
+    awaiting_replacement_ids, replacements_acquired, replacements_lost, replacement_cancel_failed = (
+        _reconcile_sale_replacements(client, roster_ids, live_market_ids, now)
+    )
+    lost_player_ids = {str(r["player_id"]) for r in replacements_lost}
+    roster_items = [{**p, "market": False} if str(p["id"]) in lost_player_ids else p for p in roster_items]
+    for r in replacements_acquired:
+        report_lines.append(
+            f"Sustituto {r['target_player_id']} ya en plantilla: se aceptarán ofertas por el top {r['player_id']}."
+        )
+    for r in replacements_lost:
+        report_lines.append(
+            f"Compra del sustituto {r['target_player_id']} perdida: retirada la venta del top {r['player_id']} "
+            "(se reevalúa)."
+        )
+    for r, err in replacement_cancel_failed:
+        report_lines.append(
+            f"Sustituto {r['target_player_id']} perdido pero no se pudo retirar la venta del top "
+            f"{r['player_id']} ({err}); sus ofertas siguen bloqueadas."
+        )
 
     offers_accepted, offers_failed, offers_skipped_for_risk = _process_received_offers(
         client,
@@ -604,7 +693,13 @@ def run():
         market_candidates,
         market_listing_expirations,
         now_dt,
+        awaiting_replacement_ids | lost_player_ids,  # recién retirada: ninguna oferta leída antes vale ya
     )
+    if awaiting_replacement_ids:
+        report_lines.append(
+            f"{len(awaiting_replacement_ids)} top(s) en venta a la espera de fichar a su sustituto (ofertas "
+            f"bloqueadas): {', '.join(sorted(awaiting_replacement_ids))}"
+        )
     if offers_accepted:
         report_lines.append(f"{len(offers_accepted)} oferta(s) recibida(s) ACEPTADA(S):")
         for o in offers_accepted:
@@ -660,10 +755,39 @@ def run():
     except requests.RequestException:
         own_lineup_player_ids = set()
 
+    # Los mejores solo se venden con sustituto fichado ANTES (ver
+    # engine/selling_strategy.py): candidatos que de verdad se pueden
+    # comprar (misma política de otro manager que jobs/run_market.py), no
+    # reservados ya por otra venta; presupuesto sin lo ya comprometido en
+    # pujas ni en sustitutos pendientes, y como mucho tantas compras como
+    # plazas libres de plantilla.
+    open_replacements = get_open_sale_replacements()
+    pending_replacements = [r for r in open_replacements if r["status"] == "pending"]
+    reserved_targets = {str(r["target_player_id"]) for r in open_replacements}
+    computer_listed_ids = {str(p["id"]) for p in live_market_items if p.get("computer", False)}
+    replacement_candidates = [
+        c
+        for c in market_candidates
+        if str(c["id"]) not in reserved_targets
+        and (config.ENABLE_BIDS_ON_MANAGER_LISTINGS or str(c["id"]) in computer_listed_ids)
+    ]
+    pending_committed = max(get_pending_bid_amount(), real_pending_bid_amount(live_market_items))
+    replacement_budget = (
+        budget - pending_committed - sum(r["target_price"] or 0 for r in pending_replacements)
+    )
+    max_replacement_purchases = (
+        max(0, max_roster_size - len(roster_items) - len(get_open_bids()) - len(pending_replacements))
+        if max_roster_size is not None
+        else 0
+    )
+
     decisions = decide_sales(
         roster_items,
         bought_by_bot=bought_by_bot,
         budget=budget,
+        replacement_candidates=replacement_candidates,
+        replacement_budget=replacement_budget,
+        max_replacement_purchases=max_replacement_purchases,
         own_squad_features=own_squad_features,
         market_candidates=market_candidates,
         market_listing_expirations=market_listing_expirations,
@@ -714,6 +838,14 @@ def run():
                         decision.get("swap_target_price") or 0,
                         now,
                     )
+                if decision.get("replacement_target_player_id"):
+                    save_sale_replacement(
+                        sale_id,
+                        decision["player_id"],
+                        decision["replacement_target_player_id"],
+                        decision.get("replacement_target_price") or 0,
+                        now,
+                    )
                 listed.append(decision)
             except (requests.RequestException, FutmondoOfferError) as e:
                 _persist_sale(conn, decision, "failed", now, error=str(e))
@@ -724,6 +856,11 @@ def run():
         report_lines.append(
             f"  - jugador {d['player_id']}: pide {format_number(d['asking_price'])} "
             f"(referencia de compra {format_number(d['purchase_price'])}, {d['profit_pct']:+.1%})"
+            + (
+                f" -- top: ofertas bloqueadas hasta fichar al sustituto {d['replacement_target_player_id']}"
+                if d.get("replacement_target_player_id")
+                else ""
+            )
         )
     if failed:
         report_lines.append(f"{len(failed)} fallido(s):")

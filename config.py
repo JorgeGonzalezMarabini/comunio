@@ -605,8 +605,9 @@ SELLING_PROFIT_MOMENTUM_MIN_DATA_POINTS = int(os.getenv("SELLING_PROFIT_MOMENTUM
 # cada posición:
 #   - SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT: los N mejores de cada
 #     posición (N = titulares que pide la formación, p. ej. 4 DEF en 4-4-2)
-#     nunca se venden por plusvalía, por alta que sea. El trailing-stop, el
-#     corte de pérdidas y las vías de lesión siguen aplicando.
+#     nunca se venden por plusvalía, por alta que sea. El trailing-stop y el
+#     corte de pérdidas solo con sustituto (ver ENABLE_SELLING_TOP_PLAYERS_
+#     REQUIRE_REPLACEMENT abajo); las vías de lesión siguen aplicando.
 #   - SELLING_UPGRADE_ONLY_WORST_PER_POSITION: la vía "oportunidad de
 #     mercado" solo puede vender al PEOR jugador sano de su posición; si ese
 #     no es vendible esta pasada (recién fichado, ya en venta...), no se
@@ -617,6 +618,29 @@ ENABLE_SELLING_PROTECT_TOP_PLAYERS_FROM_PROFIT = (
 ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION = (
     os.getenv("ENABLE_SELLING_UPGRADE_ONLY_WORST_PER_POSITION", "true").lower() == "true"
 )
+
+# Los mejores solo se venden con sustituto fichado antes (a petición del
+# usuario, 2026-09-23: "que los mejores del equipo solo se vendan si hay un
+# candidato en mercado disponible para sustituirles con un ratio de
+# precio/puntos mejor"). Aplica a los N mejores de cada posición (mismo
+# ranking que arriba, pero contando también a los "doubt"; la lesión
+# CONFIRMADA es la única excepción) en CUALQUIER vía de venta (corte de
+# pérdidas, trailing-stop, oportunidad de mercado). Se lista al top solo si
+# hay en mercado un sustituto de su posición, sano, con:
+#   - forma >= SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO x la del top (no baja
+#     la media de puntos de la posición),
+#   - mejor ratio precio/punto (coste = max(VM, precio de salida)),
+#   - coste pagable con el presupuesto ACTUAL (sin contar lo de la venta:
+#     se compra antes de vender), y
+#   - al menos SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS de listado.
+# jobs/run_sales.py no acepta ofertas sobre ese top hasta que el sustituto
+# esté en plantilla; si el sustituto sale del mercado sin ser nuestro, se
+# retira la venta y se reevalúa. jobs/run_market.py puja por él con prioridad.
+ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT = (
+    os.getenv("ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT", "true").lower() == "true"
+)
+SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO = float(os.getenv("SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO", "1.0"))
+SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS = float(os.getenv("SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS", "6"))
 
 # Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
