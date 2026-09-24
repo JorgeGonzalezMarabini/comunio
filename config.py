@@ -648,6 +648,22 @@ ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT = (
 SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO = float(os.getenv("SELLING_TOP_REPLACEMENT_MIN_FORM_RATIO", "1.0"))
 SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS = float(os.getenv("SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS", "6"))
 
+# Cambiar al peor en vez de vender al top (a petición del usuario,
+# 2026-09-24: "si detecta la oportunidad de mercado para el mejor y hay
+# suficiente caja, en vez de vender el mejor, cambiar el peor por ese
+# candidato, de ese modo mejoramos la puntuación de la plantilla mucho más
+# rápido"). Cuando un top de su posición se iba a vender con sustituto (ver
+# arriba), se vende en su lugar al PEOR jugador vendible de esa posición
+# (sano, comprado por el bot, no puesto ya en venta, con al menos
+# SELLING_UPGRADE_MIN_HOLD_DAYS desde la compra y con peor forma que el top),
+# con el mismo sustituto fichado antes -- la caja ya está garantizada: el
+# sustituto tiene que ser pagable con el presupuesto actual, sin contar la
+# venta. El top se queda. Si no hay ningún peor vendible, se vende el top
+# como hasta ahora.
+ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD = (
+    os.getenv("ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD", "true").lower() == "true"
+)
+
 # Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
 # llegue a SELLING_MIN_PROFIT_PCT, incluso con pérdidas -- corte de

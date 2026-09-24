@@ -1669,3 +1669,84 @@ def test_decide_sales_market_upgrade_only_replaces_the_worst_of_the_position():
 
     assert [d["player_id"] for d in run(30)] == [10]
     assert run(1) == []  # el peor aún no es vendible -> no se vende al 15 en su lugar
+
+
+# --- Cambiar al peor en vez de vender al top (a petición del usuario,
+# 2026-09-24, ver docstring del módulo) ---
+
+
+def _top_swap_run(bought_extra, market=None, squad_tweak=None, baselines_extra=None, **kwargs):
+    """
+    Mismo escenario que `_top_trailing_stop_run` (top 30 con trailing-stop y
+    sustituto m1 en mercado), pero con más jugadores comprados por el bot
+    (`bought_extra`) que pueden venderse en su lugar. DEL: 30 (6), 31 (5),
+    35 (2), 36 (1).
+    """
+    squad = _del_squad_with_averages([6.0, 5.0, 2.0, 1.0])
+    squad[9]["value"] = 1_200_000
+    if squad_tweak:
+        squad_tweak({str(p["id"]): p for p in squad})
+    market = [_market_row("m1", "DEL", 1_000_000, 7.0)] if market is None else market
+    return decide_sales(
+        squad, formation="4-4-2", bought_by_bot={"30": 1_000_000, **bought_extra}, min_profit_pct=0.15,
+        budget=10_000_000, purchase_baselines={"30": {"peak_price": 1_600_000}, **(baselines_extra or {})},
+        trailing_stop_max_drawdown_pct=0.20, market_candidates=market, replacement_min_form_ratio=1.0,
+        replacement_min_listing_hours=6, protect_top_players_from_profit=True, top_players_require_replacement=True,
+        enable_weekend_lineup_guard=False, now=NOW, **kwargs,
+    )
+
+
+def test_decide_sales_top_with_replacement_sells_the_worst_instead():
+    decisions = _top_swap_run({"36": 500_000})
+    assert [d["player_id"] for d in decisions] == [36]
+    d = decisions[0]
+    assert d["replacement_target_player_id"] == "m1"
+    assert d["replacement_target_price"] == 1_000_000
+    assert d["swap_target_player_id"] is None
+    assert d["asking_price"] == 500_000 and d["purchase_price"] == 500_000
+    assert "en vez de vender al top 30" in d["reason"]
+    assert "corte por reversión desde máximo" in d["reason"]
+
+
+def test_decide_sales_top_swap_skips_worst_already_listed():
+    decisions = _top_swap_run(
+        {"35": 500_000, "36": 500_000}, squad_tweak=lambda by_id: by_id["36"].update(market=True)
+    )
+    assert [d["player_id"] for d in decisions] == [35]
+    assert decisions[0]["replacement_target_player_id"] == "m1"
+
+
+def test_decide_sales_top_swap_skips_recently_bought_and_injured():
+    recent = {"36": {"purchased_at": (NOW - timedelta(days=2)).isoformat()}}
+    decisions = _top_swap_run(
+        {"35": 500_000, "36": 500_000}, baselines_extra=recent,
+        squad_tweak=lambda by_id: by_id["35"].update(status="doubt"),
+    )
+    assert [d["player_id"] for d in decisions] == [30]  # ninguno vendible -> se vende el top, como antes
+
+
+def test_decide_sales_top_swap_falls_back_to_top_without_sellable_worst():
+    decisions = _top_swap_run({})
+    assert [d["player_id"] for d in decisions] == [30]
+    assert decisions[0]["replacement_target_player_id"] == "m1"
+
+
+def test_decide_sales_top_swap_can_be_disabled():
+    decisions = _top_swap_run({"36": 500_000}, top_swap_worst_instead=False)
+    assert [d["player_id"] for d in decisions] == [30]
+
+
+def test_decide_sales_top_swap_needs_a_replacement():
+    assert _top_swap_run({"36": 500_000}, market=[]) == []
+
+
+def test_decide_sales_top_swap_never_sells_the_same_player_twice():
+    """El peor también cumple su propio trailing-stop: una sola decisión por jugador."""
+    decisions = _top_swap_run(
+        {"36": 500_000},
+        squad_tweak=lambda by_id: by_id["36"].update(value=400_000),
+        baselines_extra={"36": {"peak_price": 1_000_000}},
+    )
+    ids = [d["player_id"] for d in decisions]
+    assert len(ids) == len(set(ids))
+    assert 36 in ids

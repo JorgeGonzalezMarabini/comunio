@@ -283,6 +283,22 @@ al top pero no acepta ofertas hasta que el sustituto esté en plantilla
 mercado sin ser nuestro, retira la venta y lo reevalúa
 (`db.models.sale_replacements`).
 
+Cambiar al peor en vez de vender al top (a petición del usuario,
+2026-09-24: "si detecta la oportunidad de mercado para el mejor y hay
+suficiente caja, en vez de vender el mejor, cambiar el peor por ese
+candidato, de ese modo mejoramos la puntuación de la plantilla mucho más
+rápido"; config.ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD). Si un top va a
+venderse con sustituto, ese sustituto tiene forma >= la del top, así que
+cambiarlo por el PEOR de la posición mejora mucho más la plantilla que
+cambiarlo por el propio top. Por eso se vende en su lugar al peor jugador
+vendible de su posición (`swap_worst_candidates_by_position()`: sano,
+comprado por el bot, no puesto ya en venta, con la antigüedad mínima de la
+vía 5 y con peor forma que el top), con el mismo flujo de
+`sale_replacements` (se ficha antes al sustituto y solo después se aceptan
+ofertas). La caja ya está garantizada por la condición del sustituto
+(pagable con el presupuesto actual, sin contar la venta). El top se queda.
+Si no hay ningún peor vendible, se vende el top como antes.
+
 Nota informativa de puntos ya extraídos (a petición del usuario, misma
 evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
 disparan una venta, si `purchase_baselines` trae "points_at_purchase" para
@@ -444,6 +460,48 @@ def rank_positions(
     return protected_ids, worst_id_by_position
 
 
+def swap_worst_candidates_by_position(
+    squad: list[dict],
+    form_scores: dict[str, float],
+    bought_by_bot: dict[str, int],
+    purchase_baselines: dict[str, dict],
+    min_hold_days: float,
+    now: datetime,
+    lineup_blocked_ids: set = frozenset(),
+) -> dict[str, list[dict]]:
+    """
+    Jugadores que pueden venderse en lugar de un top con sustituto (ver
+    docstring del módulo, "Cambiar al peor en vez de vender al top"), por
+    posición y del peor al mejor según `form_scores` (ver
+    `own_quality_scores()`). Solo los sanos (sin lesión ni duda), comprados
+    por el bot (`bought_by_bot`, con VM > 0), no puestos ya en venta, fuera
+    de `lineup_blocked_ids` (bloqueo de alineado en fin de semana) y con al
+    menos `min_hold_days` desde la compra ("purchased_at" de
+    `purchase_baselines`; sin fecha conocida, no bloquea -- mismo criterio
+    que la vía 5).
+    """
+    by_position: dict[str, list] = {}
+    for p in squad:
+        pid = str(p["id"])
+        if (
+            pid not in form_scores
+            or is_injury_status(p.get("status"))
+            or (bought_by_bot.get(pid) or 0) <= 0
+            or (p.get("value") or 0) <= 0
+            or p.get("market")
+            or pid in lineup_blocked_ids
+        ):
+            continue
+        purchased_at = parse_iso_datetime((purchase_baselines.get(pid) or {}).get("purchased_at"))
+        if purchased_at is not None and (now - purchased_at).total_seconds() / 86400 < min_hold_days:
+            continue
+        position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
+        by_position.setdefault(position, []).append(p)
+    for entries in by_position.values():
+        entries.sort(key=lambda p: form_scores[str(p["id"])])
+    return by_position
+
+
 def find_top_player_replacement(
     own_form: float | None,
     own_value: float,
@@ -546,6 +604,7 @@ def decide_sales(
     max_replacement_purchases: int = None,
     replacement_min_form_ratio: float = None,
     replacement_min_listing_hours: float = None,
+    top_swap_worst_instead: bool = None,
     now: datetime = None,
 ) -> list[dict]:
     """
@@ -691,6 +750,14 @@ def decide_sales(
     descuenta margen de banquillo (la venta solo se completa con el
     sustituto ya en plantilla). `replacement_min_form_ratio`/
     `replacement_min_listing_hours`: ver config.SELLING_TOP_REPLACEMENT_*.
+
+    `top_swap_worst_instead`: por defecto
+    config.ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD (ver docstring del módulo,
+    "Cambiar al peor en vez de vender al top"). Con sustituto encontrado
+    para un top, se vende en su lugar al peor jugador vendible de su
+    posición (ver `swap_worst_candidates_by_position()`), con el mismo
+    sustituto fichado antes; el top se queda. Si no hay ninguno, se vende
+    el top como hasta ahora.
 
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
@@ -848,6 +915,9 @@ def decide_sales(
         if upgrade_only_worst_per_position is None
         else upgrade_only_worst_per_position
     )
+    top_swap_worst_instead = (
+        config.ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD if top_swap_worst_instead is None else top_swap_worst_instead
+    )
     top_players_require_replacement = (
         config.ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT
         if top_players_require_replacement is None
@@ -908,6 +978,23 @@ def decide_sales(
         current = worst_protected_id_by_position.get(position)
         if current is None or form_scores[pid] < form_scores[current]:
             worst_protected_id_by_position[position] = pid
+
+    # Cambiar al peor en vez de vender al top (ver docstring del módulo):
+    # jugadores de cada posición que pueden venderse en lugar de un top con
+    # sustituto, del peor al mejor por forma.
+    swap_worst_by_position = (
+        swap_worst_candidates_by_position(
+            squad,
+            form_scores,
+            bought_by_bot,
+            purchase_baselines,
+            upgrade_min_hold_days,
+            now,
+            lineup_blocked_ids=own_lineup_ids if enable_weekend_lineup_guard and is_weekend_now else set(),
+        )
+        if top_swap_worst_instead and top_players_require_replacement
+        else {}
+    )
 
     candidates = []
     for player in squad:
@@ -1210,6 +1297,7 @@ def decide_sales(
     squad_ids = {str(p["id"]) for p in squad}
 
     unprotected_sold_positions: set = set()
+    decided_ids: set = set()
     decisions = []
     for (
         player,
@@ -1242,6 +1330,8 @@ def decide_sales(
     ) in candidates:
         if only_market_reason and str(player["id"]) not in approved_market_only_ids:
             continue  # no superó los refinamientos adicionales de la vía 5 (a/b/c/d, ver arriba)
+        if str(player["id"]) in decided_ids:
+            continue  # ya se vende en esta pasada en lugar de un top (ver swap_player abajo)
 
         position = FUTMONDO_POSITION_MAP.get(player.get("role"), player.get("role"))
 
@@ -1271,6 +1361,24 @@ def decide_sales(
                 continue  # sin sustituto válido: el top se queda
             reserved_replacement_ids.add(replacement["id"])
             replacement_budget_left -= replacement["price"]
+
+        # Con sustituto fichado antes, se vende al peor vendible de la
+        # posición en vez de al top (ver docstring del módulo); sin ninguno,
+        # se vende el top como hasta ahora.
+        swap_player = None
+        if replacement is not None:
+            own_form = form_scores.get(str(player["id"]))
+            swap_player = next(
+                (
+                    p
+                    for p in swap_worst_by_position.get(position, [])
+                    if str(p["id"]) != str(player["id"])
+                    and str(p["id"]) not in decided_ids
+                    and own_form is not None
+                    and form_scores[str(p["id"])] < own_form
+                ),
+                None,
+            )
 
         # Un jugador ya lesionado/sancionado no contaba como "disponible"
         # en assess_squad_depth, así que venderlo no empeora la cobertura
@@ -1358,6 +1466,37 @@ def decide_sales(
                 "libera la plaza de cara a esa oportunidad, aunque hoy no compense económicamente"
             )
 
+        if swap_player is not None:
+            swap_id = str(swap_player["id"])
+            swap_purchase_price = bought_by_bot[swap_id]
+            swap_value = swap_player.get("value", 0)
+            swap_profit = swap_value - swap_purchase_price
+            decided_ids.add(swap_id)
+            if swap_id not in protected_ids:
+                unprotected_sold_positions.add(position)
+            decisions.append(
+                {
+                    "player_id": swap_player["id"],
+                    "asking_price": swap_value,
+                    "purchase_price": swap_purchase_price,
+                    "profit": swap_profit,
+                    "profit_pct": swap_profit / swap_purchase_price,
+                    "reason": (
+                        f"cambio por el peor de {position} en vez de vender al top {player['id']} "
+                        f"({player.get('name')}, forma {form_scores[str(player['id'])]:.2f}), que cumplía -> "
+                        f"{reason}; con caja para fichar antes al sustituto {replacement['id']} (forma "
+                        f"{replacement['form']:.2f}, coste {replacement['price']}), se vende a {swap_id} "
+                        f"({swap_player.get('name')}, forma {form_scores[swap_id]:.2f}) y el top se queda; solo "
+                        f"se aceptarán ofertas tras fichar al sustituto {replacement['id']}"
+                    ),
+                    "swap_target_player_id": None,
+                    "swap_target_price": None,
+                    "replacement_target_player_id": replacement["id"],
+                    "replacement_target_price": replacement["price"],
+                }
+            )
+            continue
+
         if replacement is not None:
             reason += (
                 f"; top de {position}: solo se aceptarán ofertas tras fichar al sustituto {replacement['id']} "
@@ -1375,6 +1514,7 @@ def decide_sales(
         # guarda el swap en `db.models.sale_swap_targets` si viene relleno.
         if not requires_replacement:
             unprotected_sold_positions.add(position)
+        decided_ids.add(str(player["id"]))
         decisions.append(
             {
                 "player_id": player["id"],
