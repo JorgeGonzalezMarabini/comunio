@@ -292,8 +292,9 @@ venderse con sustituto, ese sustituto tiene forma >= la del top, así que
 cambiarlo por el PEOR de la posición mejora mucho más la plantilla que
 cambiarlo por el propio top. Por eso se vende en su lugar al peor jugador
 vendible de su posición (`swap_worst_candidates_by_position()`: sano,
-comprado por el bot, no puesto ya en venta, con la antigüedad mínima de la
-vía 5 y con peor forma que el top), con el mismo flujo de
+comprado por el bot, no puesto ya en venta y con peor forma que el top --
+sin la antigüedad mínima de la vía 5, a petición del usuario: aquí está
+justificado cambiar a un recién fichado), con el mismo flujo de
 `sale_replacements` (se ficha antes al sustituto y solo después se aceptan
 ofertas). La caja ya está garantizada por la condición del sustituto
 (pagable con el presupuesto actual, sin contar la venta). El top se queda.
@@ -464,9 +465,6 @@ def swap_worst_candidates_by_position(
     squad: list[dict],
     form_scores: dict[str, float],
     bought_by_bot: dict[str, int],
-    purchase_baselines: dict[str, dict],
-    min_hold_days: float,
-    now: datetime,
     lineup_blocked_ids: set = frozenset(),
 ) -> dict[str, list[dict]]:
     """
@@ -474,11 +472,11 @@ def swap_worst_candidates_by_position(
     docstring del módulo, "Cambiar al peor en vez de vender al top"), por
     posición y del peor al mejor según `form_scores` (ver
     `own_quality_scores()`). Solo los sanos (sin lesión ni duda), comprados
-    por el bot (`bought_by_bot`, con VM > 0), no puestos ya en venta, fuera
-    de `lineup_blocked_ids` (bloqueo de alineado en fin de semana) y con al
-    menos `min_hold_days` desde la compra ("purchased_at" de
-    `purchase_baselines`; sin fecha conocida, no bloquea -- mismo criterio
-    que la vía 5).
+    por el bot (`bought_by_bot`, con VM > 0), no puestos ya en venta y
+    fuera de `lineup_blocked_ids` (bloqueo de alineado en fin de semana).
+    Sin antigüedad mínima (a diferencia de la vía 5): el sustituto ya tiene
+    forma >= la del top, así que el cambio compensa aunque el peor sea un
+    recién fichado.
     """
     by_position: dict[str, list] = {}
     for p in squad:
@@ -491,9 +489,6 @@ def swap_worst_candidates_by_position(
             or p.get("market")
             or pid in lineup_blocked_ids
         ):
-            continue
-        purchased_at = parse_iso_datetime((purchase_baselines.get(pid) or {}).get("purchased_at"))
-        if purchased_at is not None and (now - purchased_at).total_seconds() / 86400 < min_hold_days:
             continue
         position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
         by_position.setdefault(position, []).append(p)
@@ -987,9 +982,6 @@ def decide_sales(
             squad,
             form_scores,
             bought_by_bot,
-            purchase_baselines,
-            upgrade_min_hold_days,
-            now,
             lineup_blocked_ids=own_lineup_ids if enable_weekend_lineup_guard and is_weekend_now else set(),
         )
         if top_swap_worst_instead and top_players_require_replacement

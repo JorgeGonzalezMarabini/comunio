@@ -654,8 +654,9 @@ SELLING_TOP_REPLACEMENT_MIN_LISTING_HOURS = float(os.getenv("SELLING_TOP_REPLACE
 # candidato, de ese modo mejoramos la puntuación de la plantilla mucho más
 # rápido"). Cuando un top de su posición se iba a vender con sustituto (ver
 # arriba), se vende en su lugar al PEOR jugador vendible de esa posición
-# (sano, comprado por el bot, no puesto ya en venta, con al menos
-# SELLING_UPGRADE_MIN_HOLD_DAYS desde la compra y con peor forma que el top),
+# (sano, comprado por el bot, no puesto ya en venta y con peor forma que el
+# top; sin SELLING_UPGRADE_MIN_HOLD_DAYS, a petición del usuario: aquí está
+# justificado cambiar a un recién fichado),
 # con el mismo sustituto fichado antes -- la caja ya está garantizada: el
 # sustituto tiene que ser pagable con el presupuesto actual, sin contar la
 # venta. El top se queda. Si no hay ningún peor vendible, se vende el top

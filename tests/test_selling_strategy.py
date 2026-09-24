@@ -1716,13 +1716,21 @@ def test_decide_sales_top_swap_skips_worst_already_listed():
     assert decisions[0]["replacement_target_player_id"] == "m1"
 
 
-def test_decide_sales_top_swap_skips_recently_bought_and_injured():
-    recent = {"36": {"purchased_at": (NOW - timedelta(days=2)).isoformat()}}
+def test_decide_sales_top_swap_ignores_min_hold_days():
+    """Un recién fichado sí puede cambiarse por el sustituto del top."""
+    recent = {"36": {"purchased_at": (NOW - timedelta(days=1)).isoformat()}}
+    decisions = _top_swap_run({"36": 500_000}, baselines_extra=recent)
+    assert [d["player_id"] for d in decisions] == [36]
+
+
+def test_decide_sales_top_swap_skips_injured_and_doubtful():
     decisions = _top_swap_run(
-        {"35": 500_000, "36": 500_000}, baselines_extra=recent,
-        squad_tweak=lambda by_id: by_id["35"].update(status="doubt"),
+        {"35": 500_000, "36": 500_000},
+        squad_tweak=lambda by_id: (by_id["35"].update(status="doubt"), by_id["36"].update(status="injured1")),
     )
-    assert [d["player_id"] for d in decisions] == [30]  # ninguno vendible -> se vende el top, como antes
+    # Sin peor sano: se vende el top con su sustituto, como antes (el 36
+    # lesionado sale igualmente por la vía de lesión, sin sustituto).
+    assert [(d["player_id"], d["replacement_target_player_id"]) for d in decisions] == [(30, "m1"), (36, None)]
 
 
 def test_decide_sales_top_swap_falls_back_to_top_without_sellable_worst():
