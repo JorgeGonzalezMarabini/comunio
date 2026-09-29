@@ -7,6 +7,7 @@ from db.models import (
     get_connection,
     get_open_bids,
     get_open_sales,
+    get_pending_swap_refills,
     get_pending_bid_amount,
     get_player_features,
     get_purchase_baselines,
@@ -467,3 +468,34 @@ def test_update_bid_status_reuses_caller_connection_inside_open_write_transactio
 
     with get_connection() as conn:
         assert conn.execute("SELECT status FROM bids WHERE id = ?", (bid_id,)).fetchone()["status"] == "cancelled"
+
+
+def _seed_swap_sale(player_id, position, status, created_at):
+    with get_connection() as conn:
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)",
+                     (player_id, player_id, "E", position, created_at))
+        cur = conn.execute("INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+                           (player_id, 1_000_000, status, created_at))
+        conn.execute(
+            "INSERT INTO sale_swap_targets (sale_id, player_id, target_player_id, target_price,"
+            " original_target_player_id, retargeted, updated_at) VALUES (?,?,?,?,?,0,?)",
+            (cur.lastrowid, player_id, "objetivo", 18_000_000, "objetivo", created_at),
+        )
+
+
+def test_get_pending_swap_refills_only_recent_sold_swaps_without_bid_in_position(tmp_db):
+    now = "2026-09-29T08:00:00+00:00"
+    _seed_swap_sale("por_vendido", "POR", "sold", "2026-09-29T05:00:00+00:00")
+    _seed_swap_sale("def_listado", "DEF", "listed", "2026-09-29T05:00:00+00:00")  # aún sin vender
+    _seed_swap_sale("med_viejo", "MED", "sold", "2026-09-20T05:00:00+00:00")  # fuera de la ventana
+    _seed_swap_sale("del_repuesto", "DEL", "sold", "2026-09-29T05:00:00+00:00")
+    with get_connection() as conn:
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES ('nuevo_del','n','E','DEL',?)", (now,))
+        conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES ('nuevo_por','n','E','POR',?)", (now,))
+        conn.execute("INSERT INTO bids (player_id, amount, status, created_at) VALUES ('nuevo_del', 1, 'placed', ?)", (now,))
+        conn.execute("INSERT INTO bids (player_id, amount, status, created_at) VALUES ('nuevo_por', 1, 'lost', ?)", (now,))
+
+    refills = get_pending_swap_refills(3, now)
+
+    # La puja 'lost' por un POR no cuenta como reposición; la 'placed' por un DEL sí.
+    assert [(r["player_id"], r["position"]) for r in refills] == [("por_vendido", "POR")]

@@ -240,6 +240,7 @@ from db.models import (
     get_league_setting,
     get_open_bids,
     get_open_sale_replacements,
+    get_pending_swap_refills,
     get_pending_bid_amount,
     get_player_features,
     save_league_setting,
@@ -601,15 +602,63 @@ def run():
             decision["reason"] = f"sustituto del top {own_top_id} puesto en venta; {decision['reason']}"
             replacement_decisions.append(decision)
     replacement_ids = {d["player_id"] for d in replacement_decisions}
-    replacement_committed = sum(d["amount"] for d in replacement_decisions)
 
-    decisions = replacement_decisions + decide_bids_for_market(
-        [c for c in prioritized if c["id"] not in replacement_ids],
+    # Reposición de swaps ya completados (ver db.models.
+    # get_pending_swap_refills y config.SWAP_REFILL_MAX_AGE_DAYS): la plaza
+    # que liberó una venta por "oportunidad de mercado" es para su MISMA
+    # posición -- si no, se la llevaba el mejor candidato del mercado fuera
+    # cual fuera su posición y el swap vendía sin comprar. Primero el
+    # objetivo registrado (suele haber expirado ya, ver config.
+    # SELLING_ASSUMED_SALE_RESOLUTION_HOURS), si no el candidato de esa
+    # posición con mejor score de alineación que mejore al titular más flojo
+    # de hoy. Sin umbral de score de puja (run_sales ya validó la mejora) y
+    # con el precio del objetivo como tope mínimo por jugador.
+    refill_decisions = []
+    for refill in get_pending_swap_refills(config.SWAP_REFILL_MAX_AGE_DAYS, datetime.now(timezone.utc).isoformat()):
+        if len(replacement_decisions) + len(refill_decisions) >= available_roster_slots:
+            break
+        position = refill["position"]
+        threshold = upgrade_thresholds.get(position)
+        taken_ids = replacement_ids | {d["player_id"] for d in refill_decisions}
+        options = sorted(
+            (
+                c
+                for c in prioritized
+                if c.get("position") == position
+                and c["id"] not in taken_ids
+                and (threshold is None or c.get("lineup_score", float("-inf")) > threshold)
+            ),
+            key=lambda c: (str(c["id"]) != str(refill["target_player_id"]), -c.get("lineup_score", 0.0)),
+        )
+        committed_now = sum(d["amount"] for d in replacement_decisions + refill_decisions)
+        for c in options:
+            decision = decide_bid(
+                c,
+                remaining_budget,
+                already_risked + committed_now,
+                min_score_threshold=float("-inf"),
+                pending_committed=pending_committed + committed_now,
+                player_cap=max(player_cap, refill["target_price"] or 0),
+            )
+            if decision is not None:
+                decision["reason"] = (
+                    f"reposición de {position} tras vender a {refill['player_id']} por oportunidad de mercado; "
+                    f"{decision['reason']}"
+                )
+                refill_decisions.append(decision)
+                break
+
+    priority_decisions = replacement_decisions + refill_decisions
+    priority_ids = {d["player_id"] for d in priority_decisions}
+    priority_committed = sum(d["amount"] for d in priority_decisions)
+
+    decisions = priority_decisions + decide_bids_for_market(
+        [c for c in prioritized if c["id"] not in priority_ids],
         remaining_budget,
-        already_risked + replacement_committed,
+        already_risked + priority_committed,
         min_score_threshold=min_score_threshold,
-        max_bids=max(0, available_roster_slots - len(replacement_decisions)),
-        pending_committed=pending_committed + replacement_committed,
+        max_bids=max(0, available_roster_slots - len(priority_decisions)),
+        pending_committed=pending_committed + priority_committed,
         player_cap=player_cap,
     )
 

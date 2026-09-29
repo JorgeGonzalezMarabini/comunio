@@ -898,6 +898,15 @@ SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION = float(os.getenv("SELLING_UPGRADE_M
 # no se acepta). 12h deja actuar esta vía en la primera mitad del ciclo.
 SELLING_ASSUMED_SALE_RESOLUTION_HOURS = float(os.getenv("SELLING_ASSUMED_SALE_RESOLUTION_HOURS", "12"))
 
+# Reposición tras un swap completado (jobs/run_market.py, ver
+# db.models.get_pending_swap_refills): cuando una venta por "oportunidad
+# de mercado" se ha vendido, run_market puja PRIMERO por el mejor candidato
+# de esa misma posición que mejore el once, con el precio del objetivo del
+# swap como tope mínimo por jugador (run_sales ya validó margen, eficiencia
+# y asequibilidad contra ese precio). Pasados estos días desde el listado,
+# la plaza vuelve al orden normal de pujas.
+SWAP_REFILL_MAX_AGE_DAYS = float(os.getenv("SWAP_REFILL_MAX_AGE_DAYS", "3"))
+
 # Bloqueo defensivo (a petición del usuario, 2026-08-23): en fin de semana
 # (sábado/domingo, aproximación por día de la semana -- no distingue hora
 # exacta de los partidos), NUNCA se pone en venta a un jugador que esté en

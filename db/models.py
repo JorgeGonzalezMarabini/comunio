@@ -844,6 +844,42 @@ def update_sale_replacement_status(sale_id: int, status: str, now: str) -> None:
         )
 
 
+def get_pending_swap_refills(max_age_days: float, now: str) -> list[dict]:
+    """
+    Swaps de venta YA COMPLETADOS (`sales.status = 'sold'` con fila en
+    `sale_swap_targets`) cuya plaza sigue sin reponer: ninguna puja
+    'placed'/'won' por un jugador de la MISMA posición desde que se listó
+    la venta. Para jobs/run_market.py, que puja primero por esa posición --
+    sin esto, la plaza liberada por "oportunidad de mercado" se la llevaba
+    el mejor candidato del mercado fuera cual fuera su posición (caso real
+    2026-09-29: se vendía a Szczesny por Ryan/Oblak y la plaza iba a un MED).
+
+    Solo ventas listadas hace menos de `max_age_days` (una oportunidad vieja
+    ya no justifica saltarse el orden normal de pujas). Una puja 'lost' o
+    'failed' no cuenta como reposición: se reintenta en la siguiente pasada.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.sale_id, t.player_id, sold.position, t.target_player_id, t.target_price
+            FROM sale_swap_targets t
+            JOIN sales s ON s.id = t.sale_id
+            JOIN players sold ON sold.id = t.player_id
+            WHERE s.status = 'sold'
+              AND julianday(?) - julianday(s.created_at) <= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM bids b JOIN players bp ON bp.id = b.player_id
+                  WHERE bp.position = sold.position
+                    AND b.status IN ('placed', 'won')
+                    AND b.created_at > s.created_at
+              )
+            ORDER BY t.sale_id
+            """,
+            (now, max_age_days),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_real_lineup_check(team: str, match_date: str) -> dict | None:
     """
     Lee la comprobación de alineación real ya cacheada para (team, match_date)

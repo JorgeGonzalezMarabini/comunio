@@ -216,6 +216,9 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
       - trend: forma ponderada - average_points (o last_points -
         average_points si no hay `recent_points`). Positivo si el
         rendimiento reciente es mejor que su media de temporada.
+        Ponderada por la participación real (minutes_played_ratio de
+        abajo, 0..1) cuando hay dato de minutos: sin jugar, la resta no
+        indica mejora sino ausencia.
       - xg: xG por 90 minutos (xg / minutes_played * 90). Comparar xG total
         penalizaría a quien ha jugado menos minutos sin ser peor jugador.
         Con pocos minutos jugados, esa extrapolación a 90' es ruido -- un
@@ -268,7 +271,10 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
         EQUIPO, no del jugador individual -- todos los jugadores de un
         mismo equipo comparten el mismo valor -- pero solo se aplica de
         verdad a POR/DEF en `score_player` (ver su docstring), que es a
-        quienes Futmondo puntúa extra por portería a cero. Se normaliza
+        quienes Futmondo puntúa extra por portería a cero. También
+        ponderada por la participación real del jugador (como la
+        tendencia): un suplente que no juega no suma las porterías a
+        cero que consigue el titular. Se normaliza
         aquí igual que el resto (por grupo de posición) para que
         `score_player` no tenga que normalizar nada por su cuenta.
     """
@@ -344,6 +350,19 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
             recent_ratio = min(1.0, max(0.0, recent_ratio))
             w_recent = config.EVALUATOR_RECENT_MINUTES_WEIGHT
             minutes_ratio[i] = w_recent * recent_ratio + (1 - w_recent) * minutes_ratio[i]
+
+        # Participación real: la portería a cero es del EQUIPO y la
+        # tendencia sale de una resta (forma - media) -- sin ponderar por
+        # minutos, un suplente que no juega heredaba las porterías a cero
+        # del titular y, con media negativa y ceros recientes, la tendencia
+        # MÁXIMA de su grupo (caso real 2026-09-29: Szczesny, 39' en 7
+        # jornadas y media -2, salía por encima de Cárdenas y bloqueaba el
+        # swap por Ryan/Oblak). Sin dato de minutos (sin cruce con
+        # Understat) no se toca -- no confundir "sin dato" con "no juega".
+        if p.get("minutes_played") is not None:
+            participation = min(1.0, max(0.0, minutes_ratio[i]))
+            clean_sheet_rate[i] *= participation
+            trend[i] *= participation
 
     groups_idx: dict = {}
     for i, p in enumerate(raw_players):

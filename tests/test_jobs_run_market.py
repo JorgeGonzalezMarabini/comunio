@@ -1530,3 +1530,58 @@ def test_run_market_bids_first_for_pending_replacement_of_listed_top(tmp_db, mon
     with get_connection() as conn:
         row = conn.execute("SELECT reason FROM bids WHERE player_id = '4069'").fetchone()
     assert "sustituto del top 25" in row["reason"]
+
+
+@pytest.mark.parametrize("with_swap_sale, expected", [(True, "700"), (False, "800")])
+def test_run_market_refills_position_of_completed_swap_before_other_positions(tmp_db, with_swap_sale, expected):
+    """
+    La plaza que liberó una venta por "oportunidad de mercado" ya vendida
+    es para su misma posición (db.models.get_pending_swap_refills): con una
+    sola plaza, se puja por el portero aunque el centrocampista tenga mejor
+    score de puja -- sin ese swap, gana el centrocampista como siempre.
+    """
+    from datetime import datetime, timezone
+
+    _seed_player("700", "POR", price=2_000_000, points=5)
+    _seed_player("800", "MED", price=2_000_000, points=20)
+    if with_swap_sale:
+        sold_at = datetime.now(timezone.utc).isoformat()
+        _seed_player("vendido", "POR", price=1_000_000, points=0, on_market=0)
+        with get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+                ("vendido", 1_000_000, "sold", sold_at),
+            )
+            conn.execute(
+                "INSERT INTO sale_swap_targets (sale_id, player_id, target_player_id, target_price,"
+                " original_target_player_id, retargeted, updated_at) VALUES (?,?,?,?,?,0,?)",
+                (cur.lastrowid, "vendido", "expirado", 2_000_000, "expirado", sold_at),
+            )
+
+    placed = []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 20_000_000, "configuration": {"maxPlayersInRoster": 1}}}
+
+        def get_market(self):
+            return {"answer": [
+                {"id": "700", "slug": "jugador-700", "value": 2_000_000, "computer": True},
+                {"id": "800", "slug": "jugador-800", "value": 2_000_000, "computer": True},
+            ]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            placed.append(player_id)
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify"):
+        run_market.run()
+
+    assert placed == [expected]
+    if with_swap_sale:
+        with get_connection() as conn:
+            row = conn.execute("SELECT reason FROM bids WHERE player_id = '700'").fetchone()
+        assert "reposición de POR tras vender a vendido" in row["reason"]

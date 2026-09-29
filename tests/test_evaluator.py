@@ -318,6 +318,40 @@ def test_normalize_pool_clean_sheet_rate_from_team_clean_sheets_and_team_games()
     assert by_id["def_goleado"]["clean_sheet_rate"] == 0.0
 
 
+def test_normalize_pool_weights_clean_sheets_and_trend_by_real_participation():
+    """
+    Regresión (2026-09-29, Szczesny): un portero suplente que casi no juega
+    no hereda las porterías a cero de su equipo ni saca tendencia máxima por
+    tener media negativa y ceros recientes -- ambas señales se ponderan por
+    sus minutos reales, y ya no supera a un portero que sí juega.
+    """
+    raw = [
+        {"id": "suplente", "position": "POR", "price": 1_000_000, "average_points": -2.0,
+         "recent_points": [0, 0, 0, -2, 0], "minutes_played": 39, "team_games": 7, "team_clean_sheets": 3},
+        {"id": "titular", "position": "POR", "price": 1_000_000, "average_points": 1.7,
+         "recent_points": [1, 2, 0, 0, 0], "minutes_played": 630, "team_games": 7, "team_clean_sheets": 0},
+        {"id": "top", "position": "POR", "price": 20_000_000, "average_points": 5.7,
+         "recent_points": [7, 2, 6, 6, 7], "minutes_played": 630, "team_games": 7, "team_clean_sheets": 3},
+    ]
+    by_id = {p["id"]: p for p in normalize_pool(raw)}
+    assert by_id["suplente"]["clean_sheet_rate"] < 0.1
+    assert by_id["top"]["clean_sheet_rate"] == 1.0
+    assert by_id["suplente"]["trend"] < by_id["top"]["trend"]
+
+    scores = {p["id"]: p["score"] for p in evaluate_players(raw, weights=config.LINEUP_EVALUATOR_WEIGHTS)}
+    assert scores["suplente"] < scores["titular"] < scores["top"]
+
+
+def test_normalize_pool_keeps_clean_sheets_without_minutes_data():
+    """Sin dato de minutos (sin cruce con Understat) no se pondera: "sin dato" no es "no juega"."""
+    raw = [
+        {"id": "a", "position": "DEF", "price": 1_000_000, "average_points": 5.0, "team_games": 10, "team_clean_sheets": 8},
+        {"id": "b", "position": "DEF", "price": 1_000_000, "average_points": 5.0, "team_games": 10, "team_clean_sheets": 1},
+    ]
+    by_id = {p["id"]: p for p in normalize_pool(raw)}
+    assert by_id["a"]["clean_sheet_rate"] == 1.0
+
+
 def test_normalize_pool_clean_sheet_rate_zero_without_team_games():
     """Sin `team_games` (0 o ausente) no se puede calcular la tasa -- 0, igual que el resto de features sin dato."""
     raw = [{"id": "a", "position": "DEF", "price": 1_000_000, "average_points": 5.0, "team_clean_sheets": 5}]
