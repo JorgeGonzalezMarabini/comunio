@@ -1127,3 +1127,40 @@ def test_run_sales_keeps_offers_blocked_if_market_cannot_be_read(tmp_db):
 
     assert accept_calls == [] and cancel_calls == []
     assert _replacement_status(sale_id) == ("pending", "listed")
+
+
+def test_resolve_swap_target_skips_equivalent_with_poor_price_efficiency(tmp_db, monkeypatch):
+    """
+    El reobjetivo aplica el mismo filtro de eficiencia de precio que el
+    listado original: un equivalente mucho mejor pero carísimo ("caro",
+    70M) no vale, y se pasa al siguiente asumible ("asumible", 3M) -- antes
+    se reapuntaba al carísimo y jobs/run_market.py repondría pujando por él.
+    """
+    from datetime import datetime, timezone
+
+    from db.models import get_swap_target_for_player
+
+    now = datetime(2026, 9, 29, 6, 0, tzinfo=timezone.utc)
+    runway = {"caro": "2026-09-30T03:50:00+00:00", "asumible": "2026-09-30T03:50:00+00:00"}
+    with get_connection() as conn:
+        for pid in ("propio", "caro", "asumible", "expirado"):
+            conn.execute("INSERT INTO players (id, name, team, position, updated_at) VALUES (?,?,?,?,?)",
+                         (pid, pid, "E", "POR", now.isoformat()))
+        cur = conn.execute("INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+                           ("propio", 1_000_000, "listed", now.isoformat()))
+        conn.execute(
+            "INSERT INTO sale_swap_targets (sale_id, player_id, target_player_id, target_price,"
+            " original_target_player_id, retargeted, updated_at) VALUES (?,?,?,?,?,0,?)",
+            (cur.lastrowid, "propio", "expirado", 5_000_000, "expirado", now.isoformat()),
+        )
+    scores = {"propio": 0.1, "caro": 1.0, "asumible": 0.6}
+    monkeypatch.setattr(run_sales, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
+    own = [{"id": "propio", "position": "POR", "price": 1_000_000}]
+    market = [
+        {"id": "caro", "position": "POR", "price": 70_000_000},
+        {"id": "asumible", "position": "POR", "price": 3_000_000},
+    ]
+
+    swap_target = get_swap_target_for_player("propio")
+    assert run_sales._resolve_swap_target(swap_target, "POR", own, market, runway, now) is True
+    assert get_swap_target_for_player("propio")["target_player_id"] == "asumible"

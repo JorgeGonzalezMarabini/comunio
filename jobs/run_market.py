@@ -611,8 +611,9 @@ def run():
     # objetivo registrado (suele haber expirado ya, ver config.
     # SELLING_ASSUMED_SALE_RESOLUTION_HOURS), si no el candidato de esa
     # posición con mejor score de alineación que mejore al titular más flojo
-    # de hoy. Sin umbral de score de puja (run_sales ya validó la mejora) y
-    # con el precio del objetivo como tope mínimo por jugador.
+    # de hoy. Sin umbral de score de puja (run_sales ya validó la mejora);
+    # el tope dinámico por jugador solo puede subir hasta el precio del
+    # objetivo y como mucho config.SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT.
     refill_decisions = []
     for refill in get_pending_swap_refills(config.SWAP_REFILL_MAX_AGE_DAYS, datetime.now(timezone.utc).isoformat()):
         if len(replacement_decisions) + len(refill_decisions) >= available_roster_slots:
@@ -638,7 +639,10 @@ def run():
                 already_risked + committed_now,
                 min_score_threshold=float("-inf"),
                 pending_committed=pending_committed + committed_now,
-                player_cap=max(player_cap, refill["target_price"] or 0),
+                player_cap=min(
+                    max(player_cap, refill["target_price"] or 0),
+                    int(player_cap * (1 + config.SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT)),
+                ),
             )
             if decision is not None:
                 decision["reason"] = (

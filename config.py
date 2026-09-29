@@ -901,11 +901,19 @@ SELLING_ASSUMED_SALE_RESOLUTION_HOURS = float(os.getenv("SELLING_ASSUMED_SALE_RE
 # Reposición tras un swap completado (jobs/run_market.py, ver
 # db.models.get_pending_swap_refills): cuando una venta por "oportunidad
 # de mercado" se ha vendido, run_market puja PRIMERO por el mejor candidato
-# de esa misma posición que mejore el once, con el precio del objetivo del
-# swap como tope mínimo por jugador (run_sales ya validó margen, eficiencia
-# y asequibilidad contra ese precio). Pasados estos días desde el listado,
-# la plaza vuelve al orden normal de pujas.
+# de esa misma posición que mejore el once. Pasados estos días desde el
+# listado, la plaza vuelve al orden normal de pujas.
 SWAP_REFILL_MAX_AGE_DAYS = float(os.getenv("SWAP_REFILL_MAX_AGE_DAYS", "3"))
+
+# Cuánto puede SUPERAR esa puja de reposición el tope dinámico por jugador
+# (engine.bidding_strategy.dynamic_player_cap), y solo hasta el precio del
+# objetivo del swap: tope = min(max(tope_dinámico, precio_objetivo),
+# tope_dinámico * (1 + este %)). Nunca un salto libre del tope (a petición
+# del usuario, 2026-09-29: "que pasaría si saliese un jugador de 100
+# millones") -- run_sales ya validó el objetivo contra su precio, pero eso
+# no debe bastar para pujar lo que sea. Caso que lo motiva: Oblak a 22.1M
+# con tope dinámico de 18.4M (+20%).
+SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT = float(os.getenv("SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT", "0.25"))
 
 # Bloqueo defensivo (a petición del usuario, 2026-08-23): en fin de semana
 # (sábado/domingo, aproximación por día de la semana -- no distingue hora

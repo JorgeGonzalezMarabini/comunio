@@ -1585,3 +1585,53 @@ def test_run_market_refills_position_of_completed_swap_before_other_positions(tm
         with get_connection() as conn:
             row = conn.execute("SELECT reason FROM bids WHERE player_id = '700'").fetchone()
         assert "reposición de POR tras vender a vendido" in row["reason"]
+
+
+@pytest.mark.parametrize("candidate_price, expect_bid", [(12_000_000, True), (50_000_000, False)])
+def test_run_market_refill_cap_overshoot_is_bounded(tmp_db, monkeypatch, candidate_price, expect_bid):
+    """
+    La reposición tras un swap solo sube el tope dinámico hasta el precio
+    del objetivo y como mucho config.SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT
+    (25%): con tope 10M, 12M se puja; 50M no, aunque sea el propio objetivo
+    del swap y haya saldo de sobra.
+    """
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(run_market, "dynamic_player_cap", lambda *a, **k: 10_000_000)
+    _seed_player("700", "POR", price=candidate_price, points=8)
+    sold_at = datetime.now(timezone.utc).isoformat()
+    _seed_player("vendido", "POR", price=1_000_000, points=0, on_market=0)
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, created_at) VALUES (?,?,?,?)",
+            ("vendido", 1_000_000, "sold", sold_at),
+        )
+        conn.execute(
+            "INSERT INTO sale_swap_targets (sale_id, player_id, target_player_id, target_price,"
+            " original_target_player_id, retargeted, updated_at) VALUES (?,?,?,?,?,0,?)",
+            (cur.lastrowid, "vendido", "700", candidate_price, "700", sold_at),
+        )
+
+    placed = []
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": []}
+
+        def get_information(self):
+            return {"answer": {"budget": 500_000_000, "configuration": {"maxPlayersInRoster": 1}}}
+
+        def get_market(self):
+            return {"answer": [{"id": "700", "slug": "jugador-700", "value": candidate_price, "computer": True}]}
+
+        def place_bid(self, player_id, player_slug, amount, is_clause=False):
+            placed.append((player_id, amount))
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_market.FutmondoClient", FakeClient), patch("jobs.run_market.notify"):
+        run_market.run()
+
+    if expect_bid:
+        assert placed == [("700", 12_000_000)]  # tope 12.5M, puja al precio (prima topada)
+    else:
+        assert placed == []

@@ -328,9 +328,10 @@ def _resolve_swap_target(
        que SÍ siguen listados en vivo con margen de tiempo suficiente (para
        no proponer un retargeteo sobre un candidato igual de agotado). Si
        aparece uno que además supera `config.
-       SELLING_UPGRADE_AVAILABLE_MIN_MARGIN` sobre el score propio (mismo
-       umbral que exigió el swap original) y no es el mismo candidato ya
-       descartado, se persiste (`db.models.retarget_swap_target()`) y se
+       SELLING_UPGRADE_AVAILABLE_MIN_MARGIN` sobre el score propio y la
+       eficiencia de precio `config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_
+       MILLION` (mismos umbrales que exigió el swap original; de mejor a
+       peor score) y no es el mismo candidato ya descartado, se persiste (`db.models.retarget_swap_target()`) y se
        devuelve True -- a todos los efectos, el swap sigue en marcha, solo
        cambió de objetivo concreto.
     3. Si tampoco hay equivalente, el swap se da por muerto -- False.
@@ -348,16 +349,40 @@ def _resolve_swap_target(
     live_candidates = [
         c for c in market_candidates if _has_enough_runway(c["id"], live_market_expirations, now, min_hours)
     ]
-    own_scores, best_by_position = score_market_upgrade_candidates(own_squad_features, live_candidates)
-    own_score = own_scores.get(str(swap_target["player_id"]))
-    replacement = best_by_position.get(position)
-    if (
-        own_score is None
-        or replacement is None
-        or str(replacement["id"]) == str(swap_target["target_player_id"])  # el mismo agotado, no vale
-        or (replacement["score"] - own_score) < config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN
-    ):
-        return False  # ningún equivalente disponible con margen suficiente -- el swap se da por muerto
+    scores, _ = score_market_upgrade_candidates(own_squad_features, live_candidates)
+    own_score = scores.get(str(swap_target["player_id"]))
+    if own_score is None:
+        return False
+    own_price = next(
+        (p.get("price") or 0 for p in own_squad_features if str(p["id"]) == str(swap_target["player_id"])), 0
+    )
+
+    # Mismos filtros de calidad Y precio que exigió el listado original
+    # (margen mínimo y eficiencia por millón extra, ver engine/
+    # selling_strategy.py) -- sin el de precio, el reobjetivo podía apuntar
+    # a un jugador carísimo que el listado nunca habría aceptado, y
+    # jobs/run_market.py repondría la posición pujando por él. Se prueba de
+    # mejor a peor score: si el mejor es inasumible, vale uno algo peor.
+    def _qualifies(candidate: dict) -> bool:
+        margin = scores[str(candidate["id"])] - own_score
+        if margin < config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN:
+            return False
+        extra_cost = (candidate.get("price") or 0) - own_price
+        return extra_cost <= 0 or margin / (extra_cost / 1_000_000) >= config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION
+
+    replacement = next(
+        (
+            c
+            for c in sorted(live_candidates, key=lambda c: -scores.get(str(c["id"]), float("-inf")))
+            if c.get("position") == position
+            and str(c["id"]) != str(swap_target["target_player_id"])  # el mismo agotado, no vale
+            and str(c["id"]) in scores
+            and _qualifies(c)
+        ),
+        None,
+    )
+    if replacement is None:
+        return False  # ningún equivalente disponible con margen y precio asumibles -- el swap se da por muerto
 
     retarget_swap_target(
         swap_target["sale_id"], str(replacement["id"]), replacement.get("price") or 0, now.isoformat()
