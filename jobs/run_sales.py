@@ -837,6 +837,7 @@ def run():
                         decision["swap_target_player_id"],
                         decision.get("swap_target_price") or 0,
                         now,
+                        conn=conn,
                     )
                 if decision.get("replacement_target_player_id"):
                     save_sale_replacement(
@@ -845,6 +846,7 @@ def run():
                         decision["replacement_target_player_id"],
                         decision.get("replacement_target_price") or 0,
                         now,
+                        conn=conn,
                     )
                 listed.append(decision)
             except (requests.RequestException, FutmondoOfferError) as e:

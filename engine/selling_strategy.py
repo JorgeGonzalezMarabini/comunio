@@ -122,7 +122,9 @@ filtros no aplican -- ver `reason` más abajo):
      por posición y ejecución vía esta vía -- si varios candidatos propios
      de la misma posición cualifican, se prioriza el de mayor margen de
      score (peor suplente relativo); el resto se descarta esta vez, igual
-     que ya ocurre con el margen de banquillo.
+     que ya ocurre con el margen de banquillo. Solo cuenta una venta ya
+     APROBADA por b)/c)/d): si el preferido de una posición cae en alguno
+     de ellos, el siguiente de esa posición sigue optando a la plaza.
 
   b) Eficiencia marginal de precio
      (`upgrade_min_score_per_extra_million`, config.
@@ -1229,10 +1231,10 @@ def decide_sales(
     # candidatos donde "oportunidad de mercado" es la ÚNICA vía que
     # aplica. Se resuelven en un pre-paso propio, independiente del orden
     # por plusvalía de arriba (aquí manda el margen de score, a petición
-    # del usuario): a) como mucho `max_upgrade_sales_per_position` por
-    # posición (el de mayor margen se queda la plaza), luego b)+c)+d) en
-    # ese mismo orden de mayor margen, para que la oportunidad más clara
-    # se quede el presupuesto compartido si varias compiten a la vez.
+    # del usuario): en orden de mayor margen, cada candidato pasa b)+c)+d)
+    # y, si los supera, ocupa una de las `max_upgrade_sales_per_position`
+    # plazas de su posición (a) -- la oportunidad más clara se queda el
+    # presupuesto compartido si varias compiten a la vez.
     # No protegidos primero: en su posición se quedan la plaza de (a) antes
     # que el peor de los protegidos, aunque este tenga más margen.
     market_only_entries = [
@@ -1242,17 +1244,17 @@ def decide_sales(
     ]
     market_only_entries.sort(key=lambda t: (t[4], -t[0]))
 
+    # (a) cuenta solo ventas APROBADAS (tras b/c/d), no candidatos
+    # preseleccionados: si el primero de una posición cae en b/c/d, el
+    # siguiente de esa misma posición aún puede quedarse la plaza (caso
+    # real 2026-09-29: Szczesny, no protegido, se quedaba la única plaza
+    # de POR y caía en (b); Cárdenas sí pasaba (b) pero nunca se evaluaba).
     count_by_position = {}
-    shortlisted = []
+    approved_market_only_ids = set()
+    available_budget = max(0, budget)
     for margin, position_key, player, best_candidate, _protected in market_only_entries:
         if count_by_position.get(position_key, 0) >= max_upgrade_sales_per_position:
             continue  # ya se autorizó el máximo para esta posición esta vez (a)
-        count_by_position[position_key] = count_by_position.get(position_key, 0) + 1
-        shortlisted.append((margin, position_key, player, best_candidate))
-
-    approved_market_only_ids = set()
-    available_budget = max(0, budget)
-    for margin, position_key, player, best_candidate in shortlisted:
         best_candidate = best_candidate or {}
         target_price = best_candidate.get("price") or 0
         own_price = player.get("value", 0)
@@ -1275,6 +1277,7 @@ def decide_sales(
 
         available_budget = prospective_budget - target_price  # (c) se "reserva" para el resto de esta pasada
         approved_market_only_ids.add(str(player["id"]))
+        count_by_position[position_key] = count_by_position.get(position_key, 0) + 1
 
     # Margen de suplentes sanos por posición ANTES de vender nada (ver
     # engine.squad_risk.assess_squad_depth) — se va descontando según se

@@ -300,6 +300,26 @@ def get_connection():
         conn.close()
 
 
+def _execute_write(conn, sql: str, params: tuple) -> None:
+    """
+    Escritura puntual reutilizando la conexión del llamador si la hay.
+
+    Imprescindible cuando el llamador ya tiene una transacción de escritura
+    abierta (p.ej. el bucle de listados de jobs/run_sales.py, o los de
+    swap/reajuste de jobs/run_market.py): SQLite solo admite un escritor a
+    la vez, así que abrir una SEGUNDA conexión para escribir mientras la
+    primera sigue sin commitear falla con "database is locked" (detectado
+    2026-09-29 simulando la vía de oportunidad de mercado de run_sales, que
+    hasta entonces nunca se había llegado a ejecutar en producción). Sin
+    `conn`, abre y commitea su propia conexión como antes.
+    """
+    if conn is not None:
+        conn.execute(sql, params)
+        return
+    with get_connection() as own_conn:
+        own_conn.execute(sql, params)
+
+
 def _ensure_column(conn, table: str, column: str, coltype: str) -> None:
     """
     Migración mínima para una columna nueva en una tabla que `CREATE TABLE
@@ -461,16 +481,18 @@ def get_open_bids() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def update_bid_status(bid_id: int, status: str) -> None:
+def update_bid_status(bid_id: int, status: str, conn=None) -> None:
     """
     Actualiza el status de una puja ya persistida. Usado tanto por la
     reconciliación (jobs.sync_data._reconcile_bids, -> 'won'/'lost') como
     por engine.bidding_strategy.find_cancel_swap_candidates vía
     jobs.run_market.run() (-> 'cancelled', ver TODO.md #13 y
     clients.futmondo_client.cancel_bid).
+
+    `conn`: conexión ya abierta del llamador, si la hay -- ver
+    `_execute_write()`.
     """
-    with get_connection() as conn:
-        conn.execute("UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
+    _execute_write(conn, "UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
 
 
 def get_won_bid_prices() -> dict[str, int]:
@@ -698,7 +720,7 @@ def mark_offer_accepted(futmondo_bid_id) -> None:
         )
 
 
-def save_swap_target(sale_id: int, player_id, target_player_id, target_price: int, now: str) -> None:
+def save_swap_target(sale_id: int, player_id, target_player_id, target_price: int, now: str, conn=None) -> None:
     """
     Registra el candidato de mercado que motivó una venta por "oportunidad
     de mercado" (ver docstring de `sale_swap_targets` más arriba) -- llamar
@@ -711,16 +733,19 @@ def save_swap_target(sale_id: int, player_id, target_player_id, target_price: in
     INSERT OR IGNORE por `sale_id` (PK): no debería llamarse dos veces para
     el mismo `sale_id`, pero si ocurriera (reintento), no pisa la fila ya
     existente.
+
+    `conn`: conexión ya abierta del llamador, si la hay -- ver
+    `_execute_write()`.
     """
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO sale_swap_targets
-                (sale_id, player_id, target_player_id, target_price, original_target_player_id, retargeted, updated_at)
-            VALUES (?, ?, ?, ?, ?, 0, ?)
-            """,
-            (sale_id, str(player_id), str(target_player_id), target_price, str(target_player_id), now),
-        )
+    _execute_write(
+        conn,
+        """
+        INSERT OR IGNORE INTO sale_swap_targets
+            (sale_id, player_id, target_player_id, target_price, original_target_player_id, retargeted, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+        """,
+        (sale_id, str(player_id), str(target_player_id), target_price, str(target_player_id), now),
+    )
 
 
 def get_swap_target_for_player(player_id) -> dict | None:
@@ -770,21 +795,24 @@ def retarget_swap_target(sale_id: int, new_target_player_id, new_target_price: i
         )
 
 
-def save_sale_replacement(sale_id: int, player_id, target_player_id, target_price: int, now: str) -> None:
+def save_sale_replacement(sale_id: int, player_id, target_player_id, target_price: int, now: str, conn=None) -> None:
     """
     Registra el sustituto que hay que fichar ANTES de aceptar ofertas sobre
     el top `player_id` recién listado (ver `sale_replacements` arriba) --
     llamar tras persistir la fila de `sales` (necesita su `sale_id` real).
+
+    `conn`: conexión ya abierta del llamador, si la hay -- ver
+    `_execute_write()`.
     """
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO sale_replacements
-                (sale_id, player_id, target_player_id, target_price, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?)
-            """,
-            (sale_id, str(player_id), str(target_player_id), target_price, now, now),
-        )
+    _execute_write(
+        conn,
+        """
+        INSERT OR IGNORE INTO sale_replacements
+            (sale_id, player_id, target_player_id, target_price, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (sale_id, str(player_id), str(target_player_id), target_price, now, now),
+    )
 
 
 def get_open_sale_replacements() -> list[dict]:

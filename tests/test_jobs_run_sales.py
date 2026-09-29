@@ -191,6 +191,59 @@ def test_run_sales_lists_profitable_player_and_persists(tmp_db):
     assert row["purchase_price"] == 700_000
 
 
+def test_run_sales_persists_swap_target_and_replacement_inside_listing_transaction(tmp_db):
+    """
+    Regresión (2026-09-29): el bucle de listados de run() mantiene abierta
+    una transacción de escritura (`_persist_sale`), y save_swap_target()/
+    save_sale_replacement() abrían una SEGUNDA conexión para escribir ->
+    "database is locked" contra SQLite real. Nunca había saltado en
+    producción porque la vía de oportunidad de mercado no llegaba a
+    ejecutarse (ver config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS).
+    """
+    roster = [dict(p) for p in ROSTER_442_BASE]
+    decision = {
+        "player_id": 1,
+        "asking_price": 500_000,
+        "purchase_price": 500_000,
+        "profit": 0,
+        "profit_pct": 0.0,
+        "reason": "oportunidad de mercado (test)",
+        "swap_target_player_id": "mercado1",
+        "swap_target_price": 20_000_000,
+        "replacement_target_player_id": "mercado2",
+        "replacement_target_price": 3_000_000,
+    }
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0}}
+
+        def get_player_summary(self, player_id):
+            return {"answer": {"prices": []}}
+
+        def list_for_sale(self, player_id, price):
+            return {"code": "api.general.ok"}
+
+    captured = []
+    with (
+        patch("jobs.run_sales.FutmondoClient", FakeClient),
+        patch("jobs.run_sales.decide_sales", return_value=[decision]),
+        patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)),
+    ):
+        run_sales.run()
+
+    assert "1 jugador(es) puesto(s) en venta" in captured[0]
+    with get_connection() as conn:
+        sale_id = conn.execute("SELECT id FROM sales WHERE status = 'listed'").fetchone()["id"]
+        swap = conn.execute("SELECT sale_id, target_player_id FROM sale_swap_targets").fetchone()
+        replacement = conn.execute("SELECT sale_id, target_player_id FROM sale_replacements").fetchone()
+    assert (swap["sale_id"], swap["target_player_id"]) == (sale_id, "mercado1")
+    assert (replacement["sale_id"], replacement["target_player_id"]) == (sale_id, "mercado2")
+
+
 def test_run_sales_never_lists_player_that_would_leave_position_uncovered(tmp_db):
     """Regresión de nivel job: el único portero, aunque rentable, no debe listarse jamás."""
     roster = [dict(p) for p in ROSTER_442_BASE]

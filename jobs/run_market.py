@@ -880,7 +880,7 @@ def run():
 
                 # Cancelación confirmada -- a partir de aquí ya no hay
                 # vuelta atrás sobre la puja vieja, pase lo que pase abajo.
-                update_bid_status(sacrifice["local_row_id"], "cancelled")
+                update_bid_status(sacrifice["local_row_id"], "cancelled", conn=conn)
                 pending_after_swap = max(0, pending_after_decisions - sacrifice["amount"])
 
                 new_decision = decide_bid(
@@ -948,7 +948,7 @@ def run():
 
                 # Cancelación confirmada -- a partir de aquí ya no hay
                 # vuelta atrás sobre la puja vieja, pase lo que pase abajo.
-                update_bid_status(sacrifice["local_row_id"], "cancelled")
+                update_bid_status(sacrifice["local_row_id"], "cancelled", conn=conn)
                 pending_after_rescue = max(0, pending_after_decisions - sacrifice["amount"])
 
                 new_decision = decide_bid(
@@ -1004,7 +1004,7 @@ def run():
 
                 # Cancelación confirmada -- a partir de aquí ya no hay
                 # vuelta atrás sobre la puja vieja, pase lo que pase abajo.
-                update_bid_status(proposal["local_row_id"], "cancelled")
+                update_bid_status(proposal["local_row_id"], "cancelled", conn=conn)
 
                 market_player = market_by_id.get(str(proposal["player_id"]))
                 new_decision = proposal["new_decision"]

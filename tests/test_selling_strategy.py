@@ -594,6 +594,39 @@ def test_decide_sales_market_upgrade_caps_at_one_sale_per_position_by_default():
     assert decisions[0]["player_id"] == 15
 
 
+def test_decide_sales_market_upgrade_position_slot_falls_through_when_first_fails_efficiency():
+    """
+    El cupo por posición (a) solo lo consume una venta APROBADA: el de
+    mayor margen (id=15, vale 0.5M) cae en el filtro de eficiencia contra
+    un objetivo de 50M, así que la plaza pasa al siguiente de su posición
+    (id=16, vale 49.5M, apenas 0.5M extra) -- antes se quedaba sin vender
+    ninguno (caso real 2026-09-29: Szczesny caía en (b) y Cárdenas, que sí
+    lo pasaba, nunca llegaba a evaluarse).
+    """
+    squad = _full_442_squad()
+    squad.append({"id": 15, "name": "Defensa Extra1", "role": "defensa", "status": "", "value": 500_000})
+    squad.append({"id": 16, "name": "Defensa Extra2", "role": "defensa", "status": "", "value": 49_500_000})
+    bought_by_bot = {"15": 500_000, "16": 49_500_000}
+
+    own_squad_features = [
+        _feature_row(15, "DEF", price=500_000, xg=0.0, minutes_played=0),  # mayor margen, eficiencia pobre
+        _feature_row(16, "DEF", price=49_500_000, xg=0.5, minutes_played=200),  # menor margen, casi sin coste extra
+    ]
+    market_candidates = [_feature_row("mercado1", "DEF", price=50_000_000, xg=10.0, minutes_played=900)]
+
+    decisions = decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot=bought_by_bot,
+        budget=100_000_000,
+        own_squad_features=own_squad_features,
+        market_candidates=market_candidates,
+        upgrade_only_worst_per_position=False,  # aísla (a)/(b) de la regla de "solo el peor"
+    )
+
+    assert [d["player_id"] for d in decisions] == [16]
+
+
 def test_decide_sales_market_upgrade_blocks_expensive_candidate_with_poor_price_efficiency():
     """
     "No podemos comparar la calidad de un jugador de 4 millones con uno de
@@ -702,7 +735,7 @@ def test_decide_sales_market_upgrade_shares_budget_across_positions_prioritizing
 
 def test_decide_sales_market_upgrade_blocks_when_target_listing_expires_too_soon():
     """
-    Al candidato objetivo solo le quedan 2h de mercado -- menos de las 24h
+    Al candidato objetivo solo le quedan 2h de mercado -- menos de las 12h
     que se asume que tardará en resolverse nuestra propia venta
     (config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS) -- no tiene sentido
     vender para intentar comprarlo, no se vende.

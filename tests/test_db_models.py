@@ -448,3 +448,22 @@ def test_get_player_features_includes_recent_minutes_reference(tmp_db):
     assert features[0]["minutes_played"] == 400
     assert features[0]["minutes_played_ref"] == 360  # cierre de la jornada 4 (7 - 3)
     assert features[0]["team_games_ref"] == 4
+
+
+def test_update_bid_status_reuses_caller_connection_inside_open_write_transaction(tmp_db):
+    """
+    Regresión (2026-09-29): jobs/run_market.py llama a update_bid_status()
+    dentro de un `with get_connection() as conn` que ya ha escrito (pujas
+    del swap/reajuste anterior) -- sin reutilizar `conn`, la segunda
+    conexión de escritura falla con "database is locked".
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bids (player_id, amount, status, created_at) VALUES (?,?,?,?)",
+            ("p1", 1_000_000, "placed", "2026-09-29T00:00:00+00:00"),
+        )
+        bid_id = conn.execute("SELECT id FROM bids").fetchone()["id"]
+        update_bid_status(bid_id, "cancelled", conn=conn)
+
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM bids WHERE id = ?", (bid_id,)).fetchone()["status"] == "cancelled"
