@@ -241,6 +241,7 @@ from db.models import (
     get_open_bids,
     get_open_sale_replacements,
     get_pending_swap_refills,
+    get_standby_sales,
     get_pending_bid_amount,
     get_player_features,
     save_league_setting,
@@ -494,7 +495,14 @@ def run():
     upgrade_thresholds = {}
     lineup_score_by_id = {}
     if squad_raw:
-        depth = assess_squad_depth(squad_raw, formation=config.DEFAULT_FORMATION)
+        # Las ventas de reserva para swaps (config.ENABLE_SWAP_STANDBY_
+        # LISTINGS) siguen disponibles: solo se venden con un swap en marcha,
+        # así que no deben contar como riesgo de plantilla.
+        standby_ids = {str(sale["player_id"]) for sale in get_standby_sales()}
+        depth = assess_squad_depth(
+            [{**p, "on_market": False} if p["id"] in standby_ids else p for p in squad_raw],
+            formation=config.DEFAULT_FORMATION,
+        )
         at_risk_positions = {pos for pos, info in depth.items() if info["at_risk"]}
         risk_warnings = depth_warnings(depth)
 

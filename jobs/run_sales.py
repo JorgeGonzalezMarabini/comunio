@@ -172,6 +172,7 @@ from clients.futmondo_client import (
     FUTMONDO_POSITION_MAP,
     FutmondoClient,
     FutmondoOfferError,
+    is_confirmed_injured_status,
     is_injury_status,
     real_pending_bid_amount,
 )
@@ -184,6 +185,7 @@ from db.models import (
     get_player_features,
     get_purchase_baselines,
     get_recent_price_history,
+    get_standby_sales,
     get_swap_target_for_player,
     get_won_bid_prices,
     mark_offer_accepted,
@@ -191,11 +193,21 @@ from db.models import (
     retarget_swap_target,
     save_sale_replacement,
     save_swap_target,
+    set_sale_purpose,
     update_sale_replacement_status,
     update_sale_status,
 )
-from engine.selling_strategy import apply_revaluation_premium, decide_sales, parse_iso_datetime, score_market_upgrade_candidates
-from engine.squad_risk import assess_squad_depth
+from engine.bidding_strategy import dynamic_player_cap
+from engine.evaluator import evaluate_players
+from engine.selling_strategy import (
+    apply_revaluation_premium,
+    decide_sales,
+    find_standby_swap_target,
+    parse_iso_datetime,
+    pick_standby_listings,
+    score_market_upgrade_candidates,
+)
+from engine.squad_risk import assess_squad_depth, weakest_starter_scores
 from notifier import notify, track_job_run, format_number
 
 
@@ -215,8 +227,8 @@ def _persist_sale(conn, decision: dict, status: str, now: str, error: str | None
     """
     cur = conn.execute(
         """
-        INSERT INTO sales (player_id, asking_price, purchase_price, profit, profit_pct, status, reason, error, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sales (player_id, asking_price, purchase_price, profit, profit_pct, status, reason, error, purpose, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(decision["player_id"]),
@@ -227,6 +239,7 @@ def _persist_sale(conn, decision: dict, status: str, now: str, error: str | None
             status,
             decision["reason"],
             error,
+            decision.get("purpose", "normal"),
             now,
         ),
     )
@@ -446,7 +459,8 @@ def _process_received_offers(
     live_market_expirations: dict[str, str],
     now: datetime,
     awaiting_replacement_ids: set[str] = frozenset(),
-) -> tuple[list[dict], list[tuple[dict, str]], list[dict]]:
+    standby: dict | None = None,
+) -> tuple[list[dict], list[tuple[dict, str]], list[dict], list[tuple[dict, str]]]:
     """
     Lee las ofertas de compra recibidas sobre jugadores propios puestos en
     venta NORMAL (`client.get_my_players_in_market()[].bids`) y acepta
@@ -517,8 +531,18 @@ def _process_received_offers(
     plantilla (ver `_reconcile_sale_replacements()`) -- sus ofertas se
     registran pero nunca se aceptan (cuentan como omitidas por riesgo).
 
-    Devuelve (aceptadas, fallidas, omitidas_por_riesgo) para el resumen de
-    notificación de `run()`. Un fallo al aceptar una oferta concreta (red
+    `standby`: ventas de reserva para swaps (config.ENABLE_SWAP_STANDBY_
+    LISTINGS) -- {"sale_id_by_player": {player_id: sale_id}, "roster_full":
+    bool, "find_target": callable(item, offer_price, reserved_ids) ->
+    objetivo|None}. Sus ofertas NUNCA siguen las reglas de arriba: solo se
+    aceptan con la plantilla llena y un objetivo de swap comprable
+    (`find_target`), y entonces se permite dejar la posición en bench=0
+    (nunca en déficit); al aceptar se registra el objetivo
+    (`save_swap_target`) para la reposición de jobs/run_market.py. Se
+    procesan después de las normales, para ver el banquillo que dejen.
+
+    Devuelve (aceptadas, fallidas, omitidas_por_riesgo, reservas_en_espera)
+    para el resumen de notificación de `run()`. Un fallo al aceptar una oferta concreta (red
     o rechazo de negocio) no aborta el resto -- se audita en `fallidas` y
     se sigue con el resto de listados.
     """
@@ -569,6 +593,10 @@ def _process_received_offers(
 
     qualifying.sort(key=_sort_key)
 
+    standby_sale_ids = (standby or {}).get("sale_id_by_player", {})
+    standby_qualifying = [(item, best) for item, best in qualifying if str(item["id"]) in standby_sale_ids]
+    qualifying = [(item, best) for item, best in qualifying if str(item["id"]) not in standby_sale_ids]
+
     skipped_for_risk = []
     for item, best in qualifying:
         position = position_by_player_id.get(str(item["id"]))
@@ -612,7 +640,118 @@ def _process_received_offers(
         except (requests.RequestException, FutmondoOfferError) as e:
             failed.append((item, str(e)))
 
-    return accepted, failed, skipped_for_risk
+    standby_waiting = []
+    reserved_target_ids: set[str] = set()
+    for item, best in standby_qualifying:
+        if not standby.get("roster_full"):
+            standby_waiting.append((item, "plantilla con hueco: se compra sin vender"))
+            continue
+        position = position_by_player_id.get(str(item["id"]))
+        bench = bench_by_position.get(position) if position is not None else None
+        if bench is not None and bench <= 0 and not is_injury_status(item.get("status")):
+            standby_waiting.append((item, "dejaría la posición por debajo de los titulares"))
+            continue
+        target = standby["find_target"](item, best["price"], reserved_target_ids)
+        if target is None:
+            standby_waiting.append((item, "sin objetivo de swap comprable en el mercado"))
+            continue
+        try:
+            client.accept_sale_offer(str(best["id"]), str(item["id"]))
+            mark_offer_accepted(best["id"])
+            save_swap_target(
+                standby_sale_ids[str(item["id"])], str(item["id"]), target["id"], target["price"], now.isoformat()
+            )
+            reserved_target_ids.add(target["id"])
+            if not is_injury_status(item.get("status")) and position in bench_by_position:
+                bench_by_position[position] -= 1
+            accepted.append(
+                {
+                    "player_id": item["id"],
+                    "name": item.get("name"),
+                    "listing_price": item["price"],
+                    "offer_price": best["price"],
+                    "bidder": (best.get("userTeam") or {}).get("name"),
+                    "swap_target": target["id"],
+                }
+            )
+        except (requests.RequestException, FutmondoOfferError) as e:
+            failed.append((item, str(e)))
+
+    return accepted, failed, skipped_for_risk, standby_waiting
+
+
+def _standby_offer_context(
+    roster_items: list[dict],
+    own_squad_features: list[dict],
+    market_candidates: list[dict],
+    live_market_items: list[dict],
+    information: dict,
+    standby_sales: list[dict],
+    now: datetime,
+) -> dict:
+    """
+    Contexto para decidir las ofertas sobre ventas de reserva (ver
+    config.ENABLE_SWAP_STANDBY_LISTINGS y `_process_received_offers`):
+    si la plantilla está llena (contando pujas abiertas, que ocuparán plaza
+    si se ganan) y un `find_target` que busca un objetivo de swap con los
+    MISMOS límites con los que jobs/run_market.py lo repondría -- tope
+    dinámico + config.SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT, saldo menos lo
+    comprometido, solo listados de Futmondo vivos con margen de tiempo
+    (config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT) y sin lesión confirmada.
+    """
+    answer = information.get("answer", {})
+    budget = answer.get("budget", 0)
+    max_roster_size = answer.get("configuration", {}).get("maxPlayersInRoster")
+    roster_full = max_roster_size is not None and len(roster_items) + len(get_open_bids()) >= max_roster_size
+
+    lineup_scores, _ = score_market_upgrade_candidates(own_squad_features, market_candidates)
+    own_ranked = [{**p, "score": lineup_scores[str(p["id"])]} for p in own_squad_features if str(p["id"]) in lineup_scores]
+    weakest = weakest_starter_scores(own_ranked, formation=config.DEFAULT_FORMATION)
+
+    expirations = {str(p["id"]): p.get("expirationDate") for p in live_market_items}
+    buyable_ids = {
+        str(p["id"]) for p in live_market_items if config.ENABLE_BIDS_ON_MANAGER_LISTINGS or p.get("computer", False)
+    }
+    eligible_rows = [
+        c
+        for c in market_candidates
+        if str(c["id"]) in buyable_ids
+        and not is_confirmed_injured_status(c.get("status"))
+        and _has_enough_runway(c["id"], expirations, now, config.SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT)
+    ]
+    eligible_ids = {str(c["id"]) for c in eligible_rows}
+    player_cap = dynamic_player_cap(budget, own_squad_features, evaluate_players(eligible_rows) if eligible_rows else [])
+    max_price = int(player_cap * (1 + config.SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT))
+    pending = max(get_pending_bid_amount(), real_pending_bid_amount(live_market_items))
+
+    position_by_player_id = _position_by_player_id(roster_items)
+    own_price_by_id = {str(p["id"]): p.get("value") or 0 for p in roster_items}
+    reserved_spend = {"total": 0}
+
+    def find_target(item: dict, offer_price: int, reserved_ids: set) -> dict | None:
+        pid = str(item["id"])
+        position = position_by_player_id.get(pid)
+        target = find_standby_swap_target(
+            pid,
+            own_price_by_id.get(pid, 0),
+            position,
+            lineup_scores,
+            market_candidates,
+            eligible_ids,
+            max_price,
+            budget - pending - reserved_spend["total"] + offer_price,
+            weakest_starter_score=weakest.get(position),
+            reserved_ids=reserved_ids,
+        )
+        if target is not None:
+            reserved_spend["total"] += target["price"] - offer_price
+        return target
+
+    return {
+        "sale_id_by_player": {str(sale["player_id"]): sale["id"] for sale in standby_sales},
+        "roster_full": roster_full,
+        "find_target": find_target,
+    }
 
 
 def run():
@@ -708,7 +847,20 @@ def run():
             f"{r['player_id']} ({err}); sus ofertas siguen bloqueadas."
         )
 
-    offers_accepted, offers_failed, offers_skipped_for_risk = _process_received_offers(
+    # Ventas de reserva para swaps (config.ENABLE_SWAP_STANDBY_LISTINGS):
+    # solo si hay alguna abierta hace falta adelantar get_information().
+    standby_sales = get_standby_sales() if config.ENABLE_SWAP_STANDBY_LISTINGS else []
+    standby_sales = [sale for sale in standby_sales if str(sale["player_id"]) in roster_ids]
+    information = client.get_information() if standby_sales else None
+    standby_context = (
+        _standby_offer_context(
+            roster_items, own_squad_features, market_candidates, live_market_items, information, standby_sales, now_dt
+        )
+        if standby_sales
+        else None
+    )
+
+    offers_accepted, offers_failed, offers_skipped_for_risk, standby_waiting = _process_received_offers(
         client,
         now,
         _position_by_player_id(roster_items),
@@ -719,6 +871,7 @@ def run():
         market_listing_expirations,
         now_dt,
         awaiting_replacement_ids | lost_player_ids,  # recién retirada: ninguna oferta leída antes vale ya
+        standby=standby_context,
     )
     if awaiting_replacement_ids:
         report_lines.append(
@@ -731,6 +884,7 @@ def run():
             report_lines.append(
                 f"  - jugador {o['player_id']} ({o.get('name')}): oferta {o['offer_price']} de "
                 f"{o.get('bidder')} (pedíamos {o['listing_price']})"
+                + (f" -- venta de reserva, swap hacia {o['swap_target']}" if o.get("swap_target") else "")
             )
     if offers_failed:
         report_lines.append(f"{len(offers_failed)} oferta(s) recibida(s) fallida(s) al aceptar:")
@@ -743,6 +897,10 @@ def run():
         )
         for item in offers_skipped_for_risk:
             report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')})")
+    if standby_waiting:
+        report_lines.append(f"{len(standby_waiting)} oferta(s) sobre ventas de reserva en espera (no aceptadas):")
+        for item, why in standby_waiting:
+            report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')}): {why}")
 
     if not roster_items:
         report_lines.append("run_sales: la plantilla vino vacía, nada más que evaluar.")
@@ -754,7 +912,8 @@ def run():
     # en lesión confirmada (config.SELLING_INJURY_CONCENTRATION_MAX_PCT,
     # ver engine/selling_strategy.py) -- sin esto, esa señal solo vería el
     # valor de la plantilla, subestimando el capital real disponible.
-    information = client.get_information()
+    if information is None:
+        information = client.get_information()
     budget = information.get("answer", {}).get("budget", 0)
 
     # Ocupación de plantilla (mismo campo que jobs/run_market.py usa para
@@ -806,8 +965,13 @@ def run():
         else 0
     )
 
+    # Las ventas de reserva (config.ENABLE_SWAP_STANDBY_LISTINGS) se le
+    # presentan a decide_sales() como NO listadas: si además merecen
+    # venderse por otra vía (plusvalía, pérdida, lesión...), esa venta pasa
+    # a ser normal sin volver a listar (ver _route_standby_decisions).
+    standby_player_ids = {str(sale["player_id"]) for sale in standby_sales}
     decisions = decide_sales(
-        roster_items,
+        [{**p, "market": False} if str(p["id"]) in standby_player_ids else p for p in roster_items],
         bought_by_bot=bought_by_bot,
         budget=budget,
         replacement_candidates=replacement_candidates,
@@ -820,19 +984,8 @@ def run():
         purchase_baselines=purchase_baselines,
         recent_price_history=recent_price_history,
     )
-    if not decisions:
-        report_lines.append(
-            f"run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución "
-            f"(plantilla {occupancy})."
-        )
-        notify("\n".join(report_lines))
-        return
+    decisions, converted = _route_standby_decisions(decisions, standby_sales, roster_items, now)
 
-    # Prima por revalorización rápida (ver docstring del módulo) -- una
-    # llamada de red por CANDIDATO YA DECIDIDO, no por toda la plantilla.
-    # Cualquier fallo (de red, o de negocio) en una llamada individual deja
-    # esa decisión sin tocar -- se pide el VM tal cual, nunca bloquea la
-    # venta ni tumba el resto del job.
     if config.ENABLE_SELLING_REVALUATION_PREMIUM:
         adjusted_decisions = []
         for decision in decisions:
@@ -878,7 +1031,13 @@ def run():
                 _persist_sale(conn, decision, "failed", now, error=str(e))
                 failed.append((decision, str(e)))
 
-    report_lines.append(f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy}).")
+    if decisions:
+        report_lines.append(f"run_sales: {len(listed)} jugador(es) puesto(s) en venta (plantilla {occupancy}).")
+    elif not converted:
+        report_lines.append(
+            f"run_sales: ningún jugador supera el umbral de plusvalía para vender esta ejecución "
+            f"(plantilla {occupancy})."
+        )
     for d in listed:
         report_lines.append(
             f"  - jugador {d['player_id']}: pide {format_number(d['asking_price'])} "
@@ -893,8 +1052,166 @@ def run():
         report_lines.append(f"{len(failed)} fallido(s):")
         for d, err in failed:
             report_lines.append(f"  - jugador {d['player_id']}: {err}")
+    for d in converted:
+        report_lines.append(f"Venta de reserva del jugador {d['player_id']} pasa a venta normal: {d['reason']}")
+
+    if config.ENABLE_SWAP_STANDBY_LISTINGS:
+        created, cancelled, standby_failed = _maintain_standby_listings(
+            client,
+            roster_items,
+            own_squad_features,
+            market_candidates,
+            standby_sales,
+            own_lineup_player_ids,
+            bought_by_bot,
+            accepted_ids={str(o["player_id"]) for o in offers_accepted},
+            excluded_ids={str(d["player_id"]) for d in decisions} | {str(d["player_id"]) for d in converted},
+            now=now,
+        )
+        for c in created:
+            report_lines.append(
+                f"Venta de reserva para swaps: jugador {c['player_id']} ({c['position']}) a "
+                f"{format_number(c['asking_price'])} -- solo se aceptará con plantilla llena y objetivo de swap."
+            )
+        for sale in cancelled:
+            report_lines.append(f"Venta de reserva retirada (lesión confirmada): jugador {sale['player_id']}.")
+        for pick, err in standby_failed:
+            report_lines.append(f"Venta de reserva fallida: jugador {pick['player_id']}: {err}")
 
     notify("\n".join(report_lines))
+
+
+def _route_standby_decisions(
+    decisions: list[dict], standby_sales: list[dict], roster_items: list[dict], now: str
+) -> tuple[list[dict], list[dict]]:
+    """
+    Reparte las decisiones de decide_sales() frente a las ventas de reserva
+    abiertas (ver config.ENABLE_SWAP_STANDBY_LISTINGS):
+
+      - Venta SOLO por oportunidad de mercado (`swap_target_player_id`) de
+        una posición que ya tiene venta de reserva -> se descarta: esa
+        posición ya está cubierta para swaps, y una venta normal por
+        oportunidad se aceptaría sin exigir plantilla llena ni objetivo
+        comprable.
+      - Cualquier otra decisión sobre un jugador de reserva -> la venta ya
+        listada pasa a 'normal' (sin volver a listar; mismo precio pedido
+        que ya tiene en Futmondo), con su sustituto si lo exige.
+      - El resto, sin cambios.
+
+    Devuelve (decisiones_a_listar, convertidas).
+    """
+    if not standby_sales:
+        return decisions, []
+    position_by_player_id = _position_by_player_id(roster_items)
+    sale_id_by_player = {str(sale["player_id"]): sale["id"] for sale in standby_sales}
+    standby_positions = {position_by_player_id.get(pid) for pid in sale_id_by_player}
+    to_list, converted = [], []
+    for d in decisions:
+        pid = str(d["player_id"])
+        if d.get("swap_target_player_id") and (pid in sale_id_by_player or position_by_player_id.get(pid) in standby_positions):
+            continue
+        if pid in sale_id_by_player:
+            set_sale_purpose(sale_id_by_player[pid], "normal", d["reason"])
+            if d.get("replacement_target_player_id"):
+                save_sale_replacement(
+                    sale_id_by_player[pid],
+                    pid,
+                    d["replacement_target_player_id"],
+                    d.get("replacement_target_price") or 0,
+                    now,
+                )
+            converted.append(d)
+            continue
+        to_list.append(d)
+    return to_list, converted
+
+
+def _maintain_standby_listings(
+    client: FutmondoClient,
+    roster_items: list[dict],
+    own_squad_features: list[dict],
+    market_candidates: list[dict],
+    standby_sales: list[dict],
+    own_lineup_player_ids: set,
+    bought_by_bot: dict[str, int],
+    accepted_ids: set,
+    excluded_ids: set,
+    now: str,
+) -> tuple[list[dict], list[dict], list[tuple[dict, str]]]:
+    """
+    Mantiene las ventas de reserva para swaps (ver config.ENABLE_SWAP_
+    STANDBY_LISTINGS): retira las de jugadores con lesión CONFIRMADA (para
+    que la venta por lesión de decide_sales() pueda actuar) y pone en venta
+    al VM al peor de cada posición que no tenga ya una
+    (`engine.selling_strategy.pick_standby_listings`). Una reserva se
+    mantiene mientras siga siendo elegible aunque ya no sea la peor: retirar
+    y volver a listar perdería la oferta que ya tuviera esperando.
+
+    No crea ninguna en una posición donde se acaba de aceptar una oferta en
+    esta pasada (el banquillo real aún no está reflejado), ni si no se pudo
+    leer la alineación guardada (sin ella no se puede garantizar que no se
+    ponga en venta a un titular).
+
+    Devuelve (creadas, retiradas, fallidas).
+    """
+    roster_by_id = {str(p["id"]): p for p in roster_items}
+    position_by_player_id = _position_by_player_id(roster_items)
+
+    cancelled = []
+    kept_positions = set()
+    for sale in standby_sales:
+        pid = str(sale["player_id"])
+        player = roster_by_id.get(pid)
+        if player is None or pid in accepted_ids:
+            continue
+        if is_confirmed_injured_status(player.get("status")):
+            try:
+                client.cancel_sale(pid)
+                update_sale_status(sale["id"], "delisted")
+                cancelled.append(sale)
+                continue
+            except (requests.RequestException, FutmondoOfferError):
+                pass
+        kept_positions.add(position_by_player_id.get(pid))
+
+    if not own_lineup_player_ids:
+        return [], cancelled, []
+
+    remaining = [p for p in roster_items if str(p["id"]) not in accepted_ids]
+    lineup_scores, _ = score_market_upgrade_candidates(own_squad_features, market_candidates)
+    picks = pick_standby_listings(
+        remaining,
+        lineup_scores,
+        _bench_by_position_now(remaining),
+        own_lineup_player_ids,
+        kept_positions | {position_by_player_id.get(pid) for pid in accepted_ids},
+        excluded_ids=excluded_ids,
+    )
+
+    created, failed = [], []
+    with get_connection() as conn:
+        for pick in picks:
+            pid = str(pick["player_id"])
+            sale = {
+                "player_id": pid,
+                "asking_price": pick["asking_price"],
+                "purchase_price": bought_by_bot.get(pid),
+                "profit": None,
+                "profit_pct": None,
+                "reason": (
+                    f"reserva para swaps: peor sano de {pick['position']} (score de alineación "
+                    f"{pick['lineup_score']:.2f}); solo se acepta con plantilla llena y objetivo de swap"
+                ),
+                "purpose": "standby",
+            }
+            try:
+                client.list_for_sale(pid, pick["asking_price"])
+                _persist_sale(conn, sale, "listed", now)
+                created.append(pick)
+            except (requests.RequestException, FutmondoOfferError) as e:
+                _persist_sale(conn, sale, "failed", now, error=str(e))
+                failed.append((pick, str(e)))
+    return created, cancelled, failed
 
 
 if __name__ == "__main__":

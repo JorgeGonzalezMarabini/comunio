@@ -102,7 +102,7 @@ from datetime import datetime, timezone
 import config
 from clients.futmondo_client import FutmondoClient
 from clients.laliga_stats_client import get_league_data, next_match_difficulty
-from db.models import get_connection, get_player_features, init_db
+from db.models import get_connection, get_player_features, get_standby_sales, init_db
 from engine.evaluator import evaluate_players
 from engine.lineup_optimizer import apply_fixture_difficulty, build_bench_changes, build_lineup_changes, pick_lineup, pick_substitutes
 from engine.squad_risk import assess_squad_depth, depth_warnings
@@ -160,7 +160,13 @@ def run():
     # único titular de esa posición (cláusula de rescisión, lesión, sanción)
     # dejaría un hueco en la alineación. Solo informa por ahora, no
     # bloquea ni cambia la decisión.
-    depth = assess_squad_depth(adjusted, formation=config.DEFAULT_FORMATION)
+    # Ventas de reserva para swaps (config.ENABLE_SWAP_STANDBY_LISTINGS):
+    # siguen disponibles, no son riesgo de plantilla.
+    standby_ids = {str(sale["player_id"]) for sale in get_standby_sales()}
+    depth = assess_squad_depth(
+        [{**p, "on_market": False} if p["id"] in standby_ids else p for p in adjusted],
+        formation=config.DEFAULT_FORMATION,
+    )
     risk_warnings = depth_warnings(depth)
 
     try:

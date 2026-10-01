@@ -1164,3 +1164,133 @@ def test_resolve_swap_target_skips_equivalent_with_poor_price_efficiency(tmp_db,
     swap_target = get_swap_target_for_player("propio")
     assert run_sales._resolve_swap_target(swap_target, "POR", own, market, runway, now) is True
     assert get_swap_target_for_player("propio")["target_player_id"] == "asumible"
+
+
+# --- Ventas de reserva para swaps (config.ENABLE_SWAP_STANDBY_LISTINGS) ---
+
+STANDBY_ROSTER = (
+    [{"id": 1, "role": "portero", "status": "", "value": 2_000_000}]
+    + [{"id": 2, "role": "portero", "status": "", "value": 1_000_000, "market": True}]
+    + [{"id": 10 + i, "role": "defensa", "status": "", "value": 500_000} for i in range(4)]
+    + [{"id": 20 + i, "role": "centrocampista", "status": "", "value": 500_000} for i in range(4)]
+    + [{"id": 30 + i, "role": "delantero", "status": "", "value": 500_000} for i in range(2)]
+)
+
+
+def _seed_standby_sale(player_id="2"):
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, purpose, created_at) VALUES (?,?,?,?,?)",
+            (player_id, 1_000_000, "listed", "standby", "2026-09-30T05:00:00+00:00"),
+        )
+        return cur.lastrowid
+
+
+def _run_standby_offer(max_roster, target):
+    """Portero 2 en venta de reserva con oferta de Futmondo; bench POR=1 (dejaría la posición en 0)."""
+    sale_id = _seed_standby_sale()
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": [dict(p) for p in STANDBY_ROSTER]}
+
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(player_id=2, name="Suplente", listing_price=1_000_000, bid_id="b2", offer_price=1_010_000)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_information(self):
+            return {"answer": {"budget": 50_000_000, "configuration": {"maxPlayersInRoster": max_roster}}}
+
+    captured = []
+    with (
+        patch("jobs.run_sales.FutmondoClient", FakeClient),
+        patch("jobs.run_sales.find_standby_swap_target", return_value=target),
+        patch("jobs.run_sales.notify", side_effect=lambda m: captured.append(m)),
+    ):
+        run_sales.run()
+    return sale_id, accept_calls, captured[0]
+
+
+def test_run_sales_accepts_standby_offer_with_full_roster_and_swap_target_even_leaving_bench_zero(tmp_db):
+    target = {"id": "oblak", "price": 22_000_000, "score": 0.9}
+    sale_id, accept_calls, message = _run_standby_offer(max_roster=12, target=target)
+
+    assert accept_calls == [("b2", "2")]
+    assert "venta de reserva, swap hacia oblak" in message
+    with get_connection() as conn:
+        swap = conn.execute("SELECT sale_id, target_player_id, target_price FROM sale_swap_targets").fetchone()
+    assert (swap["sale_id"], swap["target_player_id"], swap["target_price"]) == (sale_id, "oblak", 22_000_000)
+
+
+def test_run_sales_keeps_standby_offer_waiting_when_roster_has_free_slot(tmp_db):
+    _, accept_calls, message = _run_standby_offer(max_roster=18, target={"id": "oblak", "price": 1, "score": 0.9})
+
+    assert accept_calls == []
+    assert "plantilla con hueco" in message
+
+
+def test_run_sales_keeps_standby_offer_waiting_without_buyable_swap_target(tmp_db):
+    _, accept_calls, message = _run_standby_offer(max_roster=12, target=None)
+
+    assert accept_calls == []
+    assert "sin objetivo de swap comprable" in message
+
+
+def test_run_sales_creates_standby_listing_for_worst_non_starter_with_bench(tmp_db, monkeypatch):
+    """
+    Pone en venta de reserva al peor sano de cada posición CON suplente y
+    que no sea titular guardado: aquí solo DEF (5 para 4 puestos). POR (1
+    para 1) y el resto, sin suplente, no.
+    """
+    roster = [dict(p) for p in ROSTER_442_BASE] + [{"id": 14, "role": "defensa", "status": "", "value": 700_000}]
+    scores = {str(p["id"]): 0.5 for p in roster}
+    scores["13"] = 0.1  # el peor DEF, pero titular guardado
+    scores["14"] = 0.2  # el peor DEF no titular
+    monkeypatch.setattr(run_sales, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
+    listed = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 18}}}
+
+        def get_lineup(self):
+            return {"answer": {"players": [{"id": 13}]}}
+
+        def list_for_sale(self, player_id, price):
+            listed.append((player_id, price))
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+
+    assert listed == [("14", 700_000)]
+    with get_connection() as conn:
+        row = conn.execute("SELECT player_id, purpose, status FROM sales").fetchone()
+    assert (row["player_id"], row["purpose"], row["status"]) == ("14", "standby", "listed")
+
+
+def test_route_standby_decisions_drops_market_only_sale_and_converts_other_reasons(tmp_db):
+    sale_id = _seed_standby_sale(player_id="2")
+    roster = [dict(p) for p in STANDBY_ROSTER]
+    decisions = [
+        {"player_id": 1, "reason": "oportunidad", "swap_target_player_id": "x"},  # misma posición que la reserva
+        {"player_id": "2", "reason": "plusvalía +30%"},  # la propia reserva, por otra vía
+        {"player_id": 10, "reason": "plusvalía DEF"},
+    ]
+
+    to_list, converted = run_sales._route_standby_decisions(
+        decisions, [{"id": sale_id, "player_id": "2"}], roster, "2026-10-01T06:00:00+00:00"
+    )
+
+    assert [d["player_id"] for d in to_list] == [10]
+    assert [d["player_id"] for d in converted] == ["2"]
+    with get_connection() as conn:
+        row = conn.execute("SELECT purpose, reason FROM sales WHERE id = ?", (sale_id,)).fetchone()
+    assert (row["purpose"], row["reason"]) == ("normal", "plusvalía +30%")

@@ -7,6 +7,8 @@ from engine.selling_strategy import (
     decide_sales,
     effective_loss_cut_threshold,
     effective_profit_threshold,
+    find_standby_swap_target,
+    pick_standby_listings,
     price_momentum_pct,
 )
 
@@ -1748,3 +1750,66 @@ def test_decide_sales_top_swap_never_sells_the_same_player_twice():
     ids = [d["player_id"] for d in decisions]
     assert len(ids) == len(set(ids))
     assert 36 in ids
+
+
+def test_pick_standby_listings_worst_healthy_non_starter_per_position_with_bench():
+    squad = [
+        {"id": 1, "role": "portero", "status": "", "value": 1_000_000},
+        {"id": 2, "role": "portero", "status": "", "value": 1_000_000},
+        {"id": 10, "role": "defensa", "status": "", "value": 2_000_000},
+        {"id": 11, "role": "defensa", "status": "injured2", "value": 1_000_000},  # lesionado: nunca
+        {"id": 12, "role": "defensa", "status": "", "value": 3_000_000},
+        {"id": 20, "role": "centrocampista", "status": "", "value": 1_000_000},
+    ]
+    scores = {"1": 0.9, "2": 0.1, "10": 0.3, "11": 0.0, "12": 0.4, "20": 0.2}
+    picks = pick_standby_listings(
+        squad,
+        scores,
+        bench_by_position={"POR": 1, "DEF": 1, "MED": 0},
+        starter_ids={1, 12},
+        positions_with_standby=set(),
+    )
+    assert sorted((p["player_id"], p["position"], p["asking_price"]) for p in picks) == [
+        (2, "POR", 1_000_000),
+        (10, "DEF", 2_000_000),
+    ]
+    assert pick_standby_listings(squad, scores, {"POR": 1, "DEF": 1}, {1, 12}, positions_with_standby={"POR", "DEF"}) == []
+
+
+def _target_row(cid, price, recent=(6, 6, 6, 6, 6)):
+    return {"id": cid, "position": "POR", "price": price, "average_points": 6.0, "recent_points": list(recent)}
+
+
+def test_find_standby_swap_target_takes_best_buyable_and_falls_through():
+    scores = {"propio": 0.1, "caro": 1.0, "fuera_forma": 0.95, "no_vivo": 0.9, "bueno": 0.8, "flojo": 0.3}
+    market = [
+        _target_row("caro", 40_000_000),
+        _target_row("fuera_forma", 5_000_000, recent=(0, 0, 1, 0, 0)),
+        _target_row("no_vivo", 5_000_000),
+        _target_row("bueno", 15_000_000),
+        _target_row("flojo", 2_000_000),
+    ]
+    target = find_standby_swap_target(
+        "propio",
+        1_000_000,
+        "POR",
+        scores,
+        market,
+        eligible_ids={"caro", "fuera_forma", "bueno", "flojo"},
+        max_price=23_000_000,
+        available_budget=100_000_000,
+        weakest_starter_score=0.5,
+    )
+    # caro: > max_price; fuera_forma: forma < mínimo de puja; no_vivo: no elegible; flojo: no mejora al titular
+    assert target == {"id": "bueno", "price": 15_000_000, "score": 0.8}
+
+
+def test_find_standby_swap_target_requires_price_efficiency_and_budget():
+    scores = {"propio": 0.1, "objetivo": 0.5}
+    market = [_target_row("objetivo", 20_000_000)]
+    common = dict(eligible_ids={"objetivo"}, max_price=50_000_000, weakest_starter_score=None)
+    # margen 0.4 / 19M extra = 0.021 < 0.03
+    assert find_standby_swap_target("propio", 1_000_000, "POR", scores, market, available_budget=99_000_000, **common) is None
+    market = [_target_row("objetivo", 10_000_000)]  # 0.4 / 9M = 0.044
+    assert find_standby_swap_target("propio", 1_000_000, "POR", scores, market, available_budget=9_000_000, **common) is None
+    assert find_standby_swap_target("propio", 1_000_000, "POR", scores, market, available_budget=10_000_000, **common)["id"] == "objetivo"

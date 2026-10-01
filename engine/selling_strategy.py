@@ -323,6 +323,119 @@ from engine.lineup_optimizer import FORMATIONS
 from engine.squad_risk import assess_squad_depth
 
 
+def pick_standby_listings(
+    squad: list[dict],
+    lineup_scores: dict[str, float],
+    bench_by_position: dict[str, int],
+    starter_ids: set,
+    positions_with_standby: set,
+    excluded_ids: set = frozenset(),
+) -> list[dict]:
+    """
+    Ventas permanentes de reserva para swaps (config.ENABLE_SWAP_STANDBY_
+    LISTINGS) que faltan por crear: para cada posición SIN una ya listada
+    (`positions_with_standby`) y con al menos un suplente sano
+    (`bench_by_position`, contando a los ya listados como disponibles), el
+    jugador sano (sin lesión ni duda) con PEOR score de alineación
+    (`lineup_scores`, config.LINEUP_EVALUATOR_WEIGHTS) que no esté ya en
+    venta, no sea titular de la alineación guardada (`starter_ids`) ni esté
+    en `excluded_ids` (p.ej. ya decidido o vendido en esta misma pasada).
+
+    `squad`: items de `FutmondoClient.get_roster()` ("id", "role", "status",
+    "market", "value"). Devuelve [{"player_id", "position", "asking_price",
+    "lineup_score"}], una como mucho por posición; la venta se pide al VM.
+    """
+    starter_ids = {str(i) for i in starter_ids}
+    excluded_ids = {str(i) for i in excluded_ids}
+    worst_by_position: dict[str, dict] = {}
+    for p in squad:
+        pid = str(p["id"])
+        position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
+        if (
+            position in positions_with_standby
+            or (bench_by_position.get(position) or 0) < 1
+            or is_injury_status(p.get("status"))
+            or p.get("market")
+            or pid in starter_ids
+            or pid in excluded_ids
+            or pid not in lineup_scores
+            or (p.get("value") or 0) <= 0
+        ):
+            continue
+        current = worst_by_position.get(position)
+        if current is None or lineup_scores[pid] < current["lineup_score"]:
+            worst_by_position[position] = {
+                "player_id": p["id"],
+                "position": position,
+                "asking_price": p["value"],
+                "lineup_score": lineup_scores[pid],
+            }
+    return list(worst_by_position.values())
+
+
+def find_standby_swap_target(
+    own_player_id,
+    own_price: int,
+    position: str,
+    lineup_scores: dict[str, float],
+    market_candidates: list[dict],
+    eligible_ids: set,
+    max_price: int,
+    available_budget: int,
+    weakest_starter_score: float | None = None,
+    reserved_ids: set = frozenset(),
+) -> dict | None:
+    """
+    Objetivo de swap que justifica aceptar la oferta sobre una venta de
+    reserva (ver config.ENABLE_SWAP_STANDBY_LISTINGS) -- un candidato de
+    mercado de la MISMA posición que jobs/run_market.py compraría de verdad
+    en la reposición (db.models.get_pending_swap_refills), no solo "mejor":
+
+      - `eligible_ids`: listado por Futmondo (no otro manager), sin lesión
+        confirmada y con margen de tiempo suficiente -- lo filtra el
+        llamador con los datos del mercado en vivo.
+      - margen de score de alineación >= config.SELLING_UPGRADE_AVAILABLE_
+        MIN_MARGIN sobre el propio y eficiencia por millón extra >=
+        config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION (mismos umbrales
+        que la venta por oportunidad de mercado).
+      - forma >= config.BIDDING_MIN_AVERAGE_POINTS (filtro duro de
+        decide_bid, que la reposición también aplica).
+      - mejor que el titular más flojo de la posición
+        (`weakest_starter_score`; None = sin listón).
+      - precio <= `max_price` (tope dinámico + SWAP_REFILL_MAX_CAP_
+        OVERSHOOT_PCT) y <= `available_budget`.
+
+    Devuelve el de mejor score de alineación que cumpla todo
+    ({"id", "price", "score"}) o None.
+    """
+    own_score = lineup_scores.get(str(own_player_id))
+    if own_score is None:
+        return None
+    for c in sorted(market_candidates, key=lambda c: -lineup_scores.get(str(c["id"]), float("-inf"))):
+        cid = str(c["id"])
+        score = lineup_scores.get(cid)
+        price = c.get("price") or 0
+        if (
+            score is None
+            or c.get("position") != position
+            or cid not in eligible_ids
+            or cid in reserved_ids
+            or price > max_price
+            or price > available_budget
+            or form_points(c) < config.BIDDING_MIN_AVERAGE_POINTS
+            or (weakest_starter_score is not None and score <= weakest_starter_score)
+        ):
+            continue
+        margin = score - own_score
+        if margin < config.SELLING_UPGRADE_AVAILABLE_MIN_MARGIN:
+            continue
+        extra_cost = price - (own_price or 0)
+        if extra_cost > 0 and margin / (extra_cost / 1_000_000) < config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION:
+            continue
+        return {"id": cid, "price": price, "score": score}
+    return None
+
+
 def score_market_upgrade_candidates(
     own_squad_features: list[dict], market_candidates: list[dict]
 ) -> tuple[dict[str, float], dict[str, dict]]:

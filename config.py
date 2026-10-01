@@ -888,6 +888,22 @@ SWAP_REFILL_MAX_AGE_DAYS = float(os.getenv("SWAP_REFILL_MAX_AGE_DAYS", "3"))
 # con tope dinámico de 18.4M (+20%).
 SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT = float(os.getenv("SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT", "0.25"))
 
+# Ventas permanentes de reserva para swaps (a petición del usuario,
+# 2026-10-01): Futmondo solo hace ofertas sobre nuestras ventas tras el
+# cierre diario, así que un swap que empieza poniendo a la venta al peor de
+# la posición llega tarde (el objetivo ya ha vencido cuando llega la
+# oferta). Con esto, jobs/run_sales.py mantiene SIEMPRE en venta al peor
+# jugador sano de cada posición que tenga suplente (nunca un titular de la
+# alineación guardada), al VM, para tener una oferta esperando -- pero solo
+# la acepta cuando: la plantilla está llena (si hay hueco, se compra sin
+# vender), y hay en el mercado un objetivo de swap en su posición que
+# jobs/run_market.py compraría de verdad (margen y eficiencia de precio de
+# la venta por oportunidad, forma mínima de puja, mejor que el titular más
+# flojo, y precio dentro de SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT sobre el tope
+# dinámico). En ese caso se permite dejar la posición sin suplente (nunca
+# por debajo de los titulares) y se registra el objetivo para la reposición.
+ENABLE_SWAP_STANDBY_LISTINGS = os.getenv("ENABLE_SWAP_STANDBY_LISTINGS", "true").lower() == "true"
+
 # Bloqueo defensivo (a petición del usuario, 2026-08-23): en fin de semana
 # (sábado/domingo, aproximación por día de la semana -- no distingue hora
 # exacta de los partidos), NUNCA se pone en venta a un jugador que esté en

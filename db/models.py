@@ -165,6 +165,9 @@ CREATE TABLE IF NOT EXISTS sales (
                                              -- fallo de listado repetido (caso real: Galarreta, 14 intentos
                                              -- fallidos seguidos el 2026-09-01/02 antes de venderse) solo vivía
                                              -- en el mensaje de Telegram de esa pasada, no en la BD.
+    purpose         TEXT DEFAULT 'normal',  -- 'normal' | 'standby': venta permanente del peor de su
+                                             -- posición para swaps (config.ENABLE_SWAP_STANDBY_LISTINGS),
+                                             -- cuyas ofertas solo se aceptan si hay un swap posible
     created_at      TEXT NOT NULL
 );
 
@@ -343,6 +346,7 @@ def init_db():
         _ensure_column(conn, "futmondo_snapshots", "recent_points", "TEXT")
         _ensure_column(conn, "bids", "error", "TEXT")
         _ensure_column(conn, "sales", "error", "TEXT")
+        _ensure_column(conn, "sales", "purpose", "TEXT DEFAULT 'normal'")
 
 
 # Última fila de futmondo_snapshots/external_stats por jugador (usa
@@ -662,6 +666,28 @@ def get_open_sales() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute("SELECT id, player_id, created_at FROM sales WHERE status = 'listed'").fetchall()
         return [dict(r) for r in rows]
+
+
+def get_standby_sales() -> list[dict]:
+    """
+    Ventas permanentes de reserva para swaps TODAVÍA listadas
+    (`purpose = 'standby'`, `status = 'listed'`), ver
+    config.ENABLE_SWAP_STANDBY_LISTINGS y jobs/run_sales.py.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, player_id, asking_price, created_at FROM sales WHERE status = 'listed' AND purpose = 'standby'"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_sale_purpose(sale_id: int, purpose: str, reason: str | None = None) -> None:
+    """Cambia el propósito de una venta listada (p.ej. 'standby' -> 'normal' si pasa a venderse por otra vía)."""
+    with get_connection() as conn:
+        if reason is None:
+            conn.execute("UPDATE sales SET purpose = ? WHERE id = ?", (purpose, sale_id))
+        else:
+            conn.execute("UPDATE sales SET purpose = ?, reason = ? WHERE id = ?", (purpose, reason, sale_id))
 
 
 def update_sale_status(sale_id: int, status: str) -> None:
