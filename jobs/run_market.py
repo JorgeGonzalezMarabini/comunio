@@ -608,8 +608,8 @@ def run():
     # que liberó una venta por "oportunidad de mercado" es para su MISMA
     # posición -- si no, se la llevaba el mejor candidato del mercado fuera
     # cual fuera su posición y el swap vendía sin comprar. Primero el
-    # objetivo registrado (suele haber expirado ya, ver config.
-    # SELLING_ASSUMED_SALE_RESOLUTION_HOURS), si no el candidato de esa
+    # objetivo registrado (el reobjetivo de run_sales lo deja apuntando a
+    # uno vivo al aceptar la oferta), si no el candidato de esa
     # posición con mejor score de alineación que mejore al titular más flojo
     # de hoy. Sin umbral de score de puja (run_sales ya validó la mejora);
     # el tope dinámico por jugador solo puede subir hasta el precio del

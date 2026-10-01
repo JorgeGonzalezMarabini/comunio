@@ -198,7 +198,7 @@ def test_run_sales_persists_swap_target_and_replacement_inside_listing_transacti
     save_sale_replacement() abrían una SEGUNDA conexión para escribir ->
     "database is locked" contra SQLite real. Nunca había saltado en
     producción porque la vía de oportunidad de mercado no llegaba a
-    ejecutarse (ver config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS).
+    ejecutarse (bloqueada por un filtro de tiempo ya retirado).
     """
     roster = [dict(p) for p in ROSTER_442_BASE]
     decision = {

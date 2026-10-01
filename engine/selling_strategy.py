@@ -112,7 +112,7 @@ Refinamientos de "oportunidad de mercado" (a petición del usuario,
 2026-08-23, caso real: el mismo día se vendieron a la vez Raba+Brugué por
 DEL y Camavinga+Dieng por MED, cada pareja justificada por un ÚNICO mejor
 candidato de mercado en su posición -- de ese candidato solo se puede
-fichar uno, así que vender a los dos no tenía sentido). Los cuatro se
+fichar uno, así que vender a los dos no tenía sentido). Los tres se
 aplican SOLO a un candidato que cualifica ÚNICAMENTE por esta vía (si
 también cualifica por plusvalía/pérdida/lesión, esas vías mandan y estos
 filtros no aplican -- ver `reason` más abajo):
@@ -123,7 +123,7 @@ filtros no aplican -- ver `reason` más abajo):
      de la misma posición cualifican, se prioriza el de mayor margen de
      score (peor suplente relativo); el resto se descarta esta vez, igual
      que ya ocurre con el margen de banquillo. Solo cuenta una venta ya
-     APROBADA por b)/c)/d): si el preferido de una posición cae en alguno
+     APROBADA por b)/c): si el preferido de una posición cae en alguno
      de ellos, el siguiente de esa posición sigue optando a la plaza.
 
   b) Eficiencia marginal de precio
@@ -149,21 +149,14 @@ filtros no aplican -- ver `reason` más abajo):
      juntos no se podrían pagar en la misma jornada, aunque cada una por
      separado sí pareciera asequible.
 
-  d) Ventana de tiempo del listado objetivo
-     (`assumed_sale_resolution_hours`, config.
-     SELLING_ASSUMED_SALE_RESOLUTION_HOURS, y `market_listing_expirations`
-     con el `expirationDate` real del candidato, de
-     `FutmondoClient.get_market()`): si al candidato objetivo le queda
-     menos tiempo en el mercado del que se asume que tardará en resolverse
-     nuestra propia venta, no tiene sentido vender con ese objetivo
-     concreto -- para cuando tengamos el dinero, el candidato ya no estará
-     listado. Sin `expirationDate` del candidato (dato no disponible o
-     candidato sin listado real detrás), este filtro queda desactivado
-     para ese candidato, no bloquea por defecto.
+  Sin filtro de tiempo del listado objetivo (quitado 2026-10-01, a
+  petición del usuario): todas las ofertas sobre nuestras ventas llegan
+  tras el cierre diario, cuando el objetivo ya ha vencido, así que ese
+  filtro no protegía nada. La protección real está al ACEPTAR
+  (jobs.run_sales._resolve_swap_target): sin un equivalente vivo, la
+  oferta no se acepta si deja la posición sin suplente.
 
-Los cuatro son opcionales/con default de config -- si el llamador no pasa
-`market_listing_expirations`, (d) simplemente no bloquea a nadie; (a),
-(b) y (c) siempre están activos (tienen default de config, no se pueden
+(a), (b) y (c) siempre están activos (tienen default de config, no se pueden
 desactivar por completo, a diferencia de la vía entera que sí depende de
 `own_squad_features`/`market_candidates`).
 
@@ -572,7 +565,6 @@ def decide_sales(
     max_upgrade_sales_per_position: int = None,
     upgrade_min_score_per_extra_million: float = None,
     market_listing_expirations: dict[str, str] = None,
-    assumed_sale_resolution_hours: float = None,
     own_lineup_player_ids=None,
     enable_weekend_lineup_guard: bool = None,
     purchase_baselines: dict[str, dict] = None,
@@ -662,14 +654,12 @@ def decide_sales(
     candidato de mercado en la misma posición debe superar al score de
     alineación propio del jugador antes de venderlo solo por esto.
 
-    `max_upgrade_sales_per_position`, `upgrade_min_score_per_extra_million`,
-    `market_listing_expirations`, `assumed_sale_resolution_hours`: los
-    cuatro refinamientos de la vía 5 (ver docstring del módulo,
-    "Refinamientos de oportunidad de mercado") — límite por posición,
-    eficiencia marginal de precio, ventana de tiempo del listado objetivo
-    y asequibilidad con presupuesto compartido entre posiciones. Todos por
-    defecto de config salvo `market_listing_expirations` ({} si se omite,
-    desactiva solo el filtro de tiempo).
+    `max_upgrade_sales_per_position`, `upgrade_min_score_per_extra_million`:
+    refinamientos de la vía 5 (ver docstring del módulo, "Refinamientos de
+    oportunidad de mercado") — límite por posición y eficiencia marginal de
+    precio (la asequibilidad con presupuesto compartido usa `budget`).
+    `market_listing_expirations`: `expirationDate` real de los listados de
+    mercado, para los sustitutos de tops ({} si se omite).
 
     `own_lineup_player_ids`: ids (cualquier tipo, se normalizan a string)
     de los TITULARES guardados ahora mismo (`FutmondoClient.get_lineup()
@@ -848,11 +838,6 @@ def decide_sales(
         config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION
         if upgrade_min_score_per_extra_million is None
         else upgrade_min_score_per_extra_million
-    )
-    assumed_sale_resolution_hours = (
-        config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS
-        if assumed_sale_resolution_hours is None
-        else assumed_sale_resolution_hours
     )
     enable_weekend_lineup_guard = (
         config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
@@ -1231,7 +1216,7 @@ def decide_sales(
     # candidatos donde "oportunidad de mercado" es la ÚNICA vía que
     # aplica. Se resuelven en un pre-paso propio, independiente del orden
     # por plusvalía de arriba (aquí manda el margen de score, a petición
-    # del usuario): en orden de mayor margen, cada candidato pasa b)+c)+d)
+    # del usuario): en orden de mayor margen, cada candidato pasa b)+c)
     # y, si los supera, ocupa una de las `max_upgrade_sales_per_position`
     # plazas de su posición (a) -- la oportunidad más clara se queda el
     # presupuesto compartido si varias compiten a la vez.
@@ -1264,12 +1249,6 @@ def decide_sales(
             efficiency = margin / (extra_cost / 1_000_000)
             if efficiency < upgrade_min_score_per_extra_million:
                 continue  # (b) el margen de score no compensa lo mucho más caro que es el objetivo
-
-        target_expiration = parse_iso_datetime(market_listing_expirations.get(best_candidate.get("id")))
-        if target_expiration is not None:
-            time_left = target_expiration - now
-            if time_left < timedelta(hours=assumed_sale_resolution_hours):
-                continue  # (d) el listado objetivo cerraría antes de que nuestra venta se resuelva
 
         prospective_budget = available_budget + own_price
         if target_price > prospective_budget:

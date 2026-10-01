@@ -733,12 +733,11 @@ def test_decide_sales_market_upgrade_shares_budget_across_positions_prioritizing
     assert decisions[0]["player_id"] == 15  # DEF, mayor margen, se queda el presupuesto compartido
 
 
-def test_decide_sales_market_upgrade_blocks_when_target_listing_expires_too_soon():
+def test_decide_sales_market_upgrade_lists_even_if_target_listing_expires_soon():
     """
-    Al candidato objetivo solo le quedan 2h de mercado -- menos de las 12h
-    que se asume que tardará en resolverse nuestra propia venta
-    (config.SELLING_ASSUMED_SALE_RESOLUTION_HOURS) -- no tiene sentido
-    vender para intentar comprarlo, no se vende.
+    Sin filtro de tiempo del listado objetivo (retirado 2026-10-01): aunque
+    al candidato solo le queden 2h, se vende igual -- la protección está al
+    ACEPTAR la oferta (jobs.run_sales._resolve_swap_target), no al listar.
     """
     squad = _full_442_squad()
     squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
@@ -756,49 +755,7 @@ def test_decide_sales_market_upgrade_blocks_when_target_listing_expires_too_soon
         market_listing_expirations={"mercado1": "2026-08-26T14:00:00+00:00"},  # +2h
         now=WEEKDAY_NOW,
     )
-    assert decisions == []
-
-
-def test_decide_sales_market_upgrade_allows_when_target_listing_has_enough_time():
-    """Mismo caso, pero al candidato le quedan 72h -- de sobra para resolver nuestra venta antes -- sí se vende."""
-    squad = _full_442_squad()
-    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
-    bought_by_bot = {"15": 500_000}
-
-    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
-    market_candidates = [_feature_row("mercado1", "DEF", xg=10.0, minutes_played=900)]
-
-    decisions = decide_sales(
-        squad,
-        formation="4-4-2",
-        bought_by_bot=bought_by_bot,
-        own_squad_features=own_squad_features,
-        market_candidates=market_candidates,
-        market_listing_expirations={"mercado1": "2026-08-29T12:00:00+00:00"},  # +72h
-        now=WEEKDAY_NOW,
-    )
-    assert len(decisions) == 1
-    assert decisions[0]["player_id"] == 15
-
-
-def test_decide_sales_market_upgrade_ignores_timing_filter_without_expiration_data():
-    """Sin `market_listing_expirations` (o sin entrada para ese candidato), el filtro de tiempo queda desactivado."""
-    squad = _full_442_squad()
-    squad.append({"id": 15, "name": "Defensa Extra", "role": "defensa", "status": "", "value": 500_000})
-    bought_by_bot = {"15": 500_000}
-
-    own_squad_features = [_feature_row(15, "DEF", xg=0.0, minutes_played=0)]
-    market_candidates = [_feature_row("mercado1", "DEF", xg=10.0, minutes_played=900)]
-
-    decisions = decide_sales(
-        squad,
-        formation="4-4-2",
-        bought_by_bot=bought_by_bot,
-        own_squad_features=own_squad_features,
-        market_candidates=market_candidates,
-        now=WEEKDAY_NOW,
-    )
-    assert len(decisions) == 1
+    assert [d["player_id"] for d in decisions] == [15]
 
 
 def test_decide_sales_weekend_guard_blocks_any_reason_for_a_starter():

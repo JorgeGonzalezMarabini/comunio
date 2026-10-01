@@ -871,33 +871,6 @@ SELLING_UPGRADE_MAX_SALES_PER_POSITION = int(os.getenv("SELLING_UPGRADE_MAX_SALE
 # upgrade "gratis" o barato). Sin calibrar todavía con resultados reales.
 SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION = float(os.getenv("SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION", "0.03"))
 
-# Horas asumidas que tarda en RESOLVERSE nuestra propia venta una vez
-# listada -- a petición del usuario, 2026-08-23 ("el plazo es de 24 horas
-# desde el inicio de la oferta"): Futmondo no da un `expirationDate` fijo
-# para un listado nuestro antes de crearlo (lo decide el juego al listar,
-# ver `FutmondoClient.list_for_sale()`), así que esto es una APROXIMACIÓN
-# deliberadamente conservadora del "caso peor" (nadie puja hasta el final
-# de esa ventana), usada solo para comparar contra el tiempo que le queda
-# al listado del candidato objetivo (`expirationDate` real, ese sí
-# confirmado, ver clients/futmondo_client.py) antes de vender "para poder
-# comprar a X" -- si a X le queda menos tiempo en el mercado del que
-# asumimos que tardará nuestra venta en resolverse, no tiene sentido
-# vender con ese objetivo concreto (para cuando tengamos el dinero, X ya
-# no estará). Sin dato exacto por puja individual todavía (ver TODO.md).
-#
-# 12h, no 24h (2026-09-29, a petición del usuario): con 24h esta vía no
-# podía activarse NUNCA -- todos los listados del mercado se crean tras el
-# cierre diario y vencen juntos en el siguiente (03:50 UTC), así que duran
-# ~23.5h y a ninguno le quedan nunca 24h (caso real: Oblak/Ryan, porteros
-# de media ~5.7, con los nuestros en 1.67 y -2, sin swap posible). Medido
-# en la BD ese día: la primera oferta sobre una venta nuestra llega casi
-# siempre en la primera pasada tras ese mismo cierre diario, a la vez que
-# vence el objetivo, así que el swap no se completa con el objetivo
-# ORIGINAL en el mismo ciclo sino vía reobjetivo al aceptar
-# (jobs.run_sales._resolve_swap_target: equivalente en el mercado nuevo o
-# no se acepta). 12h deja actuar esta vía en la primera mitad del ciclo.
-SELLING_ASSUMED_SALE_RESOLUTION_HOURS = float(os.getenv("SELLING_ASSUMED_SALE_RESOLUTION_HOURS", "12"))
-
 # Reposición tras un swap completado (jobs/run_market.py, ver
 # db.models.get_pending_swap_refills): cuando una venta por "oportunidad
 # de mercado" se ha vendido, run_market puja PRIMERO por el mejor candidato
