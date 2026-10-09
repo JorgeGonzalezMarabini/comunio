@@ -688,3 +688,11 @@ def test_upsert_player_and_snapshot_stores_full_fitness_array(tmp_db, roster_pla
         row = conn.execute("SELECT recent_points, last_points FROM futmondo_snapshots").fetchone()
     assert json.loads(row["recent_points"]) == [4, 2, 14, 3, 6]
     assert row["last_points"] == 6
+
+
+def test_upsert_player_and_snapshot_stores_matches_played(tmp_db, roster_player_factory):
+    roster_player = roster_player_factory(id=1002, role="defensa")
+    roster_player["average"]["matches"] = 4
+    with get_connection() as conn:
+        sync_data._upsert_player_and_snapshot(conn, roster_player, NOW)
+    assert get_player_features()[0]["matches"] == 4

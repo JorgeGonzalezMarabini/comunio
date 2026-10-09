@@ -228,8 +228,10 @@ EVALUATOR_XG90_MIN_MINUTES_RATIO = float(os.getenv("EVALUATOR_XG90_MIN_MINUTES_R
 # Puntos: media ponderada de `average.fitness` (últimas 5 jornadas del
 # equipo, 0 si no jugó) con peso DECAY^k para la jornada de hace k (la
 # última pesa 1, la anterior 0.7, luego 0.49...). Las jornadas anteriores
-# a esas 5 entran a través de la media de temporada, con el peso que les
-# correspondería en la misma serie geométrica (DECAY^5 / (1 - DECAY)):
+# a esas 5 entran a través de la media de temporada -- por partido del
+# EQUIPO (puntos totales / team_games), no la de Futmondo por partido
+# jugado, que con 1 partido de 8 puntos daba 8 (2026-10-09) -- con el peso
+# que les correspondería en la misma serie geométrica (DECAY^5 / (1 - DECAY)):
 # con 0.7, las 5 últimas suman el 83% del peso. Sin `fitness`, se usa la
 # media de temporada tal cual. Sin calibrar todavía: con solo ~30 jornadas
 # reconstruibles del histórico, ni la media plana ni la ponderada predicen
@@ -410,6 +412,14 @@ BIDDING_MIN_SCORE_THRESHOLD = float(os.getenv("BIDDING_MIN_SCORE_THRESHOLD", "0.
 # apenas participación), no solo los casos extremos. Sin calibrar todavía
 # con resultados reales tras el cambio.
 BIDDING_MIN_AVERAGE_POINTS = float(os.getenv("BIDDING_MIN_AVERAGE_POINTS", "3.0"))
+
+# Mínimo de partidos jugados en la temporada (`average.matches` de
+# Futmondo) para fichar a un jugador -- filtro DURO, igual que el de
+# arriba, en pujas, reposición de swaps y sustitutos de tops (a petición
+# del usuario, 2026-10-09): Dani Martínez, 1 partido de 8 puntos, salía
+# con media 8 y se pujó por él; no volvió a jugar. Sin dato (snapshots
+# anteriores a guardar `matches`) no bloquea.
+BIDDING_MIN_MATCHES_PLAYED = int(os.getenv("BIDDING_MIN_MATCHES_PLAYED", "3"))
 
 # --- "Presupuesto objetivo" (a petición del usuario, 2026-09-07) ---
 # Hasta ahora el presupuesto disponible solo subía un TECHO pasivo (cuánto

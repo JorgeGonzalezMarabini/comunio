@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import config
-from engine.evaluator import form_points
+from engine.evaluator import form_points, meets_min_matches
 
 
 class BudgetExceededError(Exception):
@@ -347,6 +347,10 @@ def decide_bid(
     config.py. `average_points` ausente (None) cuenta como 0, mismo
     criterio que engine.evaluator.normalize_pool.
 
+    Además, filtro DURO de partidos jugados (`engine.evaluator.
+    meets_min_matches`, config.BIDDING_MIN_MATCHES_PLAYED): con uno o dos
+    partidos, la forma no es representativa.
+
     `player["listing_price"]` (a petición del usuario, 2026-08-22): a
     diferencia del VM, que siempre lo calcula Futmondo, el precio de SALIDA
     de un listado lo elige quien pone al jugador en venta -- otro manager,
@@ -388,6 +392,10 @@ def decide_bid(
         # Filtro duro independiente del score (ver docstring de arriba y
         # config.BIDDING_MIN_AVERAGE_POINTS) -- rendimiento YA demostrado
         # pobre o nulo, sin lesión/duda que lo justifique.
+        return None
+    if not meets_min_matches(player):
+        # Filtro duro (config.BIDDING_MIN_MATCHES_PLAYED): con muy pocos
+        # partidos la media no es representativa.
         return None
 
     price = player.get("price") or 0
@@ -526,7 +534,7 @@ def is_price_worth_bidding(
     min_average_points = (
         config.BIDDING_MIN_AVERAGE_POINTS if min_average_points is None else min_average_points
     )
-    if form_points(player) < min_average_points:
+    if form_points(player) < min_average_points or not meets_min_matches(player):
         return False
     return (player.get("price") or 0) > 0
 

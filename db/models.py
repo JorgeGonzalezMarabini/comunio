@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS futmondo_snapshots (
     recent_points   TEXT,                    -- JSON de "average.fitness": puntos de las últimas 5 jornadas del
                                               -- EQUIPO, de la más antigua a la más reciente, 0 si no jugó
                                               -- (confirmado 2026-09-23, ver clients/futmondo_client.py)
+    matches         INTEGER,                 -- "average.matches": partidos JUGADOS en la temporada
     recorded_at     TEXT NOT NULL
 );
 
@@ -344,6 +345,7 @@ def init_db():
         _ensure_column(conn, "futmondo_snapshots", "listing_price", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "is_clause", "INTEGER")
         _ensure_column(conn, "futmondo_snapshots", "recent_points", "TEXT")
+        _ensure_column(conn, "futmondo_snapshots", "matches", "INTEGER")
         _ensure_column(conn, "bids", "error", "TEXT")
         _ensure_column(conn, "sales", "error", "TEXT")
         _ensure_column(conn, "sales", "purpose", "TEXT DEFAULT 'normal'")
@@ -363,7 +365,7 @@ latest_external AS (
 SELECT
     p.id, p.name, p.team, p.position,
     s.price, s.buy_price, s.points, s.last_points, s.average_points,
-    s.on_market, s.status, s.listing_price, s.is_clause, s.recent_points,
+    s.on_market, s.status, s.listing_price, s.is_clause, s.recent_points, s.matches,
     e.xg, e.xa, e.minutes_played, e.games, e.team_games, e.team_clean_sheets, e.non_penalty_goals, e.assists, e.understat_position,
     -- Minutos y partidos del equipo al cierre de la jornada (team_games) de
     -- hace al menos {recent_window} partidos, misma temporada: permite a

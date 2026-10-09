@@ -101,6 +101,16 @@ def test_decide_bid_below_min_average_points_returns_none_even_with_good_score()
     )
 
 
+def test_decide_bid_rejects_players_with_too_few_matches():
+    """config.BIDDING_MIN_MATCHES_PLAYED (2026-10-09): 1 partido de 8 no basta para pujar."""
+    player = {"id": "1", "score": 0.9, "price": 1_000_000, "average_points": 8.0, "matches": 1}
+    assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=1.0) is None
+    assert not is_price_worth_bidding(player, min_score_threshold=0.15, min_average_points=1.0)
+    player["matches"] = 3
+    assert decide_bid(player, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=1.0)
+    assert is_price_worth_bidding(player, min_score_threshold=0.15, min_average_points=1.0)
+
+
 def test_decide_bid_missing_average_points_treated_as_zero():
     """`average_points` ausente cuenta como 0, mismo criterio que engine.evaluator.normalize_pool."""
     player = {"id": "1", "score": 0.9, "price": 1_000_000}

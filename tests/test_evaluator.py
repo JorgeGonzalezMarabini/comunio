@@ -484,7 +484,12 @@ def test_lineup_weights_dont_penalize_expensive_player_by_price():
 # --- Forma ponderada por recencia (a petición del usuario, 2026-09-23, ver
 # config.EVALUATOR_RECENT_POINTS_DECAY) ---
 
-from engine.evaluator import form_points, weighted_recent_points  # noqa: E402
+from engine.evaluator import (  # noqa: E402
+    form_points,
+    meets_min_matches,
+    season_points_per_team_game,
+    weighted_recent_points,
+)
 
 
 def test_weighted_recent_points_gives_more_weight_to_latest_matchdays():
@@ -514,6 +519,32 @@ def test_form_points_falls_back_to_season_average():
     assert form_points({"average_points": 4.0}) == 4.0
     assert form_points({}) == 0
     assert form_points({"average_points": 6.0, "recent_points": [0, 0, 0, 0, 0]}) < 1.5  # vs 6.0 de media plana
+
+
+def test_season_points_per_team_game_uses_team_games_capped_at_average():
+    # Caso real 2026-10-09 (Dani Martínez): 1 partido de 8 puntos en 7 jornadas.
+    assert season_points_per_team_game(8.0, 8, 7) == pytest.approx(8 / 7)
+    # Nunca por encima de la media por partido jugado (team_games desfasado).
+    assert season_points_per_team_game(3.0, 12, 2) == 3.0
+    # Sin team_games o sin puntos: la media de Futmondo tal cual.
+    assert season_points_per_team_game(8.0, 8, None) == 8.0
+    assert season_points_per_team_game(8.0, None, 7) == 8.0
+    assert season_points_per_team_game(8.0, 8, 0) == 8.0
+
+
+def test_form_points_one_good_match_does_not_inflate_form():
+    """Un único partido de 8 y cinco jornadas sin jugar: la cola usa 8/7, no 8."""
+    dani = {"average_points": 8.0, "points": 8, "team_games": 7, "recent_points": [0, 0, 0, 0, 0]}
+    regular = {**dani, "team_games": None}
+    assert form_points(dani) < 0.25
+    assert form_points(regular) > 1.3  # comportamiento anterior, sin team_games
+    assert form_points({"average_points": 8.0, "points": 8, "team_games": 7}) == pytest.approx(8 / 7)
+
+
+def test_meets_min_matches():
+    assert meets_min_matches({"matches": 1}, min_matches=3) is False
+    assert meets_min_matches({"matches": 3}, min_matches=3) is True
+    assert meets_min_matches({}, min_matches=3) is True  # sin dato no bloquea
 
 
 def test_normalize_pool_prefers_recent_form_over_flat_average():

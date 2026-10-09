@@ -442,7 +442,7 @@ def _feature_row(player_id, position, price=500_000, points=10, xg=0.0, minutes_
         "id": player_id,
         "position": position,
         "price": price,
-        "points": points,
+        "points": points * team_games,  # total de temporada: `points` es la media por partido, jugando todos
         "last_points": points,
         "average_points": points,
         "status": status,

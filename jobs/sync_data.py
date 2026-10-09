@@ -291,8 +291,8 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
         """
         INSERT INTO futmondo_snapshots
             (player_id, price, buy_price, points, last_points, average_points, on_market, status,
-             listing_price, is_clause, recent_points, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             listing_price, is_clause, recent_points, matches, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             player_id,
@@ -306,6 +306,7 @@ def _upsert_player_and_snapshot(conn, player: dict, now: str, on_market: bool = 
             player.get("price"),  # precio de SALIDA del listado, distinto del VM -- ver docstring arriba
             None if is_clause is None else (1 if is_clause else 0),
             json.dumps(recent_points) if recent_points else None,
+            _parse_int(average.get("matches")),
             now,
         ),
     )
@@ -363,12 +364,12 @@ def _close_stale_market_listings(conn, market_player_ids: set, roster_player_ids
             """
             INSERT INTO futmondo_snapshots
                 (player_id, price, buy_price, points, last_points, average_points, on_market, status,
-                 listing_price, is_clause, recent_points, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                 listing_price, is_clause, recent_points, matches, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
             """,
             (
                 r["player_id"], r["price"], r["buy_price"], r["points"], r["last_points"], r["average_points"],
-                r["status"], r["listing_price"], r["is_clause"], r["recent_points"], now,
+                r["status"], r["listing_price"], r["is_clause"], r["recent_points"], r["matches"], now,
             ),
         )
     return len(stale)

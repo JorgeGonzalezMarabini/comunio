@@ -31,6 +31,10 @@ def weighted_recent_points(recent_points, season_average=None, decay: float = No
     representante de las jornadas anteriores con el peso restante de la
     misma serie geométrica (`decay**n / (1 - decay)`).
 
+    `season_average` debe estar en la misma escala que `recent_points`
+    (por partido del EQUIPO, ver `season_points_per_team_game`), no la
+    media por partido jugado de Futmondo.
+
     Devuelve None si no hay `recent_points` utilizables (el llamador cae a
     la media de temporada); si falta `season_average`, solo el array.
     """
@@ -54,16 +58,59 @@ def weighted_recent_points(recent_points, season_average=None, decay: float = No
     return total / weight_sum
 
 
+def season_points_per_team_game(season_average, season_points=None, team_games=None) -> float | None:
+    """
+    Media de temporada en la MISMA escala que `recent_points` (0 en las
+    jornadas que no jugó): puntos totales / partidos del EQUIPO. Futmondo
+    da `average.average` por partido JUGADO -- con un solo partido de 8
+    puntos en 7 jornadas, la media es 8 y no 1.1 (caso real 2026-10-09,
+    Dani Martínez: inflaba su forma y su puja). Topada en `season_average`
+    (nunca puede superarla; protege de un `team_games` de Understat
+    desfasado o de un fichaje que cambió de equipo). Sin `season_points` o
+    sin `team_games` (> 0), `season_average` tal cual.
+    """
+    numeric = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)  # noqa: E731
+    if not numeric(season_points) or not numeric(team_games) or team_games <= 0:
+        return season_average
+    per_team_game = season_points / team_games
+    if numeric(season_average):
+        return min(season_average, per_team_game)
+    return per_team_game
+
+
+def season_baseline(player: dict) -> float | None:
+    """`season_points_per_team_game()` para features de `db.models.get_player_features()`."""
+    return season_points_per_team_game(player.get("average_points"), player.get("points"), player.get("team_games"))
+
+
 def form_points(player: dict) -> float:
     """
     Puntos por jornada a usar en decisiones: forma ponderada
     (`weighted_recent_points`) si el jugador trae `recent_points`, si no su
-    `average_points` de temporada (0 si tampoco).
+    media de temporada por partido del equipo (`season_baseline`; 0 si
+    tampoco).
     """
-    form = weighted_recent_points(player.get("recent_points"), player.get("average_points"))
+    baseline = season_baseline(player)
+    form = weighted_recent_points(player.get("recent_points"), baseline)
     if form is not None:
         return form
-    return player.get("average_points") or 0
+    return baseline or 0
+
+
+def meets_min_matches(player: dict, min_matches: int = None) -> bool:
+    """
+    Filtro duro de compra (config.BIDDING_MIN_MATCHES_PLAYED): partidos
+    jugados en la temporada (`matches`, `average.matches` de Futmondo) >=
+    el mínimo -- con uno o dos partidos la media no dice nada (caso real
+    2026-10-09: Dani Martínez, 1 partido de 8 puntos, se pujó por él y no
+    volvió a jugar). Sin dato (`matches` None, snapshots anteriores a
+    guardarlo) no bloquea.
+    """
+    min_matches = config.BIDDING_MIN_MATCHES_PLAYED if min_matches is None else min_matches
+    matches = player.get("matches")
+    if not isinstance(matches, (int, float)) or isinstance(matches, bool):
+        return True
+    return matches >= min_matches
 
 
 def score_player(player_stats: dict, weights: dict = None) -> float:
@@ -206,14 +253,15 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
 
     Definición de cada feature (razonada, no perfecta — ver TODOs):
       - points_per_price: forma ponderada (`form_points()`, ver
-        config.EVALUATOR_RECENT_POINTS_DECAY; media de temporada si no hay
+        config.EVALUATOR_RECENT_POINTS_DECAY; media de temporada por
+        partido del equipo, `season_baseline()`, si no hay
         `recent_points`) / precio_en_millones. Puntos por jornada (no el
         total), para no penalizar a quien lleva menos jornadas jugadas por
         lesión/fichaje tardío, dando más peso a las jornadas recientes.
       - form: la propia forma ponderada (`form_points()`), sin dividir por
         precio -- el NIVEL de puntos, peso "futmondo_form" (ver
         config.LINEUP_EVALUATOR_WEIGHTS).
-      - trend: forma ponderada - average_points (o last_points -
+      - trend: forma ponderada - `season_baseline()` (o last_points -
         average_points si no hay `recent_points`). Positivo si el
         rendimiento reciente es mejor que su media de temporada.
         Ponderada por la participación real (minutes_played_ratio de
@@ -291,13 +339,16 @@ def normalize_pool(raw_players: list[dict]) -> list[dict]:
     for i, p in enumerate(raw_players):
         price = p.get("price") or 0
         avg_points = p.get("average_points") or 0
-        recent_form = weighted_recent_points(p.get("recent_points"), p.get("average_points"))
-        form = recent_form if recent_form is not None else avg_points
+        baseline = season_baseline(p)
+        recent_form = weighted_recent_points(p.get("recent_points"), baseline)
+        form = recent_form if recent_form is not None else (baseline or 0)
         form_level[i] = form
         points_per_price[i] = form / (price / 1_000_000) if price > 0 else 0
 
         if recent_form is not None:
-            trend[i] = recent_form - avg_points
+            # Misma escala que la forma (por partido del equipo), no la
+            # media por partido jugado de Futmondo.
+            trend[i] = recent_form - (baseline or 0)
         else:
             last_points = p.get("last_points")
             trend[i] = (last_points if last_points is not None else avg_points) - avg_points

@@ -318,7 +318,13 @@ from datetime import datetime, timedelta, timezone
 
 import config
 from clients.futmondo_client import FUTMONDO_POSITION_MAP, is_confirmed_injured_status, is_injury_status
-from engine.evaluator import evaluate_players, form_points, weighted_recent_points
+from engine.evaluator import (
+    evaluate_players,
+    form_points,
+    meets_min_matches,
+    season_points_per_team_game,
+    weighted_recent_points,
+)
 from engine.lineup_optimizer import FORMATIONS
 from engine.squad_risk import assess_squad_depth
 
@@ -398,8 +404,9 @@ def find_standby_swap_target(
         MIN_MARGIN sobre el propio y eficiencia por millón extra >=
         config.SELLING_UPGRADE_MIN_SCORE_PER_EXTRA_MILLION (mismos umbrales
         que la venta por oportunidad de mercado).
-      - forma >= config.BIDDING_MIN_AVERAGE_POINTS (filtro duro de
-        decide_bid, que la reposición también aplica).
+      - forma >= config.BIDDING_MIN_AVERAGE_POINTS y partidos jugados >=
+        config.BIDDING_MIN_MATCHES_PLAYED (filtros duros de decide_bid,
+        que la reposición también aplica).
       - mejor que el titular más flojo de la posición
         (`weakest_starter_score`; None = sin listón).
       - precio <= `max_price` (tope dinámico + SWAP_REFILL_MAX_CAP_
@@ -423,6 +430,7 @@ def find_standby_swap_target(
             or price > max_price
             or price > available_budget
             or form_points(c) < config.BIDDING_MIN_AVERAGE_POINTS
+            or not meets_min_matches(c)
             or (weakest_starter_score is not None and score <= weakest_starter_score)
         ):
             continue
@@ -491,16 +499,40 @@ def score_market_upgrade_candidates(
     return lineup_score_by_id, best_market_candidate_by_position
 
 
+def roster_form(player: dict, team_games_by_id: dict[str, int] = None) -> float | None:
+    """
+    Forma ponderada (`engine.evaluator.weighted_recent_points`) de un item
+    de roster de Futmondo (`average.fitness`, con la media de temporada
+    por partido del equipo -- `points` / `team_games_by_id[id]`, ver
+    `engine.evaluator.season_points_per_team_game`). Sin `fitness`, esa
+    media; None si no hay ninguna.
+    """
+    average_info = player.get("average") if isinstance(player.get("average"), dict) else {}
+    baseline = season_points_per_team_game(
+        average_info.get("average"), player.get("points"), (team_games_by_id or {}).get(str(player["id"]))
+    )
+    form = weighted_recent_points(average_info.get("fitness"), baseline)
+    return baseline if form is None else form
+
+
+def team_games_by_player_id(features: list[dict] = None) -> dict[str, int]:
+    """{id: team_games} de features de `db.models.get_player_features()` (Understat)."""
+    return {str(p["id"]): p["team_games"] for p in features or [] if p.get("team_games")}
+
+
 def own_quality_scores(
-    squad: list[dict], own_squad_features: list[dict] = None, lineup_score_by_id: dict[str, float] = None
+    squad: list[dict],
+    own_squad_features: list[dict] = None,
+    lineup_score_by_id: dict[str, float] = None,
+    team_games_by_id: dict[str, int] = None,
 ) -> dict[str, float]:
     """
     Score de calidad de cada jugador de `squad` para rankearlos dentro de
     su posición (ver docstring del módulo, "Protección de los mejores"):
     la forma ponderada por recencia de sus PUNTOS de Futmondo
-    (`average.fitness`/`average.average` del roster, ver
-    `engine.evaluator.weighted_recent_points`; 0 en las jornadas que no
-    jugó). Deliberadamente no el score de alineación
+    (`roster_form()`: `average.fitness` del roster con la media de
+    temporada por partido del equipo -- `team_games_by_id`, por defecto
+    sacado de `own_squad_features`; 0 en las jornadas que no jugó). Deliberadamente no el score de alineación
     (config.LINEUP_EVALUATOR_WEIGHTS): ese no incluye el NIVEL de puntos,
     solo tendencia/xG/minutos -- con datos reales (2026-09-23) ponía a
     Sannadi (media 1.3) por delante de Jutglà (4.6). Solo si un jugador no
@@ -510,11 +542,10 @@ def own_quality_scores(
     ningún dato no aparecen (ni protegidos ni "peores").
     """
     scores = {}
+    if team_games_by_id is None:
+        team_games_by_id = team_games_by_player_id(own_squad_features)
     for p in squad:
-        average_info = p.get("average") if isinstance(p.get("average"), dict) else {}
-        form = weighted_recent_points(average_info.get("fitness"), average_info.get("average"))
-        if form is None:
-            form = average_info.get("average")
+        form = roster_form(p, team_games_by_id)
         if isinstance(form, (int, float)) and not isinstance(form, bool):
             scores[str(p["id"])] = float(form)
     missing = {str(p["id"]) for p in squad} - set(scores)
@@ -650,6 +681,8 @@ def find_top_player_replacement(
         cid = str(c["id"])
         if cid in exclude_ids or c.get("position") != position or is_injury_status(c.get("status")):
             continue
+        if not meets_min_matches(c):
+            continue  # misma exigencia que cualquier compra (config.BIDDING_MIN_MATCHES_PLAYED)
         form = form_points(c)
         cost = max(c.get("price") or 0, c.get("listing_price") or 0)
         if form <= 0 or cost <= 0 or cost > max_cost:
@@ -1047,14 +1080,15 @@ def decide_sales(
 
     # Protección de los mejores / rotación sobre los peores (ver docstring
     # del módulo): ranking de calidad por posición de TODA la plantilla.
-    quality_scores = own_quality_scores(squad, own_squad_features, lineup_score_by_id)
+    team_games_by_id = team_games_by_player_id(own_squad_features)
+    quality_scores = own_quality_scores(squad, own_squad_features, lineup_score_by_id, team_games_by_id)
     protected_ids, worst_id_by_position = rank_positions(squad, quality_scores, formation=formation)
     # Tops que solo se venden con sustituto (ver docstring del módulo): mismo
     # ranking, pero un "doubt" sigue contando como top -- solo la lesión
     # CONFIRMADA es excepción -- y solo con forma real de puntos (sin el
     # respaldo del score de alineación, otra escala): es la que se compara
     # contra la del sustituto.
-    form_scores = own_quality_scores(squad)
+    form_scores = own_quality_scores(squad, team_games_by_id=team_games_by_id)
     replacement_protected_ids = (
         rank_positions(squad, form_scores, formation=formation, include_doubtful=True)[0]
         if top_players_require_replacement
@@ -1135,12 +1169,9 @@ def decide_sales(
         purchased_at = parse_iso_datetime(baseline.get("purchased_at"))
         days_held = (now - purchased_at).total_seconds() / 86400 if purchased_at else None
         # Forma ponderada por recencia (config.EVALUATOR_RECENT_POINTS_DECAY)
-        # a partir de `average.fitness` del roster; media de temporada si no
-        # viene el array.
-        average_info = player.get("average") if isinstance(player.get("average"), dict) else {}
-        average_points = weighted_recent_points(average_info.get("fitness"), average_info.get("average"))
-        if average_points is None:
-            average_points = average_info.get("average")
+        # a partir de `average.fitness` del roster; media de temporada (por
+        # partido del equipo, ver roster_form()) si no viene el array.
+        average_points = roster_form(player, team_games_by_id)
         loss_threshold = effective_loss_cut_threshold(
             max_loss_pct,
             days_held=days_held,
