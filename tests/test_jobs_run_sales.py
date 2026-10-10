@@ -1348,6 +1348,40 @@ def test_run_sales_delists_standby_that_enters_computed_lineup_and_relists_the_w
     assert "Venta de reserva retirada (entra en el once): jugador 2." in notify_mock.call_args[0][0]
 
 
+def test_run_sales_closes_standby_delisted_outside_the_bot(tmp_db, monkeypatch):
+    """Retirada a mano en Futmondo (caso real 2026-10-10, Ryan): se cierra sin llamar a cancel_sale."""
+    _fixed_run_sales_now(monkeypatch, datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc))
+    sale_id = _seed_standby_sale(player_id="2")
+    roster = [dict(p, market=False) for p in STANDBY_ROSTER]
+    scores = {str(p["id"]): 0.5 for p in roster}
+    scores.update({"1": 0.15, "2": 0.88})
+    monkeypatch.setattr(run_sales, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
+    cancelled, listed = [], []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 18}}}
+
+        def cancel_sale(self, player_id):
+            cancelled.append(player_id)
+            return {"code": "api.general.ok"}
+
+        def list_for_sale(self, player_id, price):
+            listed.append((player_id, price))
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+
+    assert cancelled == []
+    assert listed == [("1", 2_000_000)]
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM sales WHERE id = ?", (sale_id,)).fetchone()["status"] == "delisted"
+
+
 def test_route_standby_decisions_drops_market_only_sale_and_converts_other_reasons(tmp_db):
     sale_id = _seed_standby_sale(player_id="2")
     roster = [dict(p) for p in STANDBY_ROSTER]

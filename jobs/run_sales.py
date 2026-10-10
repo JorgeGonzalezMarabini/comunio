@@ -1179,6 +1179,10 @@ def _maintain_standby_listings(
         player = remaining_by_id.get(pid)
         if player is None:
             continue
+        if not player.get("market"):
+            update_sale_status(sale["id"], "delisted")  # retirada fuera del bot
+            cancelled.append((sale, "ya no estaba en el mercado"))
+            continue
         if is_confirmed_injured_status(player.get("status")):
             why = "lesión confirmada"
         elif pid in protected_ids:
