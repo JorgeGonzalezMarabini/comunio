@@ -1810,6 +1810,13 @@ def test_pick_standby_listings_protects_computed_starters_not_stale_saved_lineup
         squad, scores, {"DEL": 2}, saved_lineup, set(), now=saturday, enable_weekend_lineup_guard=True
     )
     assert [p["player_id"] for p in picks] == [32]
+    # La jornada empieza el viernes por la tarde: desde la primera pasada de
+    # set_lineup (17:23 de Madrid) también se protege.
+    friday_evening = datetime(2026, 10, 9, 16, 0, tzinfo=timezone.utc)  # 18:00 CEST
+    picks = pick_standby_listings(
+        squad, scores, {"DEL": 2}, saved_lineup, set(), now=friday_evening, enable_weekend_lineup_guard=True
+    )
+    assert [p["player_id"] for p in picks] == [32]
     picks = pick_standby_listings(
         squad, scores, {"DEL": 2}, saved_lineup, set(), now=saturday, enable_weekend_lineup_guard=False
     )

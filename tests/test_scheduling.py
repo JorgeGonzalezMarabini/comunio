@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from scheduling import is_within_local_window
+import pytest
+
+from scheduling import is_matchday_lineup_guard_time, is_within_local_window
 
 WINDOW = ((17, 23), (21, 43))  # misma ventana local que usa jobs/set_lineup.py
 
@@ -50,3 +52,20 @@ def test_fixed_utc_cron_would_miss_the_window_in_winter():
     """
     start, end = WINDOW
     assert not is_within_local_window(_utc("2026-01-16T15:23:00"), start, end)
+
+
+@pytest.mark.parametrize(
+    "now_utc, expected",
+    [
+        (datetime(2026, 10, 8, 18, 0, tzinfo=timezone.utc), False),  # jueves
+        (datetime(2026, 10, 9, 15, 22, tzinfo=timezone.utc), False),  # viernes 17:22 CEST
+        (datetime(2026, 10, 9, 15, 23, tzinfo=timezone.utc), True),  # viernes 17:23 CEST
+        (datetime(2026, 11, 6, 16, 22, tzinfo=timezone.utc), False),  # viernes 17:22 CET
+        (datetime(2026, 11, 6, 16, 23, tzinfo=timezone.utc), True),  # viernes 17:23 CET
+        (datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc), True),  # sábado
+        (datetime(2026, 10, 11, 21, 59, tzinfo=timezone.utc), True),  # domingo 23:59 CEST
+        (datetime(2026, 10, 11, 22, 0, tzinfo=timezone.utc), False),  # lunes 00:00 CEST
+    ],
+)
+def test_is_matchday_lineup_guard_time(now_utc, expected):
+    assert is_matchday_lineup_guard_time(now_utc) is expected

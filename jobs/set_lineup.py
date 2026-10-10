@@ -107,7 +107,7 @@ from engine.evaluator import evaluate_players
 from engine.lineup_optimizer import apply_fixture_difficulty, build_bench_changes, build_lineup_changes, pick_lineup, pick_substitutes
 from engine.squad_risk import assess_squad_depth, depth_warnings
 from notifier import notify, track_job_run
-from scheduling import is_within_local_window
+from scheduling import SET_LINEUP_WINDOW_START, is_within_local_window
 
 # Ventana horaria LOCAL (Europe/Madrid) real que se busca cubrir con el
 # cron de set_lineup.yml -- ver README, "Delay de GitHub Actions y horas
@@ -115,7 +115,7 @@ from scheduling import is_within_local_window
 # de esta ventana en CET y en CEST) porque GitHub Actions no soporta zona
 # horaria; este es el filtro que hace que, sea cual sea la hora del año,
 # solo se ejecute de verdad dentro de estas horas locales.
-LOCAL_WINDOW_START = (17, 23)
+LOCAL_WINDOW_START = SET_LINEUP_WINDOW_START
 LOCAL_WINDOW_END = (21, 43)
 
 

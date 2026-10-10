@@ -933,9 +933,11 @@ SWAP_STANDBY_MIN_HOLD_DAYS = float(os.getenv("SWAP_STANDBY_MIN_HOLD_DAYS", "7"))
 # el bot compraba con una y vendía con la otra.
 ENABLE_BIDDING_SKIP_WORST_BENCH = os.getenv("ENABLE_BIDDING_SKIP_WORST_BENCH", "true").lower() == "true"
 
-# Bloqueo defensivo (a petición del usuario, 2026-08-23): en fin de semana
-# (sábado/domingo, aproximación por día de la semana -- no distingue hora
-# exacta de los partidos), NUNCA se pone en venta a un jugador que esté en
+# Bloqueo defensivo (a petición del usuario, 2026-08-23): con la jornada en
+# juego (desde el viernes a la hora de la primera pasada de set_lineup,
+# 17:23 de Madrid, hasta el domingo -- ver scheduling.
+# is_matchday_lineup_guard_time; antes solo sábado/domingo, ampliado el
+# 2026-10-10 porque la jornada empieza el viernes por la tarde), NUNCA se pone en venta a un jugador que esté en
 # la alineación TITULAR guardada del bot (`FutmondoClient.get_lineup()`),
 # sea cual sea el motivo (ninguna de las cinco vías queda exenta) -- no
 # está confirmado si Futmondo bloquea o penaliza vender a un titular

@@ -39,3 +39,26 @@ def is_within_local_window(now_utc, start_hm, end_hm):
     start_minutes = start_hm[0] * 60 + start_hm[1]
     end_minutes = end_hm[0] * 60 + end_hm[1]
     return start_minutes <= now_minutes <= end_minutes
+
+
+# Inicio de la ventana de jobs/set_lineup.py (viernes, hora local de
+# Madrid): desde la primera pasada la alineación guardada ya es la de la
+# jornada. Fuente única para set_lineup y para el bloqueo de jornada.
+SET_LINEUP_WINDOW_START = (17, 23)
+_FRIDAY = 4
+
+
+def is_matchday_lineup_guard_time(now_utc):
+    """
+    True desde el viernes a las `SET_LINEUP_WINDOW_START` (hora local de
+    Madrid, primera pasada de jobs/set_lineup.py) hasta el final del
+    domingo: la jornada de LaLiga empieza el viernes por la tarde (a
+    petición del usuario, 2026-10-10 -- antes era sábado/domingo en UTC y
+    dejaba fuera el viernes). Es cuando la alineación guardada es la de la
+    jornada y no debe venderse a un titular suyo (ver
+    config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD).
+    """
+    local = now_utc.astimezone(MADRID_TZ)
+    if local.weekday() > _FRIDAY:
+        return True
+    return local.weekday() == _FRIDAY and (local.hour, local.minute) >= SET_LINEUP_WINDOW_START

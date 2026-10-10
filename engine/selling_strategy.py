@@ -164,7 +164,9 @@ Bloqueo de alineado en fin de semana (config.
 ENABLE_SELLING_WEEKEND_LINEUP_GUARD, activado por defecto, a petición del
 usuario 2026-08-23): si `own_lineup_player_ids` viene informado (ids de
 `FutmondoClient.get_lineup()["answer"]["players"]`, los TITULARES
-guardados, no el banquillo) y hoy es sábado/domingo, ningún jugador de esa
+guardados, no el banquillo) y la jornada está en juego (desde el viernes
+por la tarde hasta el domingo, ver scheduling.is_matchday_lineup_guard_time),
+ningún jugador de esa
 lista se pone en venta esta pasada, sea cual sea el motivo (ninguna de las
 cinco vías queda exenta) -- no está confirmado si Futmondo penaliza vender
 a un titular con la jornada en juego, así que es puramente preventivo.
@@ -327,6 +329,7 @@ from engine.evaluator import (
 )
 from engine.lineup_optimizer import FORMATIONS
 from engine.squad_risk import assess_squad_depth
+from scheduling import is_matchday_lineup_guard_time
 
 
 def pick_standby_listings(
@@ -360,8 +363,9 @@ def pick_standby_listings(
     posición, sin contar a los ya puestos en venta -- mismo criterio que
     engine.squad_risk.weakest_starter_scores() usa al comprar. La
     alineación guardada (`starter_ids`, de `FutmondoClient.get_lineup()`)
-    solo se protege además en fin de semana (sábado/domingo, misma
-    aproximación y mismo config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD que
+    solo se protege además con la jornada en juego (viernes por la tarde a
+    domingo, scheduling.is_matchday_lineup_guard_time; mismo
+    config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD que
     `decide_sales()`): entre jornadas set_lineup no corre y queda desfasada.
 
     Tampoco un recién fichado (`purchased_at_by_id`, ISO de la compra;
@@ -383,7 +387,7 @@ def pick_standby_listings(
     purchased_at_by_id = purchased_at_by_id or {}
     excluded_ids = {str(i) for i in excluded_ids}
     protected_ids = computed_starter_ids(squad, lineup_scores, formation)
-    if enable_weekend_lineup_guard and now.weekday() >= 5:
+    if enable_weekend_lineup_guard and is_matchday_lineup_guard_time(now):
         protected_ids |= {str(i) for i in starter_ids}
     worst_by_position: dict[str, dict] = {}
     for p in squad:
@@ -872,7 +876,9 @@ def decide_sales(
 
     `enable_weekend_lineup_guard`: por defecto
     config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD — si está activo Y hoy es
-    sábado/domingo (`now`), ningún jugador presente en
+    jornada en juego (`now`, ver scheduling.is_matchday_lineup_guard_time:
+    viernes desde la primera pasada de set_lineup hasta el domingo),
+    ningún jugador presente en
     `own_lineup_player_ids` se pone en venta esta pasada, sea cual sea el
     motivo (ver docstring del módulo).
 
@@ -1116,9 +1122,9 @@ def decide_sales(
     own_lineup_ids = {str(i) for i in (own_lineup_player_ids or [])}
     purchase_baselines = purchase_baselines or {}
     recent_price_history = recent_price_history or {}
-    # Aproximación por día de la semana (sábado=5, domingo=6) -- no
-    # distingue la hora exacta de los partidos, ver docstring del módulo.
-    is_weekend_now = now.weekday() >= 5
+    # Desde el viernes por la tarde (primera pasada de set_lineup) hasta el
+    # domingo, ver scheduling.is_matchday_lineup_guard_time().
+    is_weekend_now = is_matchday_lineup_guard_time(now)
     bought_by_bot = bought_by_bot or {}
 
     # Capital total del equipo (plantilla + presupuesto disponible) --

@@ -208,6 +208,7 @@ from engine.selling_strategy import (
     score_market_upgrade_candidates,
 )
 from engine.squad_risk import assess_squad_depth, weakest_starter_scores
+from scheduling import is_matchday_lineup_guard_time
 from notifier import notify, track_job_run, format_number
 
 
@@ -1181,7 +1182,7 @@ def _maintain_standby_listings(
     if (
         not own_lineup_player_ids
         and config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
-        and datetime.fromisoformat(now).weekday() >= 5
+        and is_matchday_lineup_guard_time(datetime.fromisoformat(now))
     ):
         return [], cancelled, []
 
