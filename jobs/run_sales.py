@@ -572,7 +572,8 @@ def _process_received_offers(
     now: datetime,
     awaiting_replacement_ids: set[str] = frozenset(),
     standby: dict | None = None,
-) -> tuple[list[dict], list[tuple[dict, str]], list[dict], list[tuple[dict, str]]]:
+    lineup_blocked_ids: set[str] = frozenset(),
+) -> tuple[list[dict], list[tuple[dict, str]], list[dict], list[tuple[dict, str]], list[dict]]:
     """
     Lee las ofertas de compra recibidas sobre jugadores propios puestos en
     venta NORMAL (`client.get_my_players_in_market()[].bids`) y acepta
@@ -653,13 +654,20 @@ def _process_received_offers(
     (`save_swap_target`) para la reposición de jobs/run_market.py. Se
     procesan después de las normales, para ver el banquillo que dejen.
 
-    Devuelve (aceptadas, fallidas, omitidas_por_riesgo, reservas_en_espera)
-    para el resumen de notificación de `run()`. Un fallo al aceptar una oferta concreta (red
+    `lineup_blocked_ids`: titulares de la alineación guardada con la jornada
+    en juego (a petición del usuario, 2026-10-10: mismo bloqueo que al
+    listar, config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD -- caso real: Dani
+    Martínez puesto a mano en venta siendo titular de la jornada). Sus
+    ofertas se registran pero no se aceptan, sea la venta del bot, de
+    reserva o puesta a mano.
+
+    Devuelve (aceptadas, fallidas, omitidas_por_riesgo, reservas_en_espera,
+    bloqueadas_por_alineación) para el resumen de notificación de `run()`. Un fallo al aceptar una oferta concreta (red
     o rechazo de negocio) no aborta el resto -- se audita en `fallidas` y
     se sigue con el resto de listados.
     """
     listings = client.get_my_players_in_market().get("answer", [])
-    accepted, failed = [], []
+    accepted, failed, blocked_by_lineup = [], [], []
     qualifying = []  # (item, best_bid) -- pendientes del chequeo de riesgo por posición
 
     for item in listings:
@@ -684,6 +692,10 @@ def _process_received_offers(
 
         if str(item["id"]) in awaiting_replacement_ids:
             continue  # top a la espera de fichar a su sustituto: no se acepta todavía
+        if str(item["id"]) in lineup_blocked_ids:
+            if any(_is_futmondo_offer(b) for b in bids):
+                blocked_by_lineup.append(item)
+            continue  # titular de la jornada en juego: no se vende hasta que acabe
 
         futmondo_bids = [b for b in bids if _is_futmondo_offer(b)]
         if not futmondo_bids:
@@ -789,7 +801,7 @@ def _process_received_offers(
         except (requests.RequestException, FutmondoOfferError) as e:
             failed.append((item, str(e)))
 
-    return accepted, failed, skipped_for_risk, standby_waiting
+    return accepted, failed, skipped_for_risk, standby_waiting, blocked_by_lineup
 
 
 def _standby_offer_context(
@@ -972,7 +984,29 @@ def run():
         else None
     )
 
-    offers_accepted, offers_failed, offers_skipped_for_risk, standby_waiting = _process_received_offers(
+    # Alineación TITULAR guardada ahora mismo (para el bloqueo de jornada de
+    # decide_sales() y al aceptar ofertas, ver sus docstrings) -- un fallo de
+    # red aquí tampoco bloquea nada, ese bloqueo simplemente queda
+    # desactivado sin `own_lineup_player_ids`.
+    try:
+        own_lineup_player_ids = {
+            str(p["id"]) for p in client.get_lineup().get("answer", {}).get("players", [])
+        }
+    except requests.RequestException:
+        own_lineup_player_ids = set()
+    lineup_blocked_ids = (
+        own_lineup_player_ids
+        if config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD and is_matchday_lineup_guard_time(now_dt)
+        else set()
+    )
+
+    (
+        offers_accepted,
+        offers_failed,
+        offers_skipped_for_risk,
+        standby_waiting,
+        offers_blocked_by_lineup,
+    ) = _process_received_offers(
         client,
         now,
         _position_by_player_id(roster_items),
@@ -984,6 +1018,7 @@ def run():
         now_dt,
         awaiting_replacement_ids | lost_player_ids,  # recién retirada: ninguna oferta leída antes vale ya
         standby=standby_context,
+        lineup_blocked_ids=lineup_blocked_ids,
     )
     if awaiting_replacement_ids:
         report_lines.append(
@@ -1008,6 +1043,13 @@ def run():
             "margen de suplentes sanos (se deja el listado, se reevalúa en la próxima pasada):"
         )
         for item in offers_skipped_for_risk:
+            report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')})")
+    if offers_blocked_by_lineup:
+        report_lines.append(
+            f"{len(offers_blocked_by_lineup)} oferta(s) NO aceptada(s) por ser titular(es) de la jornada en juego "
+            "(se deja el listado, se reevalúa al acabar la jornada):"
+        )
+        for item in offers_blocked_by_lineup:
             report_lines.append(f"  - jugador {item.get('id')} ({item.get('name')})")
     if standby_waiting:
         report_lines.append(f"{len(standby_waiting)} oferta(s) sobre ventas de reserva en espera (no aceptadas):")
@@ -1039,17 +1081,6 @@ def run():
     # de plazas.
     max_roster_size = information.get("answer", {}).get("configuration", {}).get("maxPlayersInRoster")
     occupancy = f"{len(roster_items)}/{max_roster_size}" if max_roster_size is not None else str(len(roster_items))
-
-    # Alineación TITULAR guardada ahora mismo (para el bloqueo de fin de
-    # semana de decide_sales(), ver su docstring) -- un fallo de red aquí
-    # tampoco bloquea nada, ese bloqueo simplemente queda desactivado sin
-    # `own_lineup_player_ids`.
-    try:
-        own_lineup_player_ids = {
-            str(p["id"]) for p in client.get_lineup().get("answer", {}).get("players", [])
-        }
-    except requests.RequestException:
-        own_lineup_player_ids = set()
 
     # Los mejores solo se venden con sustituto fichado ANTES (ver
     # engine/selling_strategy.py): candidatos que de verdad se pueden

@@ -1524,3 +1524,43 @@ def test_listing_slots_failure_with_max_players_in_market_marks_full(tmp_db):
     assert slots.take("2", "DEF", 0)
     slots.fail("2", "Futmondo rechazó la operación: 'api.error.max_players_in_market'")
     assert slots.free() == 0
+
+
+@pytest.mark.parametrize(
+    "fixed_now, expected_accepts",
+    [
+        # Sábado: titular de la alineación guardada con la jornada en juego.
+        (datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc), []),
+        # Miércoles: sin jornada en juego, la oferta se acepta.
+        (datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc), [("bid1", "25")]),
+    ],
+)
+def test_run_sales_does_not_accept_offer_on_saved_starter_during_matchday(tmp_db, monkeypatch, fixed_now, expected_accepts):
+    """Caso real (2026-10-10): Dani Martínez puesto a mano en venta siendo titular de la jornada."""
+    _fixed_run_sales_now(monkeypatch, fixed_now)
+    monkeypatch.setattr(config, "ENABLE_SELLING_WEEKEND_LINEUP_GUARD", True)
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=2_623_496, bid_id="bid1", offer_price=2_700_000)]}
+
+        def get_lineup(self):
+            return {"answer": {"players": [{"id": 25}]}}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_roster(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify", side_effect=captured.append):
+        run_sales.run()
+
+    assert accept_calls == expected_accepts
+    blocked_line = "1 oferta(s) NO aceptada(s) por ser titular(es) de la jornada en juego"
+    assert (blocked_line in captured[0]) == (not expected_accepts)
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM received_sale_offers").fetchone()[0] == 1  # registrada igual

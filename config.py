@@ -970,7 +970,10 @@ ENABLE_BIDDING_SKIP_WORST_BENCH = os.getenv("ENABLE_BIDDING_SKIP_WORST_BENCH", "
 # sea cual sea el motivo (ninguna de las cinco vías queda exenta) -- no
 # está confirmado si Futmondo bloquea o penaliza vender a un titular
 # mientras la jornada está en juego, así que este bloqueo es puramente
-# preventivo, para no arriesgar los puntos de la jornada en curso.
+# preventivo, para no arriesgar los puntos de la jornada en curso. Desde
+# el 2026-10-10 (a petición del usuario) tampoco se ACEPTAN ofertas por
+# ellos (jobs/run_sales.py, `_process_received_offers`), aunque la venta
+# la haya puesto alguien a mano.
 ENABLE_SELLING_WEEKEND_LINEUP_GUARD = os.getenv("ENABLE_SELLING_WEEKEND_LINEUP_GUARD", "true").lower() == "true"
 
 # Prima sobre el precio de venta pedido por revalorización rápida sostenida
