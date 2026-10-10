@@ -64,7 +64,9 @@ def test_fixed_utc_cron_would_miss_the_window_in_winter():
         (datetime(2026, 11, 6, 16, 23, tzinfo=timezone.utc), True),  # viernes 17:23 CET
         (datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc), True),  # sábado
         (datetime(2026, 10, 11, 21, 59, tzinfo=timezone.utc), True),  # domingo 23:59 CEST
-        (datetime(2026, 10, 11, 22, 0, tzinfo=timezone.utc), False),  # lunes 00:00 CEST
+        (datetime(2026, 10, 11, 22, 0, tzinfo=timezone.utc), True),  # lunes 00:00 CEST
+        (datetime(2026, 10, 12, 21, 59, tzinfo=timezone.utc), True),  # lunes 23:59 CEST
+        (datetime(2026, 10, 12, 22, 0, tzinfo=timezone.utc), False),  # martes 00:00 CEST
     ],
 )
 def test_is_matchday_lineup_guard_time(now_utc, expected):

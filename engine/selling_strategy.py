@@ -165,7 +165,7 @@ ENABLE_SELLING_WEEKEND_LINEUP_GUARD, activado por defecto, a petición del
 usuario 2026-08-23): si `own_lineup_player_ids` viene informado (ids de
 `FutmondoClient.get_lineup()["answer"]["players"]`, los TITULARES
 guardados, no el banquillo) y la jornada está en juego (desde el viernes
-por la tarde hasta el domingo, ver scheduling.is_matchday_lineup_guard_time),
+por la tarde hasta el lunes, ver scheduling.is_matchday_lineup_guard_time),
 ningún jugador de esa
 lista se pone en venta esta pasada, sea cual sea el motivo (ninguna de las
 cinco vías queda exenta) -- no está confirmado si Futmondo penaliza vender
@@ -364,7 +364,7 @@ def pick_standby_listings(
     engine.squad_risk.weakest_starter_scores() usa al comprar. La
     alineación guardada (`starter_ids`, de `FutmondoClient.get_lineup()`)
     solo se protege además con la jornada en juego (viernes por la tarde a
-    domingo, scheduling.is_matchday_lineup_guard_time; mismo
+    lunes, scheduling.is_matchday_lineup_guard_time; mismo
     config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD que
     `decide_sales()`): entre jornadas set_lineup no corre y queda desfasada.
 
@@ -877,7 +877,7 @@ def decide_sales(
     `enable_weekend_lineup_guard`: por defecto
     config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD — si está activo Y hoy es
     jornada en juego (`now`, ver scheduling.is_matchday_lineup_guard_time:
-    viernes desde la primera pasada de set_lineup hasta el domingo),
+    viernes desde la primera pasada de set_lineup hasta el lunes),
     ningún jugador presente en
     `own_lineup_player_ids` se pone en venta esta pasada, sea cual sea el
     motivo (ver docstring del módulo).
@@ -1123,7 +1123,7 @@ def decide_sales(
     purchase_baselines = purchase_baselines or {}
     recent_price_history = recent_price_history or {}
     # Desde el viernes por la tarde (primera pasada de set_lineup) hasta el
-    # domingo, ver scheduling.is_matchday_lineup_guard_time().
+    # lunes, ver scheduling.is_matchday_lineup_guard_time().
     is_weekend_now = is_matchday_lineup_guard_time(now)
     bought_by_bot = bought_by_bot or {}
 

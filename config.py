@@ -935,9 +935,10 @@ ENABLE_BIDDING_SKIP_WORST_BENCH = os.getenv("ENABLE_BIDDING_SKIP_WORST_BENCH", "
 
 # Bloqueo defensivo (a petición del usuario, 2026-08-23): con la jornada en
 # juego (desde el viernes a la hora de la primera pasada de set_lineup,
-# 17:23 de Madrid, hasta el domingo -- ver scheduling.
+# 17:23 de Madrid, hasta el lunes -- ver scheduling.
 # is_matchday_lineup_guard_time; antes solo sábado/domingo, ampliado el
-# 2026-10-10 porque la jornada empieza el viernes por la tarde), NUNCA se pone en venta a un jugador que esté en
+# 2026-10-10 porque la jornada empieza el viernes por la tarde y puede
+# acabar el lunes), NUNCA se pone en venta a un jugador que esté en
 # la alineación TITULAR guardada del bot (`FutmondoClient.get_lineup()`),
 # sea cual sea el motivo (ninguna de las cinco vías queda exenta) -- no
 # está confirmado si Futmondo bloquea o penaliza vender a un titular
