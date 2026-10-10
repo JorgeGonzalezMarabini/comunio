@@ -1150,9 +1150,10 @@ def _maintain_standby_listings(
     y volver a listar perdería la oferta que ya tuviera esperando.
 
     No crea ninguna en una posición donde se acaba de aceptar una oferta en
-    esta pasada (el banquillo real aún no está reflejado), ni si no se pudo
-    leer la alineación guardada (sin ella no se puede garantizar que no se
-    ponga en venta a un titular). Tampoco a un recién fichado
+    esta pasada (el banquillo real aún no está reflejado), ni en fin de
+    semana si no se pudo leer la alineación guardada (es cuando se protege,
+    ver `pick_standby_listings`; entre semana basta con el once calculado).
+    Tampoco a un recién fichado
     (`purchase_baselines[...]["purchased_at"]`, config.SWAP_STANDBY_MIN_HOLD_DAYS).
 
     Devuelve (creadas, retiradas, fallidas).
@@ -1177,7 +1178,11 @@ def _maintain_standby_listings(
                 pass
         kept_positions.add(position_by_player_id.get(pid))
 
-    if not own_lineup_player_ids:
+    if (
+        not own_lineup_player_ids
+        and config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
+        and datetime.fromisoformat(now).weekday() >= 5
+    ):
         return [], cancelled, []
 
     remaining = [p for p in roster_items if str(p["id"]) not in accepted_ids]

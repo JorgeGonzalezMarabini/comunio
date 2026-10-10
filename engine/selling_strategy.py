@@ -339,6 +339,8 @@ def pick_standby_listings(
     purchased_at_by_id: dict[str, str] = None,
     min_hold_days: float = None,
     now: datetime = None,
+    formation: str = None,
+    enable_weekend_lineup_guard: bool = None,
 ) -> list[dict]:
     """
     Ventas permanentes de reserva para swaps (config.ENABLE_SWAP_STANDBY_
@@ -347,8 +349,20 @@ def pick_standby_listings(
     (`bench_by_position`, contando a los ya listados como disponibles), el
     jugador sano (sin lesión ni duda) con PEOR score de alineación
     (`lineup_scores`, config.LINEUP_EVALUATOR_WEIGHTS) que no esté ya en
-    venta, no sea titular de la alineación guardada (`starter_ids`) ni esté
-    en `excluded_ids` (p.ej. ya decidido o vendido en esta misma pasada).
+    venta, no sea titular ni esté en `excluded_ids` (p.ej. ya decidido o
+    vendido en esta misma pasada).
+
+    "Titular" es el once CALCULADO con la plantilla actual (a petición del
+    usuario, 2026-10-10, caso real: con la alineación guardada del
+    2026-10-02 protegiendo a Miguel Rodríguez, score 0.084, se puso en
+    reserva a Borja Iglesias, 0.39, recién fichado): los
+    `FORMATIONS[formation]` mejores sanos por `lineup_scores` de cada
+    posición, sin contar a los ya puestos en venta -- mismo criterio que
+    engine.squad_risk.weakest_starter_scores() usa al comprar. La
+    alineación guardada (`starter_ids`, de `FutmondoClient.get_lineup()`)
+    solo se protege además en fin de semana (sábado/domingo, misma
+    aproximación y mismo config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD que
+    `decide_sales()`): entre jornadas set_lineup no corre y queda desfasada.
 
     Tampoco un recién fichado (`purchased_at_by_id`, ISO de la compra;
     config.SWAP_STANDBY_MIN_HOLD_DAYS por defecto para `min_hold_days`):
@@ -360,10 +374,17 @@ def pick_standby_listings(
     "lineup_score"}], una como mucho por posición; la venta se pide al VM.
     """
     min_hold_days = config.SWAP_STANDBY_MIN_HOLD_DAYS if min_hold_days is None else min_hold_days
+    enable_weekend_lineup_guard = (
+        config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
+        if enable_weekend_lineup_guard is None
+        else enable_weekend_lineup_guard
+    )
     now = now or datetime.now(timezone.utc)
     purchased_at_by_id = purchased_at_by_id or {}
-    starter_ids = {str(i) for i in starter_ids}
     excluded_ids = {str(i) for i in excluded_ids}
+    protected_ids = computed_starter_ids(squad, lineup_scores, formation)
+    if enable_weekend_lineup_guard and now.weekday() >= 5:
+        protected_ids |= {str(i) for i in starter_ids}
     worst_by_position: dict[str, dict] = {}
     for p in squad:
         pid = str(p["id"])
@@ -376,7 +397,7 @@ def pick_standby_listings(
             or (bench_by_position.get(position) or 0) < 1
             or is_injury_status(p.get("status"))
             or p.get("market")
-            or pid in starter_ids
+            or pid in protected_ids
             or pid in excluded_ids
             or pid not in lineup_scores
             or (p.get("value") or 0) <= 0
@@ -391,6 +412,29 @@ def pick_standby_listings(
                 "lineup_score": lineup_scores[pid],
             }
     return list(worst_by_position.values())
+
+
+def computed_starter_ids(squad: list[dict], lineup_scores: dict[str, float], formation: str = None) -> set[str]:
+    """
+    Once calculado con la plantilla actual (ver `pick_standby_listings()`):
+    para cada posición de `formation` (config.DEFAULT_FORMATION por
+    defecto), los mejores sanos por `lineup_scores` que no estén puestos en
+    venta. `squad`: items de `FutmondoClient.get_roster()` ("id", "role",
+    "status", "market"). Sin score, un jugador no cuenta.
+    """
+    slots = FORMATIONS[formation or config.DEFAULT_FORMATION]
+    by_position: dict[str, list[str]] = {}
+    for p in squad:
+        pid = str(p["id"])
+        if pid not in lineup_scores or is_injury_status(p.get("status")) or p.get("market"):
+            continue
+        position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
+        by_position.setdefault(position, []).append(pid)
+    starters = set()
+    for position, required in slots.items():
+        ranked = sorted(by_position.get(position, []), key=lambda pid: lineup_scores[pid], reverse=True)
+        starters.update(ranked[:required])
+    return starters
 
 
 def find_standby_swap_target(

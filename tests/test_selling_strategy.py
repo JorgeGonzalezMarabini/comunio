@@ -1753,27 +1753,67 @@ def test_decide_sales_top_swap_never_sells_the_same_player_twice():
 
 
 def test_pick_standby_listings_worst_healthy_non_starter_per_position_with_bench():
+    wednesday = datetime(2026, 10, 7, tzinfo=timezone.utc)
     squad = [
         {"id": 1, "role": "portero", "status": "", "value": 1_000_000},
         {"id": 2, "role": "portero", "status": "", "value": 1_000_000},
         {"id": 10, "role": "defensa", "status": "", "value": 2_000_000},
         {"id": 11, "role": "defensa", "status": "injured2", "value": 1_000_000},  # lesionado: nunca
         {"id": 12, "role": "defensa", "status": "", "value": 3_000_000},
+        {"id": 13, "role": "defensa", "status": "", "value": 3_000_000},
+        {"id": 14, "role": "defensa", "status": "", "value": 3_000_000},
+        {"id": 15, "role": "defensa", "status": "", "value": 3_000_000},
         {"id": 20, "role": "centrocampista", "status": "", "value": 1_000_000},
     ]
-    scores = {"1": 0.9, "2": 0.1, "10": 0.3, "11": 0.0, "12": 0.4, "20": 0.2}
+    scores = {"1": 0.9, "2": 0.1, "10": 0.3, "11": 0.0, "12": 0.4, "13": 0.5, "14": 0.6, "15": 0.7, "20": 0.2}
     picks = pick_standby_listings(
         squad,
         scores,
         bench_by_position={"POR": 1, "DEF": 1, "MED": 0},
-        starter_ids={1, 12},
+        starter_ids={2},  # alineación guardada: entre semana no protege
         positions_with_standby=set(),
+        now=wednesday,
+        enable_weekend_lineup_guard=True,
     )
     assert sorted((p["player_id"], p["position"], p["asking_price"]) for p in picks) == [
         (2, "POR", 1_000_000),
         (10, "DEF", 2_000_000),
     ]
-    assert pick_standby_listings(squad, scores, {"POR": 1, "DEF": 1}, {1, 12}, positions_with_standby={"POR", "DEF"}) == []
+    assert (
+        pick_standby_listings(
+            squad, scores, {"POR": 1, "DEF": 1}, set(), positions_with_standby={"POR", "DEF"}, now=wednesday
+        )
+        == []
+    )
+
+
+def test_pick_standby_listings_protects_computed_starters_not_stale_saved_lineup():
+    # Caso real (2026-10-06): la alineación guardada del 2026-10-02 tenía a
+    # Miguel Rodríguez (0.084) de titular y se puso en reserva a Borja
+    # Iglesias (0.39). Entre semana manda el once calculado.
+    squad = [
+        {"id": 30, "role": "delantero", "status": "", "value": 18_000_000},  # Jutglà
+        {"id": 31, "role": "delantero", "status": "", "value": 1_000_000},  # Miguel Rodríguez
+        {"id": 32, "role": "delantero", "status": "", "value": 16_000_000},  # Borja Iglesias
+        {"id": 33, "role": "delantero", "status": "", "value": 1_000_000},  # Tsitaishvili
+    ]
+    scores = {"30": 0.83, "31": 0.084, "32": 0.39, "33": 0.45}
+    saved_lineup = {30, 31}
+    wednesday = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    picks = pick_standby_listings(
+        squad, scores, {"DEL": 2}, saved_lineup, set(), now=wednesday, enable_weekend_lineup_guard=True
+    )
+    assert [p["player_id"] for p in picks] == [31]
+    # En fin de semana se protege además la alineación guardada.
+    saturday = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    picks = pick_standby_listings(
+        squad, scores, {"DEL": 2}, saved_lineup, set(), now=saturday, enable_weekend_lineup_guard=True
+    )
+    assert [p["player_id"] for p in picks] == [32]
+    picks = pick_standby_listings(
+        squad, scores, {"DEL": 2}, saved_lineup, set(), now=saturday, enable_weekend_lineup_guard=False
+    )
+    assert [p["player_id"] for p in picks] == [31]
 
 
 def _target_row(cid, price, recent=(6, 6, 6, 6, 6)):
@@ -1819,20 +1859,22 @@ def test_pick_standby_listings_skips_recent_signing():
     # Caso real (2026-10-06): Borja Iglesias, fichado hacía ~15 horas, puesto
     # en reserva como "peor sano de DEL".
     squad = [
+        {"id": 28, "role": "delantero", "status": "", "value": 10_000_000},  # titulares calculados
+        {"id": 29, "role": "delantero", "status": "", "value": 10_000_000},
         {"id": 30, "role": "delantero", "status": "", "value": 16_000_000},  # recién fichado, peor score
         {"id": 31, "role": "delantero", "status": "", "value": 1_000_000},
     ]
-    scores = {"30": 0.39, "31": 0.5}
+    scores = {"28": 0.9, "29": 0.8, "30": 0.39, "31": 0.5}
     purchased_at = {"30": (NOW - timedelta(hours=15)).isoformat(), "31": (NOW - timedelta(days=30)).isoformat()}
     picks = pick_standby_listings(
-        squad, scores, {"DEL": 1}, set(), set(), purchased_at_by_id=purchased_at, min_hold_days=7, now=NOW
+        squad, scores, {"DEL": 2}, set(), set(), purchased_at_by_id=purchased_at, min_hold_days=7, now=NOW
     )
     assert [p["player_id"] for p in picks] == [31]
     # Pasada la antigüedad mínima, vuelve a ser elegible.
     later = NOW + timedelta(days=8)
     picks = pick_standby_listings(
-        squad, scores, {"DEL": 1}, set(), set(), purchased_at_by_id=purchased_at, min_hold_days=7, now=later
+        squad, scores, {"DEL": 2}, set(), set(), purchased_at_by_id=purchased_at, min_hold_days=7, now=later
     )
     assert [p["player_id"] for p in picks] == [30]
     # Sin fecha de compra conocida, no bloquea.
-    assert [p["player_id"] for p in pick_standby_listings(squad, scores, {"DEL": 1}, set(), set(), now=NOW)] == [30]
+    assert [p["player_id"] for p in pick_standby_listings(squad, scores, {"DEL": 2}, set(), set(), now=NOW)] == [30]

@@ -1,6 +1,9 @@
 import runpy
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 import config
 import jobs.run_sales as run_sales
@@ -1240,16 +1243,41 @@ def test_run_sales_keeps_standby_offer_waiting_without_buyable_swap_target(tmp_d
     assert "sin objetivo de swap comprable" in message
 
 
-def test_run_sales_creates_standby_listing_for_worst_non_starter_with_bench(tmp_db, monkeypatch):
+def _fixed_run_sales_now(monkeypatch, fixed):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(run_sales, "datetime", FixedDatetime)
+
+
+@pytest.mark.parametrize(
+    "fixed_now, expected_listed",
+    [
+        # Miércoles: la alineación guardada (13) no se protege -- es el peor
+        # y queda fuera del once calculado (4 DEF de 0.5/0.2 por delante).
+        (datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc), [("13", 500_000)]),
+        # Sábado: se protege además la alineación guardada; el siguiente
+        # peor (14) es del once calculado, así que no se lista ninguno.
+        (datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc), []),
+    ],
+)
+def test_run_sales_creates_standby_listing_for_worst_non_starter_with_bench(
+    tmp_db, monkeypatch, fixed_now, expected_listed
+):
     """
     Pone en venta de reserva al peor sano de cada posición CON suplente y
-    que no sea titular guardado: aquí solo DEF (5 para 4 puestos). POR (1
-    para 1) y el resto, sin suplente, no.
+    fuera del once calculado (y, en fin de semana, de la alineación
+    guardada): aquí solo DEF (5 para 4 puestos). POR (1 para 1) y el resto,
+    sin suplente, no.
     """
+    _fixed_run_sales_now(monkeypatch, fixed_now)
+    monkeypatch.setattr(config, "ENABLE_SELLING_WEEKEND_LINEUP_GUARD", True)
     roster = [dict(p) for p in ROSTER_442_BASE] + [{"id": 14, "role": "defensa", "status": "", "value": 700_000}]
     scores = {str(p["id"]): 0.5 for p in roster}
-    scores["13"] = 0.1  # el peor DEF, pero titular guardado
-    scores["14"] = 0.2  # el peor DEF no titular
+    scores["13"] = 0.1  # el peor DEF, titular guardado
+    scores["14"] = 0.2
     monkeypatch.setattr(run_sales, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
     listed = []
 
@@ -1270,10 +1298,11 @@ def test_run_sales_creates_standby_listing_for_worst_non_starter_with_bench(tmp_
     with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
         run_sales.run()
 
-    assert listed == [("14", 700_000)]
-    with get_connection() as conn:
-        row = conn.execute("SELECT player_id, purpose, status FROM sales").fetchone()
-    assert (row["player_id"], row["purpose"], row["status"]) == ("14", "standby", "listed")
+    assert listed == expected_listed
+    if expected_listed:
+        with get_connection() as conn:
+            row = conn.execute("SELECT player_id, purpose, status FROM sales").fetchone()
+        assert (row["player_id"], row["purpose"], row["status"]) == (expected_listed[0][0], "standby", "listed")
 
 
 def test_route_standby_decisions_drops_market_only_sale_and_converts_other_reasons(tmp_db):
