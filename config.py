@@ -675,6 +675,18 @@ ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD = (
     os.getenv("ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD", "true").lower() == "true"
 )
 
+# No empeorar el once al vender por plusvalía o cortar pérdidas (a
+# petición del usuario, 2026-10-10, tras analizar el histórico: el corte de
+# pérdidas evitó ~8.5M de caídas sobre 112M vendidos, pero vendía sin mirar
+# la calidad -- Akhomach vendido con -14% subió +98% después). Un jugador
+# del once CALCULADO con la plantilla actual (engine.selling_strategy.
+# computed_starter_ids, mismo criterio que las ventas de reserva) que solo
+# cualifica por plusvalía o corte de pérdidas se trata como un top: solo
+# se vende con sustituto fichado antes (y, con ENABLE_SELLING_TOP_SWAP_
+# WORST_INSTEAD, se vende al peor de su posición en su lugar). Sin scores
+# de alineación (sin features), no aplica.
+ENABLE_SELLING_KEEP_COMPUTED_XI = os.getenv("ENABLE_SELLING_KEEP_COMPUTED_XI", "true").lower() == "true"
+
 # Umbral de PÉRDIDA (positivo, ej. 0.10 = -10%) a partir del cual
 # CUALQUIER jugador (sano, en duda o lesionado) se pone en venta aunque no
 # llegue a SELLING_MIN_PROFIT_PCT, incluso con pérdidas -- corte de
@@ -913,6 +925,18 @@ SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT = float(os.getenv("SWAP_REFILL_MAX_CAP_OVERSHO
 # dinámico). En ese caso se permite dejar la posición sin suplente (nunca
 # por debajo de los titulares) y se registra el objetivo para la reposición.
 ENABLE_SWAP_STANDBY_LISTINGS = os.getenv("ENABLE_SWAP_STANDBY_LISTINGS", "true").lower() == "true"
+
+# Límite de la liga de jugadores propios en venta a la vez (a petición del
+# usuario, 2026-10-10: Futmondo rechaza el quinto con
+# 'api.error.max_players_in_market' -- 139 fallos entre el 2026-09-17 y el
+# 2026-10-10, con 2 DEF y ningún MED en venta). jobs/run_sales.py reparte
+# los huecos por prioridad (ver _ListingSlots): lesión confirmada, luego
+# swaps (oportunidad de mercado, cambio por el peor y reservas, estas
+# primero en posiciones sin ninguna venta), luego plusvalía/trailing-stop
+# y por último el corte de pérdidas. Si no hay hueco, una venta del bot de
+# menor prioridad (reserva o corte de pérdidas sin sustituto pendiente)
+# se retira para dejar sitio; las puestas a mano nunca se tocan.
+SELLING_MAX_PLAYERS_IN_MARKET = int(os.getenv("SELLING_MAX_PLAYERS_IN_MARKET", "4"))
 
 # Antigüedad mínima para entrar en una venta de reserva (a petición del
 # usuario, 2026-10-10, caso real: Borja Iglesias fichado el 2026-10-05 por

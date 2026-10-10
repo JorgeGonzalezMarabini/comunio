@@ -297,6 +297,16 @@ ofertas). La caja ya está garantizada por la condición del sustituto
 (pagable con el presupuesto actual, sin contar la venta). El top se queda.
 Si no hay ningún peor vendible, se vende el top como antes.
 
+No empeorar el once por precio (a petición del usuario, 2026-10-10;
+config.ENABLE_SELLING_KEEP_COMPUTED_XI): un jugador del once CALCULADO
+(`computed_starter_ids()`, scores de alineación de la plantilla actual)
+que solo cualifica por plusvalía o por corte de pérdidas se trata como un
+top: solo se vende con sustituto fichado antes, y con el cambio por el
+peor de arriba es ese peor el que sale. El corte de pérdidas queda así,
+en la práctica, para quien no es titular. Cada decisión lleva además
+"kind" (la vía que manda) para que jobs/run_sales.py reparta los huecos
+de venta (config.SELLING_MAX_PLAYERS_IN_MARKET) por prioridad.
+
 Nota informativa de puntos ya extraídos (a petición del usuario, misma
 evaluación 2026-09-11): cuando un corte de pérdidas o el trailing-stop
 disparan una venta, si `purchase_baselines` trae "points_at_purchase" para
@@ -837,6 +847,7 @@ def decide_sales(
     replacement_min_form_ratio: float = None,
     replacement_min_listing_hours: float = None,
     top_swap_worst_instead: bool = None,
+    keep_computed_xi: bool = None,
     now: datetime = None,
 ) -> list[dict]:
     """
@@ -991,6 +1002,11 @@ def decide_sales(
     sustituto fichado antes; el top se queda. Si no hay ninguno, se vende
     el top como hasta ahora.
 
+    `keep_computed_xi`: por defecto config.ENABLE_SELLING_KEEP_COMPUTED_XI.
+    Un jugador del once calculado (`computed_starter_ids()` con los scores
+    de alineación) que solo cualifica por plusvalía o corte de pérdidas
+    necesita sustituto, igual que un top: vender no debe empeorar el once.
+
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
     comparación de tiempo del listado objetivo y a la confirmación de
@@ -1047,8 +1063,10 @@ def decide_sales(
 
     Cada decisión:
         {"player_id", "asking_price", "purchase_price", "profit",
-         "profit_pct", "reason"}
-    listo para persistir en la tabla `sales` (auditoría) y pasar a
+         "profit_pct", "reason", "kind"}
+    (`kind`: "injury", "upgrade", "top_swap", "profit", "trailing" o
+    "loss_cut", la vía que manda para repartir los huecos de venta en
+    jobs/run_sales.py) listo para persistir en la tabla `sales` (auditoría) y pasar a
     FutmondoClient.list_for_sale().
 
     Si hay varios candidatos rentables en la misma posición pero no hay
@@ -1145,6 +1163,7 @@ def decide_sales(
     top_swap_worst_instead = (
         config.ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD if top_swap_worst_instead is None else top_swap_worst_instead
     )
+    keep_computed_xi = config.ENABLE_SELLING_KEEP_COMPUTED_XI if keep_computed_xi is None else keep_computed_xi
     top_players_require_replacement = (
         config.ENABLE_SELLING_TOP_PLAYERS_REQUIRE_REPLACEMENT
         if top_players_require_replacement is None
@@ -1206,6 +1225,14 @@ def decide_sales(
         current = worst_protected_id_by_position.get(position)
         if current is None or form_scores[pid] < form_scores[current]:
             worst_protected_id_by_position[position] = pid
+
+    # Once calculado (config.ENABLE_SELLING_KEEP_COMPUTED_XI): sin scores de
+    # alineación no se puede calcular y no aplica.
+    computed_xi_ids = (
+        computed_starter_ids(squad, lineup_score_by_id, formation)
+        if keep_computed_xi and lineup_score_by_id
+        else set()
+    )
 
     # Cambiar al peor en vez de vender al top (ver docstring del módulo):
     # jugadores de cada posición que pueden venderse en lugar de un top con
@@ -1387,6 +1414,19 @@ def decide_sales(
                 )
                 if not confirmed:
                     cutting_losses = False  # repuntó desde el mínimo reciente -- se pospone esta pasada
+
+        # Del once calculado y solo por plusvalía/corte de pérdidas: no se
+        # vende sin sustituto (config.ENABLE_SELLING_KEEP_COMPUTED_XI).
+        in_computed_xi_only_for_price = (
+            str(player["id"]) in computed_xi_ids
+            and (taking_profit or cutting_losses)
+            and not overconcentrated
+            and not force_sell_confirmed_injury
+            and not market_upgrade_available
+            and not trailing_stop_triggered
+        )
+        if in_computed_xi_only_for_price:
+            requires_replacement = True
 
         if (
             not taking_profit
@@ -1629,6 +1669,19 @@ def decide_sales(
         # pérdidas, luego trailing-stop, luego concentración de capital,
         # luego lesión confirmada, luego oportunidad de mercado (las
         # últimas tres ni siquiera miran profit_pct).
+        if overconcentrated or force_sell_confirmed_injury:
+            kind = "injury"
+        elif only_market_reason:
+            kind = "upgrade"
+        elif taking_profit:
+            kind = "profit"
+        elif trailing_stop_triggered:
+            kind = "trailing"
+        elif cutting_losses:
+            kind = "loss_cut"
+        else:
+            kind = "upgrade"
+
         if taking_profit:
             tendencia = f"{momentum_pct:+.1%}" if momentum_pct is not None else "sin histórico"
             reason = (
@@ -1710,13 +1763,14 @@ def decide_sales(
                     "swap_target_price": None,
                     "replacement_target_player_id": replacement["id"],
                     "replacement_target_price": replacement["price"],
+                    "kind": "top_swap",
                 }
             )
             continue
 
         if replacement is not None:
             reason += (
-                f"; top de {position}: solo se aceptarán ofertas tras fichar al sustituto {replacement['id']} "
+                f"; {'del once calculado' if str(player['id']) in computed_xi_ids else 'top'} de {position}: solo se aceptarán ofertas tras fichar al sustituto {replacement['id']} "
                 f"(forma {replacement['form']:.2f} vs {average_points:.2f} propia, coste {replacement['price']}, "
                 f"{replacement['price'] / replacement['form']:,.0f}/punto frente a "
                 + (f"{player.get('value', 0) / average_points:,.0f}/punto propio)" if average_points else "sin puntos propios)")
@@ -1748,6 +1802,7 @@ def decide_sales(
                 ),
                 "replacement_target_player_id": replacement["id"] if replacement else None,
                 "replacement_target_price": replacement["price"] if replacement else None,
+                "kind": kind,
             }
         )
     return decisions

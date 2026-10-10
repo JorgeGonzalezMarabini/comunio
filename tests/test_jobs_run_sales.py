@@ -1400,3 +1400,127 @@ def test_route_standby_decisions_drops_market_only_sale_and_converts_other_reaso
     with get_connection() as conn:
         row = conn.execute("SELECT purpose, reason FROM sales WHERE id = ?", (sale_id,)).fetchone()
     assert (row["purpose"], row["reason"]) == ("normal", "plusvalía +30%")
+
+
+def _run_standby_with_market_full(monkeypatch, loss_cut_listed_id=None):
+    """
+    Miércoles, reserva pendiente para el DEF 13 (como en
+    test_run_sales_creates_standby_listing_for_worst_non_starter_with_bench),
+    con los 4 huecos de venta ya ocupados (config.SELLING_MAX_PLAYERS_IN_MARKET)
+    por los MED 40-43; `loss_cut_listed_id`, si viene, es un corte de
+    pérdidas del bot y el resto, ventas puestas a mano.
+    """
+    _fixed_run_sales_now(monkeypatch, datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(config, "SELLING_MAX_PLAYERS_IN_MARKET", 4)
+    roster = [dict(p) for p in ROSTER_442_BASE] + [{"id": 14, "role": "defensa", "status": "", "value": 700_000}]
+    roster += [{"id": 40 + i, "role": "centrocampista", "status": "", "value": 500_000, "market": True} for i in range(4)]
+    scores = {str(p["id"]): 0.5 for p in roster}
+    scores.update({"13": 0.1, "14": 0.2})
+    monkeypatch.setattr(run_sales, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
+    if loss_cut_listed_id is not None:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO sales (player_id, asking_price, status, purpose, reason, created_at) VALUES (?,?,?,?,?,?)",
+                (loss_cut_listed_id, 500_000, "listed", "normal", "corte de pérdidas: VM en la compra ...",
+                 "2026-10-06T05:00:00+00:00"),
+            )
+    listed, cancelled = [], []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": roster}
+
+        def get_information(self):
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 18}}}
+
+        def cancel_sale(self, player_id):
+            cancelled.append(player_id)
+            return {"code": "api.general.ok"}
+
+        def list_for_sale(self, player_id, price):
+            listed.append((player_id, price))
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify") as notify_mock:
+        run_sales.run()
+    return listed, cancelled, notify_mock.call_args[0][0]
+
+
+def test_run_sales_standby_does_not_exceed_max_players_in_market(tmp_db, monkeypatch):
+    """Con los 4 huecos ocupados por ventas puestas a mano, la reserva no se intenta."""
+    listed, cancelled, report = _run_standby_with_market_full(monkeypatch)
+
+    assert listed == [] and cancelled == []
+    assert "Venta de reserva sin hueco: jugador 13 (DEF), máximo 4 en venta a la vez." in report
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sales WHERE status = 'failed'").fetchone()[0] == 0
+
+
+def test_run_sales_standby_evicts_loss_cut_listing_to_make_room(tmp_db, monkeypatch):
+    """El corte de pérdidas tiene la última prioridad: se retira para dejar hueco a la reserva."""
+    listed, cancelled, report = _run_standby_with_market_full(monkeypatch, loss_cut_listed_id="43")
+
+    assert cancelled == ["43"]
+    assert listed == [("13", 500_000)]
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM sales WHERE player_id = '43'").fetchone()["status"] == "delisted"
+    assert "Venta retirada (hueco para una venta más prioritaria (jugador 13)): jugador 43." in report
+
+
+class _SlotsClient:
+    def __init__(self):
+        self.cancelled = []
+
+    def cancel_sale(self, player_id):
+        self.cancelled.append(player_id)
+
+
+def _seed_listed_sale(player_id, purpose="normal", reason="", created_at="2026-10-01T00:00:00+00:00"):
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (player_id, asking_price, status, purpose, reason, created_at) VALUES (?,?,?,?,?,?)",
+            (player_id, 1, "listed", purpose, reason, created_at),
+        )
+        return cur.lastrowid
+
+
+def test_listing_slots_priority_and_eviction(tmp_db):
+    """
+    Lesión > swaps/reservas > plusvalía > corte de pérdidas: una venta solo
+    retira a otra del bot de MENOR prioridad; nunca una puesta a mano, una
+    venta normal sin vía conocida ni un corte de pérdidas con sustituto
+    pendiente.
+    """
+    from db.models import get_open_sales
+
+    _seed_listed_sale("1", purpose="standby")
+    loss_id = _seed_listed_sale("2", reason="corte de pérdidas: x")
+    protected_loss_id = _seed_listed_sale("3", reason="corte de pérdidas: y")
+    roster = [
+        {"id": 1, "role": "portero", "market": True},
+        {"id": 2, "role": "defensa", "market": True},
+        {"id": 3, "role": "defensa", "market": True},
+        {"id": 4, "role": "delantero", "market": True},  # puesta a mano
+        {"id": 5, "role": "centrocampista"},
+    ]
+    client = _SlotsClient()
+    slots = run_sales._ListingSlots(client, roster, get_open_sales(), protected_sale_ids={protected_loss_id}, limit=4)
+    priority = run_sales.SALE_PRIORITY
+
+    assert slots.free() == 0
+    assert not slots.take("5", "MED", priority["loss_cut"])  # misma prioridad: no retira
+    assert slots.take("5", "MED", priority["profit"])  # retira el corte de pérdidas sin sustituto
+    assert client.cancelled == ["2"]
+    assert not slots.take("6", "MED", priority["profit"])  # la reserva tiene más prioridad
+    assert slots.take("6", "MED", priority["injury"])  # la lesión sí la retira
+    assert client.cancelled == ["2", "1"]
+    assert not slots.take("7", "MED", priority["injury"])  # solo quedan la manual y la protegida
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM sales WHERE id = ?", (loss_id,)).fetchone()["status"] == "delisted"
+
+
+def test_listing_slots_failure_with_max_players_in_market_marks_full(tmp_db):
+    slots = run_sales._ListingSlots(_SlotsClient(), [{"id": 1, "role": "portero", "market": True}], [], limit=4)
+    assert slots.take("2", "DEF", 0)
+    slots.fail("2", "Futmondo rechazó la operación: 'api.error.max_players_in_market'")
+    assert slots.free() == 0

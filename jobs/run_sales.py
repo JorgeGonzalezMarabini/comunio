@@ -181,6 +181,7 @@ from db.models import (
     get_connection,
     get_open_bids,
     get_open_sale_replacements,
+    get_open_sales,
     get_pending_bid_amount,
     get_player_features,
     get_purchase_baselines,
@@ -246,6 +247,115 @@ def _persist_sale(conn, decision: dict, status: str, now: str, error: str | None
         ),
     )
     return cur.lastrowid
+
+
+# Prioridad de cada vía al repartir los huecos de venta
+# (config.SELLING_MAX_PLAYERS_IN_MARKET): menor número, más prioridad.
+SALE_PRIORITY = {
+    "injury": 0,
+    "upgrade": 1,
+    "top_swap": 1,
+    "standby": 1,
+    "profit": 2,
+    "trailing": 2,
+    "loss_cut": 3,
+}
+
+
+def _open_listing_priority(sale: dict) -> int | None:
+    """
+    Prioridad de una venta del bot ya listada, para poder retirarla y dejar
+    hueco a otra más prioritaria: las reservas para swaps y los cortes de
+    pérdidas (por `reason`, la tabla no guarda la vía). El resto, None: no
+    se retiran (una venta normal puede tener ya una oferta esperando).
+    """
+    if sale.get("purpose") == "standby":
+        return SALE_PRIORITY["standby"]
+    if (sale.get("reason") or "").startswith("corte de pérdidas:"):
+        return SALE_PRIORITY["loss_cut"]
+    return None
+
+
+class _ListingSlots:
+    """
+    Huecos de venta de la liga (config.SELLING_MAX_PLAYERS_IN_MARKET): cuenta
+    los jugadores propios ya en venta (`market` del roster en vivo, los
+    ponga el bot o no) y reparte los libres por prioridad (SALE_PRIORITY).
+    Sin hueco, `take()` retira la venta del bot de MENOR prioridad que la
+    pedida (`_open_listing_priority()`; nunca una con sustituto pendiente,
+    `protected_sale_ids`), prefiriendo una de una posición con otra venta.
+    """
+
+    def __init__(
+        self,
+        client: FutmondoClient,
+        roster_items: list[dict],
+        open_sales: list[dict],
+        protected_sale_ids: set = frozenset(),
+        limit: int = None,
+    ):
+        self.client = client
+        self.limit = config.SELLING_MAX_PLAYERS_IN_MARKET if limit is None else limit
+        position_by_id = _position_by_player_id(roster_items)
+        self.listed = {str(p["id"]): position_by_id.get(str(p["id"])) for p in roster_items if p.get("market")}
+        self.sales_by_player: dict[str, list[dict]] = {}
+        for sale in open_sales:
+            self.sales_by_player.setdefault(str(sale["player_id"]), []).append(sale)
+        self.protected_sale_ids = set(protected_sale_ids)
+        self.evicted: list[tuple[dict, str]] = []
+
+    def free(self) -> int:
+        return self.limit - len(self.listed)
+
+    def positions(self) -> set:
+        return set(self.listed.values())
+
+    def release(self, player_id) -> None:
+        self.listed.pop(str(player_id), None)
+        self.sales_by_player.pop(str(player_id), None)
+
+    def mark_full(self) -> None:
+        """Futmondo dijo 'max_players_in_market': el recuento se quedó corto."""
+        self.limit = len(self.listed)
+
+    def _eviction_priority(self, player_id: str) -> int | None:
+        sales = self.sales_by_player.get(player_id) or []
+        if not sales or any(sale["id"] in self.protected_sale_ids for sale in sales):
+            return None
+        priorities = [_open_listing_priority(sale) for sale in sales]
+        return None if any(p is None for p in priorities) else min(priorities)
+
+    def take(self, player_id, position, priority: int) -> bool:
+        """Reserva un hueco para `player_id`; False si no hay ni se puede liberar."""
+        if self.free() <= 0:
+            count_by_position: dict = {}
+            for pos in self.listed.values():
+                count_by_position[pos] = count_by_position.get(pos, 0) + 1
+            victims = []
+            for pid, pos in self.listed.items():
+                victim_priority = self._eviction_priority(pid)
+                if victim_priority is not None and victim_priority > priority:
+                    newest = max(sale["created_at"] for sale in self.sales_by_player[pid])
+                    victims.append((victim_priority, count_by_position[pos] > 1, newest, pid))
+            if not victims:
+                return False
+            _, _, _, victim_id = max(victims)
+            try:
+                self.client.cancel_sale(victim_id)
+            except (requests.RequestException, FutmondoOfferError):
+                return False
+            for sale in self.sales_by_player[victim_id]:
+                update_sale_status(sale["id"], "delisted")
+                self.evicted.append((sale, f"hueco para una venta más prioritaria (jugador {player_id})"))
+            self.release(victim_id)
+        self.listed[str(player_id)] = position
+        return True
+
+    def fail(self, player_id, error: str) -> None:
+        """El listado reservado con `take()` falló: libera su hueco."""
+        self.listed.pop(str(player_id), None)
+        if "max_players_in_market" in error:
+            self.mark_full()
 
 
 def _is_futmondo_offer(bid: dict) -> bool:
@@ -999,10 +1109,29 @@ def run():
                 adjusted_decisions.append(decision)
         decisions = adjusted_decisions
 
-    listed, failed = [], []
+    # Huecos de venta (config.SELLING_MAX_PLAYERS_IN_MARKET): lo aceptado en
+    # esta pasada ya no está en venta; se listan las decisiones de más
+    # prioridad primero (SALE_PRIORITY) y las reservas, en
+    # _maintain_standby_listings(), con lo que quede.
+    accepted_ids = {str(o["player_id"]) for o in offers_accepted}
+    slots = _ListingSlots(
+        client,
+        [p for p in roster_items if str(p["id"]) not in accepted_ids],
+        get_open_sales(),
+        protected_sale_ids={r["sale_id"] for r in open_replacements},
+    )
+    position_by_player_id = _position_by_player_id(roster_items)
+    decisions = sorted(decisions, key=lambda d: SALE_PRIORITY.get(d.get("kind"), SALE_PRIORITY["profit"]))
+
+    listed, failed, no_slot = [], [], []
 
     with get_connection() as conn:
         for decision in decisions:
+            pid = str(decision["player_id"])
+            priority = SALE_PRIORITY.get(decision.get("kind"), SALE_PRIORITY["profit"])
+            if not slots.take(pid, position_by_player_id.get(pid), priority):
+                no_slot.append(decision)
+                continue
             try:
                 client.list_for_sale(decision["player_id"], decision["asking_price"])
                 sale_id = _persist_sale(conn, decision, "listed", now)
@@ -1030,6 +1159,7 @@ def run():
                     )
                 listed.append(decision)
             except (requests.RequestException, FutmondoOfferError) as e:
+                slots.fail(pid, str(e))
                 _persist_sale(conn, decision, "failed", now, error=str(e))
                 failed.append((decision, str(e)))
 
@@ -1054,12 +1184,20 @@ def run():
         report_lines.append(f"{len(failed)} fallido(s):")
         for d, err in failed:
             report_lines.append(f"  - jugador {d['player_id']}: {err}")
+    if no_slot:
+        report_lines.append(
+            f"{len(no_slot)} sin hueco de venta (máximo {slots.limit} a la vez, ninguna de menor prioridad que "
+            "retirar), se reevalúa en la próxima pasada:"
+        )
+        for d in no_slot:
+            report_lines.append(f"  - jugador {d['player_id']} ({d.get('kind')})")
     for d in converted:
         report_lines.append(f"Venta de reserva del jugador {d['player_id']} pasa a venta normal: {d['reason']}")
 
     if config.ENABLE_SWAP_STANDBY_LISTINGS:
-        created, cancelled, standby_failed = _maintain_standby_listings(
+        created, cancelled, standby_failed, standby_no_slot = _maintain_standby_listings(
             client,
+            slots,
             roster_items,
             own_squad_features,
             market_candidates,
@@ -1067,7 +1205,7 @@ def run():
             own_lineup_player_ids,
             bought_by_bot,
             purchase_baselines,
-            accepted_ids={str(o["player_id"]) for o in offers_accepted},
+            accepted_ids=accepted_ids,
             excluded_ids={str(d["player_id"]) for d in decisions} | {str(d["player_id"]) for d in converted},
             now=now,
         )
@@ -1080,6 +1218,13 @@ def run():
             report_lines.append(f"Venta de reserva retirada ({why}): jugador {sale['player_id']}.")
         for pick, err in standby_failed:
             report_lines.append(f"Venta de reserva fallida: jugador {pick['player_id']}: {err}")
+        for pick in standby_no_slot:
+            report_lines.append(
+                f"Venta de reserva sin hueco: jugador {pick['player_id']} ({pick['position']}), máximo "
+                f"{slots.limit} en venta a la vez."
+            )
+    for sale, why in slots.evicted:
+        report_lines.append(f"Venta retirada ({why}): jugador {sale['player_id']}.")
 
     notify("\n".join(report_lines))
 
@@ -1131,6 +1276,7 @@ def _route_standby_decisions(
 
 def _maintain_standby_listings(
     client: FutmondoClient,
+    slots: _ListingSlots,
     roster_items: list[dict],
     own_squad_features: list[dict],
     market_candidates: list[dict],
@@ -1161,7 +1307,11 @@ def _maintain_standby_listings(
     Tampoco a un recién fichado
     (`purchase_baselines[...]["purchased_at"]`, config.SWAP_STANDBY_MIN_HOLD_DAYS).
 
-    Devuelve (creadas, (retirada, motivo), fallidas).
+    Solo con hueco de venta (`slots`, config.SELLING_MAX_PLAYERS_IN_MARKET):
+    primero las posiciones sin ninguna venta, para que los huecos queden
+    uno por posición; pueden retirar un corte de pérdidas para hacer sitio.
+
+    Devuelve (creadas, (retirada, motivo), fallidas, sin hueco).
     """
     position_by_player_id = _position_by_player_id(roster_items)
     remaining = [dict(p) for p in roster_items if str(p["id"]) not in accepted_ids]
@@ -1182,6 +1332,7 @@ def _maintain_standby_listings(
         if not player.get("market"):
             update_sale_status(sale["id"], "delisted")  # retirada fuera del bot
             cancelled.append((sale, "ya no estaba en el mercado"))
+            slots.release(pid)
             continue
         if is_confirmed_injured_status(player.get("status")):
             why = "lesión confirmada"
@@ -1195,6 +1346,7 @@ def _maintain_standby_listings(
                 update_sale_status(sale["id"], "delisted")
                 cancelled.append((sale, why))
                 player["market"] = False
+                slots.release(pid)
                 continue
             except (requests.RequestException, FutmondoOfferError):
                 pass
@@ -1205,7 +1357,7 @@ def _maintain_standby_listings(
         and config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
         and is_matchday_lineup_guard_time(datetime.fromisoformat(now))
     ):
-        return [], cancelled, []
+        return [], cancelled, [], []
 
     kept_standby_ids = open_standby_ids - {str(sale["player_id"]) for sale, _ in cancelled}
     picks = pick_standby_listings(
@@ -1220,10 +1372,14 @@ def _maintain_standby_listings(
         standby_ids=kept_standby_ids,
     )
 
-    created, failed = [], []
+    created, failed, no_slot = [], [], []
+    picks.sort(key=lambda pick: pick["position"] in slots.positions())
     with get_connection() as conn:
         for pick in picks:
             pid = str(pick["player_id"])
+            if not slots.take(pid, pick["position"], SALE_PRIORITY["standby"]):
+                no_slot.append(pick)
+                continue
             sale = {
                 "player_id": pid,
                 "asking_price": pick["asking_price"],
@@ -1241,9 +1397,10 @@ def _maintain_standby_listings(
                 _persist_sale(conn, sale, "listed", now)
                 created.append(pick)
             except (requests.RequestException, FutmondoOfferError) as e:
+                slots.fail(pid, str(e))
                 _persist_sale(conn, sale, "failed", now, error=str(e))
                 failed.append((pick, str(e)))
-    return created, cancelled, failed
+    return created, cancelled, failed, no_slot
 
 
 if __name__ == "__main__":

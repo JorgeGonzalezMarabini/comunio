@@ -1902,3 +1902,44 @@ def test_pick_standby_listings_skips_recent_signing():
     assert [p["player_id"] for p in picks] == [30]
     # Sin fecha de compra conocida, no bloquea.
     assert [p["player_id"] for p in pick_standby_listings(squad, scores, {"DEL": 2}, set(), set(), now=NOW)] == [30]
+
+
+def _computed_xi_run(monkeypatch, value, keep_computed_xi=True):
+    """
+    4-4-2 con 6 MED (2 de banquillo): 24 es del once calculado (score 0.95)
+    y 25 el peor (0.1); ambos comprados por el bot a 1M. Sin protección de
+    tops ni sustitutos en mercado, para aislar config.ENABLE_SELLING_KEEP_COMPUTED_XI.
+    """
+    import engine.selling_strategy as selling_strategy
+
+    squad = _full_442_squad() + [
+        {"id": 24, "name": "MedioOnce", "role": "centrocampista", "status": "", "value": value},
+        {"id": 25, "name": "MedioPeor", "role": "centrocampista", "status": "", "value": value},
+    ]
+    scores = {str(p["id"]): 0.5 for p in squad}
+    scores.update({"24": 0.95, "25": 0.1})
+    monkeypatch.setattr(selling_strategy, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
+    return decide_sales(
+        squad,
+        formation="4-4-2",
+        bought_by_bot={"24": 1_000_000, "25": 1_000_000},
+        protect_top_players_from_profit=False,
+        top_players_require_replacement=False,
+        keep_computed_xi=keep_computed_xi,
+        now=NOW,
+    )
+
+
+def test_decide_sales_profit_does_not_sell_computed_xi_player_without_replacement(monkeypatch):
+    decisions = _computed_xi_run(monkeypatch, value=1_500_000)
+    assert [(str(d["player_id"]), d["kind"]) for d in decisions] == [("25", "profit")]
+
+
+def test_decide_sales_loss_cut_does_not_sell_computed_xi_player_without_replacement(monkeypatch):
+    decisions = _computed_xi_run(monkeypatch, value=500_000)
+    assert [(str(d["player_id"]), d["kind"]) for d in decisions] == [("25", "loss_cut")]
+
+
+def test_decide_sales_keep_computed_xi_can_be_disabled(monkeypatch):
+    decisions = _computed_xi_run(monkeypatch, value=1_500_000, keep_computed_xi=False)
+    assert sorted(str(d["player_id"]) for d in decisions) == ["24", "25"]
