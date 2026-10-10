@@ -300,8 +300,8 @@ Si no hay ningún peor vendible, se vende el top como antes.
 No empeorar el once por precio (a petición del usuario, 2026-10-10;
 config.ENABLE_SELLING_KEEP_COMPUTED_XI): un jugador del once CALCULADO
 (`computed_starter_ids()`, scores de alineación de la plantilla actual)
-que solo cualifica por plusvalía o por corte de pérdidas se trata como un
-top: solo se vende con sustituto fichado antes, y con el cambio por el
+que solo cualifica por plusvalía, corte de pérdidas o corte por reversión
+desde máximo se trata como un top: solo se vende con sustituto fichado antes, y con el cambio por el
 peor de arriba es ese peor el que sale. El corte de pérdidas queda así,
 en la práctica, para quien no es titular. Cada decisión lleva además
 "kind" (la vía que manda) para que jobs/run_sales.py reparta los huecos
@@ -1004,8 +1004,8 @@ def decide_sales(
 
     `keep_computed_xi`: por defecto config.ENABLE_SELLING_KEEP_COMPUTED_XI.
     Un jugador del once calculado (`computed_starter_ids()` con los scores
-    de alineación) que solo cualifica por plusvalía o corte de pérdidas
-    necesita sustituto, igual que un top: vender no debe empeorar el once.
+    de alineación) que solo cualifica por plusvalía, corte de pérdidas o
+    trailing-stop necesita sustituto, igual que un top: vender no debe empeorar el once.
 
     `now`: por defecto `datetime.now(timezone.utc)` — inyectable para
     tests deterministas (afecta al bloqueo de fin de semana, a la
@@ -1415,15 +1415,15 @@ def decide_sales(
                 if not confirmed:
                     cutting_losses = False  # repuntó desde el mínimo reciente -- se pospone esta pasada
 
-        # Del once calculado y solo por plusvalía/corte de pérdidas: no se
-        # vende sin sustituto (config.ENABLE_SELLING_KEEP_COMPUTED_XI).
+        # Del once calculado y solo por precio (plusvalía, corte de pérdidas
+        # o trailing-stop): no se vende sin sustituto
+        # (config.ENABLE_SELLING_KEEP_COMPUTED_XI).
         in_computed_xi_only_for_price = (
             str(player["id"]) in computed_xi_ids
-            and (taking_profit or cutting_losses)
+            and (taking_profit or cutting_losses or trailing_stop_triggered)
             and not overconcentrated
             and not force_sell_confirmed_injury
             and not market_upgrade_available
-            and not trailing_stop_triggered
         )
         if in_computed_xi_only_for_price:
             requires_replacement = True

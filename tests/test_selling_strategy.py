@@ -1904,7 +1904,7 @@ def test_pick_standby_listings_skips_recent_signing():
     assert [p["player_id"] for p in pick_standby_listings(squad, scores, {"DEL": 2}, set(), set(), now=NOW)] == [30]
 
 
-def _computed_xi_run(monkeypatch, value, keep_computed_xi=True):
+def _computed_xi_run(monkeypatch, value, keep_computed_xi=True, purchase_baselines=None):
     """
     4-4-2 con 6 MED (2 de banquillo): 24 es del once calculado (score 0.95)
     y 25 el peor (0.1); ambos comprados por el bot a 1M. Sin protección de
@@ -1926,6 +1926,7 @@ def _computed_xi_run(monkeypatch, value, keep_computed_xi=True):
         protect_top_players_from_profit=False,
         top_players_require_replacement=False,
         keep_computed_xi=keep_computed_xi,
+        purchase_baselines=purchase_baselines,
         now=NOW,
     )
 
@@ -1943,3 +1944,10 @@ def test_decide_sales_loss_cut_does_not_sell_computed_xi_player_without_replacem
 def test_decide_sales_keep_computed_xi_can_be_disabled(monkeypatch):
     decisions = _computed_xi_run(monkeypatch, value=1_500_000, keep_computed_xi=False)
     assert sorted(str(d["player_id"]) for d in decisions) == ["24", "25"]
+
+
+def test_decide_sales_trailing_stop_does_not_sell_computed_xi_player_without_replacement(monkeypatch):
+    """Ambos +10% frente a la compra (sin plusvalía suficiente) pero -27% desde su pico de 1.5M."""
+    peak = {"peak_price": 1_500_000}
+    decisions = _computed_xi_run(monkeypatch, value=1_100_000, purchase_baselines={"24": peak, "25": peak})
+    assert [(str(d["player_id"]), d["kind"]) for d in decisions] == [("25", "trailing")]

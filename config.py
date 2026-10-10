@@ -675,13 +675,16 @@ ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD = (
     os.getenv("ENABLE_SELLING_TOP_SWAP_WORST_INSTEAD", "true").lower() == "true"
 )
 
-# No empeorar el once al vender por plusvalía o cortar pérdidas (a
-# petición del usuario, 2026-10-10, tras analizar el histórico: el corte de
+# No empeorar el once al vender por precio: plusvalía, corte de pérdidas y
+# corte por reversión desde máximo (a petición del usuario, 2026-10-10,
+# tras analizar el histórico: el corte de
 # pérdidas evitó ~8.5M de caídas sobre 112M vendidos, pero vendía sin mirar
 # la calidad -- Akhomach vendido con -14% subió +98% después). Un jugador
 # del once CALCULADO con la plantilla actual (engine.selling_strategy.
 # computed_starter_ids, mismo criterio que las ventas de reserva) que solo
-# cualifica por plusvalía o corte de pérdidas se trata como un top: solo
+# cualifica por plusvalía, corte de pérdidas o corte por reversión desde
+# máximo (este último añadido a petición del usuario el mismo día) se
+# trata como un top: solo
 # se vende con sustituto fichado antes (y, con ENABLE_SELLING_TOP_SWAP_
 # WORST_INSTEAD, se vende al peor de su posición en su lugar). Sin scores
 # de alineación (sin features), no aplica.
