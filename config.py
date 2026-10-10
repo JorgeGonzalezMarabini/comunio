@@ -914,6 +914,25 @@ SWAP_REFILL_MAX_CAP_OVERSHOOT_PCT = float(os.getenv("SWAP_REFILL_MAX_CAP_OVERSHO
 # por debajo de los titulares) y se registra el objetivo para la reposición.
 ENABLE_SWAP_STANDBY_LISTINGS = os.getenv("ENABLE_SWAP_STANDBY_LISTINGS", "true").lower() == "true"
 
+# Antigüedad mínima para entrar en una venta de reserva (a petición del
+# usuario, 2026-10-10, caso real: Borja Iglesias fichado el 2026-10-05 por
+# 18M y puesto en reserva a las ~15 horas como "peor sano de DEL", vendido
+# con -12% al día siguiente). Mismo razonamiento que
+# SELLING_UPGRADE_MIN_HOLD_DAYS: un recién fichado aún no tiene score de
+# alineación representativo. Sin fecha de compra conocida, no bloquea.
+SWAP_STANDBY_MIN_HOLD_DAYS = float(os.getenv("SWAP_STANDBY_MIN_HOLD_DAYS", "7"))
+
+# No fichar a quien la venta de reserva soltaría enseguida (a petición del
+# usuario, 2026-10-10, mismo caso real que SWAP_STANDBY_MIN_HOLD_DAYS): en
+# la vía normal de pujas de jobs/run_market.py se descarta a un candidato
+# que ni mejora el once ni cubre una posición en riesgo y cuyo score de
+# alineación no supera al del peor suplente sano de su posición -- al
+# ficharlo pasaría a ser ese peor suplente, justo el que
+# ENABLE_SWAP_STANDBY_LISTINGS pone en venta. Compra y venta miden con
+# métricas distintas (score de puja vs. score de alineación), y sin esto
+# el bot compraba con una y vendía con la otra.
+ENABLE_BIDDING_SKIP_WORST_BENCH = os.getenv("ENABLE_BIDDING_SKIP_WORST_BENCH", "true").lower() == "true"
+
 # Bloqueo defensivo (a petición del usuario, 2026-08-23): en fin de semana
 # (sábado/domingo, aproximación por día de la semana -- no distingue hora
 # exacta de los partidos), NUNCA se pone en venta a un jugador que esté en

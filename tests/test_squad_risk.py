@@ -1,4 +1,4 @@
-from engine.squad_risk import assess_squad_depth, depth_warnings, sales_to_cancel, weakest_starter_scores
+from engine.squad_risk import assess_squad_depth, depth_warnings, sales_to_cancel, weakest_healthy_bench_scores, weakest_starter_scores
 
 
 def test_assess_squad_depth_flags_positions_without_healthy_bench():
@@ -170,3 +170,16 @@ def test_weakest_starter_scores_rejects_unknown_formation():
 
     with pytest.raises(ValueError):
         weakest_starter_scores([], formation="9-9-9")
+
+
+def test_weakest_healthy_bench_scores():
+    squad = [
+        {"position": "DEL", "score": 0.9, "status": ""},
+        {"position": "DEL", "score": 0.8, "status": ""},
+        {"position": "DEL", "score": 0.5, "status": ""},
+        {"position": "DEL", "score": 0.3, "status": ""},
+        {"position": "DEL", "score": 0.1, "status": "injured2"},  # lesionado: no cuenta
+        {"position": "DEL", "score": 0.05, "status": "", "on_market": True},  # en venta: se va
+        {"position": "POR", "score": 0.7, "status": ""},  # sin suplente
+    ]
+    assert weakest_healthy_bench_scores(squad, formation="4-4-2") == {"DEL": 0.3}

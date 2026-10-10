@@ -13,6 +13,7 @@ from engine.bidding_strategy import (
     find_reprice_down_candidates,
     is_price_worth_bidding,
     max_biddable_amount,
+    would_be_worst_bench,
 )
 
 
@@ -844,3 +845,14 @@ def test_decide_bid_min_average_uses_recency_weighted_form():
     rising = {"id": "2", "score": 0.9, "price": 1_000_000, "average_points": 2.0, "recent_points": [0, 1, 4, 6, 7]}
     assert decide_bid(faded, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=3.0) is None
     assert decide_bid(rising, remaining_budget=20_000_000, already_risked_this_matchday=0, min_average_points=3.0) is not None
+
+
+def test_would_be_worst_bench():
+    floors = {"DEL": 0.5}
+    base = {"position": "DEL", "lineup_score": 0.39, "would_upgrade_lineup": False, "position_at_risk": False}
+    assert would_be_worst_bench(base, floors) is True
+    assert would_be_worst_bench({**base, "lineup_score": 0.6}, floors) is False
+    assert would_be_worst_bench({**base, "would_upgrade_lineup": True}, floors) is False
+    assert would_be_worst_bench({**base, "position_at_risk": True}, floors) is False
+    assert would_be_worst_bench({**base, "position": "MED"}, floors) is False  # sin suplentes con los que comparar
+    assert would_be_worst_bench({k: v for k, v in base.items() if k != "lineup_score"}, floors) is False

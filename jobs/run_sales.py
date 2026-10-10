@@ -1064,6 +1064,7 @@ def run():
             standby_sales,
             own_lineup_player_ids,
             bought_by_bot,
+            purchase_baselines,
             accepted_ids={str(o["player_id"]) for o in offers_accepted},
             excluded_ids={str(d["player_id"]) for d in decisions} | {str(d["player_id"]) for d in converted},
             now=now,
@@ -1134,6 +1135,7 @@ def _maintain_standby_listings(
     standby_sales: list[dict],
     own_lineup_player_ids: set,
     bought_by_bot: dict[str, int],
+    purchase_baselines: dict[str, dict],
     accepted_ids: set,
     excluded_ids: set,
     now: str,
@@ -1150,7 +1152,8 @@ def _maintain_standby_listings(
     No crea ninguna en una posición donde se acaba de aceptar una oferta en
     esta pasada (el banquillo real aún no está reflejado), ni si no se pudo
     leer la alineación guardada (sin ella no se puede garantizar que no se
-    ponga en venta a un titular).
+    ponga en venta a un titular). Tampoco a un recién fichado
+    (`purchase_baselines[...]["purchased_at"]`, config.SWAP_STANDBY_MIN_HOLD_DAYS).
 
     Devuelve (creadas, retiradas, fallidas).
     """
@@ -1186,6 +1189,8 @@ def _maintain_standby_listings(
         own_lineup_player_ids,
         kept_positions | {position_by_player_id.get(pid) for pid in accepted_ids},
         excluded_ids=excluded_ids,
+        purchased_at_by_id={pid: b.get("purchased_at") for pid, b in (purchase_baselines or {}).items()},
+        now=datetime.fromisoformat(now),
     )
 
     created, failed = [], []

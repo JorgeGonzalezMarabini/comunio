@@ -257,9 +257,15 @@ from engine.bidding_strategy import (
     find_deficit_rescue_swaps,
     find_reprice_down_candidates,
     is_price_worth_bidding,
+    would_be_worst_bench,
 )
 from engine.evaluator import evaluate_players
-from engine.squad_risk import assess_squad_depth, depth_warnings, weakest_starter_scores
+from engine.squad_risk import (
+    assess_squad_depth,
+    depth_warnings,
+    weakest_healthy_bench_scores,
+    weakest_starter_scores,
+)
 from notifier import notify, track_job_run, format_number
 
 
@@ -494,6 +500,7 @@ def run():
     at_risk_positions = set()
     upgrade_thresholds = {}
     lineup_score_by_id = {}
+    bench_floors = {}
     if squad_raw:
         # Las ventas de reserva para swaps (config.ENABLE_SWAP_STANDBY_
         # LISTINGS) siguen disponibles: solo se venden con un swap en marcha,
@@ -522,6 +529,10 @@ def run():
         squad_ids = {p["id"] for p in squad_raw}
         squad_lineup_ranked = [p for p in lineup_scored if p["id"] in squad_ids]
         upgrade_thresholds = weakest_starter_scores(squad_lineup_ranked, formation=config.DEFAULT_FORMATION)
+        bench_floors = weakest_healthy_bench_scores(
+            [{**p, "on_market": False} if p["id"] in standby_ids else p for p in squad_lineup_ranked],
+            formation=config.DEFAULT_FORMATION,
+        )
     else:
         risk_warnings = []
 
@@ -664,8 +675,24 @@ def run():
     priority_ids = {d["player_id"] for d in priority_decisions}
     priority_committed = sum(d["amount"] for d in priority_decisions)
 
+    # No fichar a quien la venta de reserva soltaría enseguida (config.
+    # ENABLE_BIDDING_SKIP_WORST_BENCH): solo en la vía normal -- los
+    # sustitutos de tops y las reposiciones de swap tienen sus propios
+    # criterios de arriba.
+    skipped_worst_bench = (
+        [
+            c
+            for c in prioritized
+            if c["id"] not in priority_ids and would_be_worst_bench(c, bench_floors)
+        ]
+        if config.ENABLE_BIDDING_SKIP_WORST_BENCH
+        else []
+    )
+    skipped_worst_bench_ids = {c["id"] for c in skipped_worst_bench}
+    normal_candidates = [c for c in prioritized if c["id"] not in skipped_worst_bench_ids]
+
     decisions = priority_decisions + decide_bids_for_market(
-        [c for c in prioritized if c["id"] not in priority_ids],
+        [c for c in normal_candidates if c["id"] not in priority_ids],
         remaining_budget,
         already_risked + priority_committed,
         min_score_threshold=min_score_threshold,
@@ -687,7 +714,7 @@ def run():
     decided_ids = {d["player_id"] for d in decisions}
     blocked_candidates = [
         c
-        for c in prioritized
+        for c in normal_candidates
         if c["id"] not in decided_ids and is_price_worth_bidding(c, min_score_threshold=min_score_threshold)
     ]
 
@@ -1158,6 +1185,12 @@ def run():
         summary.append(
             f"🚑 {len(skipped_injured)} candidato(s) descartado(s) del mercado por lesión confirmada: "
             + _format_id_list([p["id"] for p in skipped_injured])
+        )
+    if skipped_worst_bench:
+        summary.append(
+            f"🪑 {len(skipped_worst_bench)} candidato(s) descartado(s) por quedar como peor suplente de su posición "
+            "(la venta de reserva lo soltaría, config.ENABLE_BIDDING_SKIP_WORST_BENCH): "
+            + _format_id_list([p["id"] for p in skipped_worst_bench])
         )
     if skipped_manager_listed:
         summary.append(

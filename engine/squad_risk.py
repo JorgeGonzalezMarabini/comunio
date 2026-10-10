@@ -199,3 +199,45 @@ def weakest_starter_scores(squad_ranked: list[dict], formation: str = None) -> d
         starters = ordered[:required]
         thresholds[position] = starters[-1]["score"] if starters else None
     return thresholds
+
+
+def weakest_healthy_bench_scores(squad_ranked: list[dict], formation: str = None) -> dict:
+    """
+    Score de alineación del PEOR suplente sano de cada posición, con el
+    mismo orden que `weakest_starter_scores()` (sanos primero, por score)
+    -- el listón que un fichaje que no mejora el once debe superar para no
+    convertirse él mismo en el peor suplente, que es justo a quien la venta
+    de reserva (config.ENABLE_SWAP_STANDBY_LISTINGS) pone en venta. Ver
+    config.ENABLE_BIDDING_SKIP_WORST_BENCH.
+
+    `squad_ranked`: igual que en `weakest_starter_scores()`. Los puestos en
+    venta (`on_market`/`market`) no cuentan: se van a ir; quien quiera
+    contar una venta de reserva como suplente debe pasarla con `on_market`
+    a False (igual que jobs/run_market.py hace para `assess_squad_depth`).
+
+    Devuelve {position: score}, solo para las posiciones con al menos un
+    suplente sano.
+    """
+    formation = formation or config.DEFAULT_FORMATION
+    slots = FORMATIONS.get(formation)
+    if slots is None:
+        raise ValueError(f"Formación no soportada: {formation}")
+
+    floors = {}
+    for position, required in slots.items():
+        healthy = sorted(
+            (
+                p
+                for p in squad_ranked
+                if p.get("position") == position
+                and not is_injury_status(p.get("status"))
+                and not p.get("on_market")
+                and not p.get("market")
+            ),
+            key=lambda p: p["score"],
+            reverse=True,
+        )
+        bench = healthy[required:]
+        if bench:
+            floors[position] = bench[-1]["score"]
+    return floors

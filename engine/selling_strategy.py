@@ -336,6 +336,9 @@ def pick_standby_listings(
     starter_ids: set,
     positions_with_standby: set,
     excluded_ids: set = frozenset(),
+    purchased_at_by_id: dict[str, str] = None,
+    min_hold_days: float = None,
+    now: datetime = None,
 ) -> list[dict]:
     """
     Ventas permanentes de reserva para swaps (config.ENABLE_SWAP_STANDBY_
@@ -347,16 +350,27 @@ def pick_standby_listings(
     venta, no sea titular de la alineación guardada (`starter_ids`) ni esté
     en `excluded_ids` (p.ej. ya decidido o vendido en esta misma pasada).
 
+    Tampoco un recién fichado (`purchased_at_by_id`, ISO de la compra;
+    config.SWAP_STANDBY_MIN_HOLD_DAYS por defecto para `min_hold_days`):
+    su score de alineación aún no es representativo. Sin fecha de compra
+    conocida, no bloquea.
+
     `squad`: items de `FutmondoClient.get_roster()` ("id", "role", "status",
     "market", "value"). Devuelve [{"player_id", "position", "asking_price",
     "lineup_score"}], una como mucho por posición; la venta se pide al VM.
     """
+    min_hold_days = config.SWAP_STANDBY_MIN_HOLD_DAYS if min_hold_days is None else min_hold_days
+    now = now or datetime.now(timezone.utc)
+    purchased_at_by_id = purchased_at_by_id or {}
     starter_ids = {str(i) for i in starter_ids}
     excluded_ids = {str(i) for i in excluded_ids}
     worst_by_position: dict[str, dict] = {}
     for p in squad:
         pid = str(p["id"])
         position = FUTMONDO_POSITION_MAP.get(p.get("role"), p.get("role"))
+        purchased_at = parse_iso_datetime(purchased_at_by_id.get(pid))
+        if purchased_at is not None and (now - purchased_at).total_seconds() / 86400 < min_hold_days:
+            continue  # recién fichado (config.SWAP_STANDBY_MIN_HOLD_DAYS)
         if (
             position in positions_with_standby
             or (bench_by_position.get(position) or 0) < 1

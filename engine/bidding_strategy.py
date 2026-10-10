@@ -311,6 +311,28 @@ def apply_position_priority(
     return sorted(adjusted, key=lambda p: p["score"], reverse=True)
 
 
+def would_be_worst_bench(candidate: dict, bench_floors: dict) -> bool:
+    """
+    True si fichar a `candidate` (de `apply_position_priority()`, con
+    "position", "lineup_score", "position_at_risk" y
+    "would_upgrade_lineup") lo dejaría como el PEOR suplente sano de su
+    posición -- justo a quien la venta de reserva pone en venta (ver
+    config.ENABLE_BIDDING_SKIP_WORST_BENCH). `bench_floors`: ver
+    engine.squad_risk.weakest_healthy_bench_scores().
+
+    Nunca descarta si mejora el once, si su posición está en riesgo (hace
+    falta un cuerpo más aunque sea flojo), si no hay suplentes sanos en su
+    posición con los que comparar o si no tiene "lineup_score".
+    """
+    if candidate.get("would_upgrade_lineup") or candidate.get("position_at_risk"):
+        return False
+    floor = bench_floors.get(candidate.get("position"))
+    lineup_score = candidate.get("lineup_score")
+    if floor is None or lineup_score is None:
+        return False
+    return lineup_score <= floor
+
+
 def decide_bid(
     player: dict,
     remaining_budget: int,

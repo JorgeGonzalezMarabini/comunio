@@ -1813,3 +1813,26 @@ def test_find_standby_swap_target_requires_price_efficiency_and_budget():
     market = [_target_row("objetivo", 10_000_000)]  # 0.4 / 9M = 0.044
     assert find_standby_swap_target("propio", 1_000_000, "POR", scores, market, available_budget=9_000_000, **common) is None
     assert find_standby_swap_target("propio", 1_000_000, "POR", scores, market, available_budget=10_000_000, **common)["id"] == "objetivo"
+
+
+def test_pick_standby_listings_skips_recent_signing():
+    # Caso real (2026-10-06): Borja Iglesias, fichado hacía ~15 horas, puesto
+    # en reserva como "peor sano de DEL".
+    squad = [
+        {"id": 30, "role": "delantero", "status": "", "value": 16_000_000},  # recién fichado, peor score
+        {"id": 31, "role": "delantero", "status": "", "value": 1_000_000},
+    ]
+    scores = {"30": 0.39, "31": 0.5}
+    purchased_at = {"30": (NOW - timedelta(hours=15)).isoformat(), "31": (NOW - timedelta(days=30)).isoformat()}
+    picks = pick_standby_listings(
+        squad, scores, {"DEL": 1}, set(), set(), purchased_at_by_id=purchased_at, min_hold_days=7, now=NOW
+    )
+    assert [p["player_id"] for p in picks] == [31]
+    # Pasada la antigüedad mínima, vuelve a ser elegible.
+    later = NOW + timedelta(days=8)
+    picks = pick_standby_listings(
+        squad, scores, {"DEL": 1}, set(), set(), purchased_at_by_id=purchased_at, min_hold_days=7, now=later
+    )
+    assert [p["player_id"] for p in picks] == [30]
+    # Sin fecha de compra conocida, no bloquea.
+    assert [p["player_id"] for p in pick_standby_listings(squad, scores, {"DEL": 1}, set(), set(), now=NOW)] == [30]
