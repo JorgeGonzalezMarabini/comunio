@@ -1305,6 +1305,49 @@ def test_run_sales_creates_standby_listing_for_worst_non_starter_with_bench(
         assert (row["player_id"], row["purpose"], row["status"]) == (expected_listed[0][0], "standby", "listed")
 
 
+def test_run_sales_delists_standby_that_enters_computed_lineup_and_relists_the_worst(tmp_db, monkeypatch):
+    """
+    Caso real (2026-10-07): Ryan (2, 0.88) quedó en reserva porque la
+    alineación guardada protegía a Cárdenas (1, 0.15). Entre semana los
+    protegidos se recalculan: la reserva de Ryan se retira y pasa a
+    Cárdenas, el peor de verdad.
+    """
+    _fixed_run_sales_now(monkeypatch, datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(config, "ENABLE_SELLING_WEEKEND_LINEUP_GUARD", True)
+    sale_id = _seed_standby_sale(player_id="2")
+    scores = {str(p["id"]): 0.5 for p in STANDBY_ROSTER}
+    scores.update({"1": 0.15, "2": 0.88})
+    monkeypatch.setattr(run_sales, "score_market_upgrade_candidates", lambda own, market: (scores, {}))
+    cancelled, listed = [], []
+
+    class FakeClient(_BaseFakeClient):
+        def get_roster(self):
+            return {"answer": [dict(p) for p in STANDBY_ROSTER]}
+
+        def get_information(self):
+            return {"answer": {"budget": 0, "configuration": {"maxPlayersInRoster": 18}}}
+
+        def get_lineup(self):
+            return {"answer": {"players": [{"id": 1}]}}
+
+        def cancel_sale(self, player_id):
+            cancelled.append(player_id)
+            return {"code": "api.general.ok"}
+
+        def list_for_sale(self, player_id, price):
+            listed.append((player_id, price))
+            return {"code": "api.general.ok"}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify") as notify_mock:
+        run_sales.run()
+
+    assert cancelled == ["2"]
+    assert listed == [("1", 2_000_000)]
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM sales WHERE id = ?", (sale_id,)).fetchone()["status"] == "delisted"
+    assert "Venta de reserva retirada (entra en el once): jugador 2." in notify_mock.call_args[0][0]
+
+
 def test_route_standby_decisions_drops_market_only_sale_and_converts_other_reasons(tmp_db):
     sale_id = _seed_standby_sale(player_id="2")
     roster = [dict(p) for p in STANDBY_ROSTER]

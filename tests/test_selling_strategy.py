@@ -9,6 +9,7 @@ from engine.selling_strategy import (
     effective_profit_threshold,
     find_standby_swap_target,
     pick_standby_listings,
+    standby_protected_ids,
     price_momentum_pct,
 )
 
@@ -1821,6 +1822,22 @@ def test_pick_standby_listings_protects_computed_starters_not_stale_saved_lineup
         squad, scores, {"DEL": 2}, saved_lineup, set(), now=saturday, enable_weekend_lineup_guard=False
     )
     assert [p["player_id"] for p in picks] == [31]
+
+
+def test_standby_protected_ids_counts_open_standby_as_available():
+    # Caso real (2026-10-07): Ryan (0.88) en reserva por la alineación
+    # guardada con Cárdenas (0.15). Estar en venta no le saca del once.
+    squad = [
+        {"id": 1, "role": "portero", "status": "", "market": False},  # Cárdenas
+        {"id": 2, "role": "portero", "status": "", "market": True},  # Ryan
+    ]
+    scores = {"1": 0.15, "2": 0.88}
+    wednesday = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    assert "2" in standby_protected_ids(squad, scores, {1}, {"2"}, wednesday, enable_weekend_lineup_guard=True)
+    # Una venta normal (no reserva) sí lo saca del once.
+    assert standby_protected_ids(squad, scores, {1}, set(), wednesday, enable_weekend_lineup_guard=True) == {"1"}
+    saturday = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    assert standby_protected_ids(squad, scores, {1}, {"2"}, saturday, enable_weekend_lineup_guard=True) >= {"1", "2"}
 
 
 def _target_row(cid, price, recent=(6, 6, 6, 6, 6)):

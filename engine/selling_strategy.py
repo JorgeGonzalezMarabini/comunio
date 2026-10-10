@@ -344,6 +344,7 @@ def pick_standby_listings(
     now: datetime = None,
     formation: str = None,
     enable_weekend_lineup_guard: bool = None,
+    standby_ids: set = frozenset(),
 ) -> list[dict]:
     """
     Ventas permanentes de reserva para swaps (config.ENABLE_SWAP_STANDBY_
@@ -368,6 +369,9 @@ def pick_standby_listings(
     config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD que
     `decide_sales()`): entre jornadas set_lineup no corre y queda desfasada.
 
+    Los protegidos salen de `standby_protected_ids()` (`standby_ids`: las
+    reservas abiertas, que cuentan como disponibles para el once).
+
     Tampoco un recién fichado (`purchased_at_by_id`, ISO de la compra;
     config.SWAP_STANDBY_MIN_HOLD_DAYS por defecto para `min_hold_days`):
     su score de alineación aún no es representativo. Sin fecha de compra
@@ -378,17 +382,12 @@ def pick_standby_listings(
     "lineup_score"}], una como mucho por posición; la venta se pide al VM.
     """
     min_hold_days = config.SWAP_STANDBY_MIN_HOLD_DAYS if min_hold_days is None else min_hold_days
-    enable_weekend_lineup_guard = (
-        config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
-        if enable_weekend_lineup_guard is None
-        else enable_weekend_lineup_guard
-    )
     now = now or datetime.now(timezone.utc)
     purchased_at_by_id = purchased_at_by_id or {}
     excluded_ids = {str(i) for i in excluded_ids}
-    protected_ids = computed_starter_ids(squad, lineup_scores, formation)
-    if enable_weekend_lineup_guard and is_matchday_lineup_guard_time(now):
-        protected_ids |= {str(i) for i in starter_ids}
+    protected_ids = standby_protected_ids(
+        squad, lineup_scores, starter_ids, standby_ids, now, formation, enable_weekend_lineup_guard
+    )
     worst_by_position: dict[str, dict] = {}
     for p in squad:
         pid = str(p["id"])
@@ -416,6 +415,42 @@ def pick_standby_listings(
                 "lineup_score": lineup_scores[pid],
             }
     return list(worst_by_position.values())
+
+
+def standby_protected_ids(
+    squad: list[dict],
+    lineup_scores: dict[str, float],
+    starter_ids: set,
+    standby_ids: set = frozenset(),
+    now: datetime = None,
+    formation: str = None,
+    enable_weekend_lineup_guard: bool = None,
+) -> set[str]:
+    """
+    Jugadores que no pueden estar en venta de reserva para swaps: el once
+    calculado con la plantilla actual (`computed_starter_ids()`), contando
+    a las reservas ya abiertas (`standby_ids`) como disponibles -- si no,
+    estar en venta las sacaría del once y nunca se protegerían -- y, con la
+    jornada en juego (scheduling.is_matchday_lineup_guard_time,
+    config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD), la alineación guardada
+    (`starter_ids`). Se recalcula en cada pasada: sirve tanto para elegir
+    reservas nuevas (`pick_standby_listings()`) como para retirar las
+    abiertas que hayan entrado en el once (a petición del usuario,
+    2026-10-10, caso real: Ryan, 0.88, en reserva desde el 2026-10-07 por
+    la alineación guardada del 2026-10-02 con Cárdenas, 0.15).
+    """
+    enable_weekend_lineup_guard = (
+        config.ENABLE_SELLING_WEEKEND_LINEUP_GUARD
+        if enable_weekend_lineup_guard is None
+        else enable_weekend_lineup_guard
+    )
+    now = now or datetime.now(timezone.utc)
+    standby_ids = {str(i) for i in standby_ids}
+    available = [dict(p, market=False) if str(p["id"]) in standby_ids else p for p in squad]
+    protected_ids = computed_starter_ids(available, lineup_scores, formation)
+    if enable_weekend_lineup_guard and is_matchday_lineup_guard_time(now):
+        protected_ids |= {str(i) for i in starter_ids}
+    return protected_ids
 
 
 def computed_starter_ids(squad: list[dict], lineup_scores: dict[str, float], formation: str = None) -> set[str]:

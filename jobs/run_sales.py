@@ -205,6 +205,7 @@ from engine.selling_strategy import (
     find_standby_swap_target,
     parse_iso_datetime,
     pick_standby_listings,
+    standby_protected_ids,
     score_market_upgrade_candidates,
 )
 from engine.squad_risk import assess_squad_depth, weakest_starter_scores
@@ -1075,8 +1076,8 @@ def run():
                 f"Venta de reserva para swaps: jugador {c['player_id']} ({c['position']}) a "
                 f"{format_number(c['asking_price'])} -- solo se aceptará con plantilla llena y objetivo de swap."
             )
-        for sale in cancelled:
-            report_lines.append(f"Venta de reserva retirada (lesión confirmada): jugador {sale['player_id']}.")
+        for sale, why in cancelled:
+            report_lines.append(f"Venta de reserva retirada ({why}): jugador {sale['player_id']}.")
         for pick, err in standby_failed:
             report_lines.append(f"Venta de reserva fallida: jugador {pick['player_id']}: {err}")
 
@@ -1140,15 +1141,18 @@ def _maintain_standby_listings(
     accepted_ids: set,
     excluded_ids: set,
     now: str,
-) -> tuple[list[dict], list[dict], list[tuple[dict, str]]]:
+) -> tuple[list[dict], list[tuple[dict, str]], list[tuple[dict, str]]]:
     """
     Mantiene las ventas de reserva para swaps (ver config.ENABLE_SWAP_
     STANDBY_LISTINGS): retira las de jugadores con lesión CONFIRMADA (para
-    que la venta por lesión de decide_sales() pueda actuar) y pone en venta
+    que la venta por lesión de decide_sales() pueda actuar) y las de
+    quien haya entrado en los protegidos recalculados en esta pasada
+    (`engine.selling_strategy.standby_protected_ids`), y pone en venta
     al VM al peor de cada posición que no tenga ya una
     (`engine.selling_strategy.pick_standby_listings`). Una reserva se
-    mantiene mientras siga siendo elegible aunque ya no sea la peor: retirar
-    y volver a listar perdería la oferta que ya tuviera esperando.
+    mantiene mientras siga fuera de los protegidos aunque ya no sea la
+    peor: retirar y volver a listar perdería la oferta que ya tuviera
+    esperando.
 
     No crea ninguna en una posición donde se acaba de aceptar una oferta en
     esta pasada (el banquillo real aún no está reflejado), ni en fin de
@@ -1157,23 +1161,36 @@ def _maintain_standby_listings(
     Tampoco a un recién fichado
     (`purchase_baselines[...]["purchased_at"]`, config.SWAP_STANDBY_MIN_HOLD_DAYS).
 
-    Devuelve (creadas, retiradas, fallidas).
+    Devuelve (creadas, (retirada, motivo), fallidas).
     """
-    roster_by_id = {str(p["id"]): p for p in roster_items}
     position_by_player_id = _position_by_player_id(roster_items)
+    remaining = [dict(p) for p in roster_items if str(p["id"]) not in accepted_ids]
+    remaining_by_id = {str(p["id"]): p for p in remaining}
+    lineup_scores, _ = score_market_upgrade_candidates(own_squad_features, market_candidates)
+    open_standby_ids = {str(sale["player_id"]) for sale in standby_sales}
+    protected_ids = standby_protected_ids(
+        remaining, lineup_scores, own_lineup_player_ids, open_standby_ids, datetime.fromisoformat(now)
+    )
 
     cancelled = []
     kept_positions = set()
     for sale in standby_sales:
         pid = str(sale["player_id"])
-        player = roster_by_id.get(pid)
-        if player is None or pid in accepted_ids:
+        player = remaining_by_id.get(pid)
+        if player is None:
             continue
         if is_confirmed_injured_status(player.get("status")):
+            why = "lesión confirmada"
+        elif pid in protected_ids:
+            why = "entra en el once"
+        else:
+            why = None
+        if why is not None:
             try:
                 client.cancel_sale(pid)
                 update_sale_status(sale["id"], "delisted")
-                cancelled.append(sale)
+                cancelled.append((sale, why))
+                player["market"] = False
                 continue
             except (requests.RequestException, FutmondoOfferError):
                 pass
@@ -1186,17 +1203,17 @@ def _maintain_standby_listings(
     ):
         return [], cancelled, []
 
-    remaining = [p for p in roster_items if str(p["id"]) not in accepted_ids]
-    lineup_scores, _ = score_market_upgrade_candidates(own_squad_features, market_candidates)
+    kept_standby_ids = open_standby_ids - {str(sale["player_id"]) for sale, _ in cancelled}
     picks = pick_standby_listings(
         remaining,
         lineup_scores,
         _bench_by_position_now(remaining),
         own_lineup_player_ids,
         kept_positions | {position_by_player_id.get(pid) for pid in accepted_ids},
-        excluded_ids=excluded_ids,
+        excluded_ids=excluded_ids | {str(sale["player_id"]) for sale, _ in cancelled},
         purchased_at_by_id={pid: b.get("purchased_at") for pid, b in (purchase_baselines or {}).items()},
         now=datetime.fromisoformat(now),
+        standby_ids=kept_standby_ids,
     )
 
     created, failed = [], []
