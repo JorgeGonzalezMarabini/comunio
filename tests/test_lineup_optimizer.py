@@ -556,6 +556,28 @@ def test_build_substitution_changes_only_one_substitution_per_position():
     assert changes[2]["to"] == "def_suplente"
 
 
+# --- already_played_ids: no tocar a quien ya jugó su partido de la jornada ---
+
+
+def test_build_substitution_changes_skips_substitute_who_already_played():
+    """Regresión J8 (2026-10-11): Dotor (ya jugado, 2 pts) entraba por Otorbi (12 pts desde el banquillo real)."""
+    players_by_id = _players_by_id([("med_titular", "MED", ""), ("med_suplente", "MED", "")])
+
+    assert build_substitution_changes(
+        players_by_id, {4: "med_titular"}, {0: "med_suplente"},
+        confirmed_out_ids={"med_titular"}, already_played_ids={"med_suplente"},
+    ) == []
+
+
+def test_build_substitution_changes_skips_starter_who_already_played():
+    """Lesionado DURANTE su partido: sacarlo ahora tiraría los puntos que ya hizo."""
+    players_by_id = _players_by_id([("def_titular", "DEF", "lesionado"), ("def_suplente", "DEF", "")])
+
+    assert build_substitution_changes(
+        players_by_id, {6: "def_titular"}, {3: "def_suplente"}, already_played_ids={"def_titular"},
+    ) == []
+
+
 # --- confirmed_out_ids: señal de alineación real (independiente de status) ---
 
 

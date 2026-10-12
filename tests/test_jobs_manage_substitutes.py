@@ -1,6 +1,9 @@
 import runpy
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 import config
 import jobs.manage_substitutes as manage_substitutes
@@ -9,6 +12,21 @@ from db.models import get_connection
 
 NOW = "2026-08-17T12:00:00+00:00"
 JOB_PATH = str(Path(__file__).resolve().parent.parent / "jobs" / "manage_substitutes.py")
+
+
+@pytest.fixture(autouse=True)
+def _summary_without_match(monkeypatch):
+    """
+    Por defecto, ficha sin `match` -> nadie sale como "ya jugado" (ver
+    find_players_already_played()); sin esto, los FakeClient de abajo
+    heredarían el get_player_summary() real y harían peticiones HTTP.
+    """
+    monkeypatch.setattr(FutmondoClient, "get_player_summary", lambda self, player_id: {"answer": {}})
+
+
+def _summary(round_number, date):
+    """Shape mínimo de get_player_summary() con el próximo partido del jugador."""
+    return {"answer": {"match": {"r": {"number": round_number}, "info": {"date": date}}}}
 
 
 def _seed_player(conn, pid, position, status=""):
@@ -320,3 +338,95 @@ def test_manage_substitutes_main_does_not_record_job_run_when_bot_disabled(tmp_d
         count = conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
     assert count == 0
     assert "ENABLE_BOT=false" in capsys.readouterr().out
+
+
+# --- find_players_already_played(): no tocar a quien ya jugó su partido ---
+
+
+class _SummaryClient:
+    def __init__(self, summaries):
+        self.summaries = summaries
+
+    def get_player_summary(self, player_id):
+        return self.summaries[player_id]
+
+
+def test_find_players_already_played_flags_next_round_and_started_matches():
+    """Caso real J8 (lunes 2026-10-12): Dotor ya jugó (próximo partido J9), Ryan aún no (J8 esa noche)."""
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+    client = _SummaryClient({
+        "ryan": _summary(8, "2026-10-12T19:00:00.000Z"),
+        "dotor": _summary(9, "2026-10-18T16:30:00.000Z"),
+        "en_juego": _summary(8, "2026-10-12T11:00:00.000Z"),  # ya empezado
+        "sin_partido": {"answer": {}},
+    })
+
+    assert manage_substitutes.find_players_already_played(client, ["ryan", "dotor", "en_juego", "sin_partido"], now) == {"dotor", "en_juego"}
+
+
+def test_find_players_already_played_flags_nobody_between_rounds():
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+    client = _SummaryClient({
+        "a": _summary(9, "2026-10-17T12:00:00.000Z"),
+        "b": _summary(9, "2026-10-19T19:00:00.000Z"),
+    })
+
+    assert manage_substitutes.find_players_already_played(client, ["a", "b"], now) == set()
+
+
+def test_manage_substitutes_does_not_bring_in_substitute_who_already_played(tmp_db, monkeypatch):
+    """
+    Regresión J8 (2026-10-11): Otorbi (aún sin jugar) confirmado fuera del
+    once real -> el bot metía a Dotor, cuyo partido ya se había jugado el
+    viernes. Otorbi entró desde el banquillo real e hizo 12 pts perdidos.
+    """
+    monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", True)
+    with get_connection() as conn:
+        _seed_player(conn, "med_titular", "MED", status="lesionado")
+        _seed_player(conn, "med_suplente", "MED", status="")
+        _seed_player(conn, "por_titular", "POR", status="")
+
+    class FakeClient(FutmondoClient):
+        def get_lineup(self):
+            return _lineup_answer([(4, "med_titular"), (10, "por_titular")], [(0, "med_suplente")])
+
+        def get_player_summary(self, player_id):
+            return {
+                "med_titular": _summary(8, "2099-01-01T19:00:00.000Z"),
+                "por_titular": _summary(8, "2099-01-01T19:00:00.000Z"),
+                "med_suplente": _summary(9, "2099-01-08T16:30:00.000Z"),
+            }[player_id]
+
+        def change_lineup(self, changes):
+            raise AssertionError("no debería meter a un suplente que ya jugó su partido de esta jornada")
+
+    captured = []
+    with patch("jobs.manage_substitutes.FutmondoClient", FakeClient), \
+         patch("jobs.manage_substitutes.notify", side_effect=lambda m: captured.append(m)):
+        manage_substitutes.run()
+
+    assert captured == []
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM substitution_decisions").fetchone()["n"] == 0
+
+
+def test_manage_substitutes_already_played_check_failure_falls_back_without_crashing(tmp_db, monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_SUBSTITUTE_AUTO_SUBMIT", False)
+    with get_connection() as conn:
+        _seed_player(conn, "def_titular", "DEF", status="lesionado")
+        _seed_player(conn, "def_suplente", "DEF", status="")
+
+    class FakeClient(FutmondoClient):
+        def get_lineup(self):
+            return _lineup_answer([(6, "def_titular")], [(3, "def_suplente")])
+
+        def get_player_summary(self, player_id):
+            raise RuntimeError("boom")
+
+    captured = []
+    with patch("jobs.manage_substitutes.FutmondoClient", FakeClient), \
+         patch("jobs.manage_substitutes.notify", side_effect=lambda m: captured.append(m)):
+        manage_substitutes.run()
+
+    assert "ya han jugado esta jornada" in captured[0]
+    assert "1 sustitución(es) decidida(s)" in captured[1]

@@ -66,6 +66,46 @@ from engine.lineup_optimizer import build_substitution_changes
 from notifier import notify, track_job_run
 
 
+def find_players_already_played(client, player_ids, now: datetime = None) -> set[str]:
+    """
+    Ids de `player_ids` cuyo partido de la jornada en curso ya se ha jugado
+    o ya ha empezado -- ver build_substitution_changes(already_played_ids)
+    para el bug real que motivó esto (J8, 2026-10-11).
+
+    Señal: `match` de /1/player/summary es el PRÓXIMO partido pendiente de
+    cada jugador (`r.number` = jornada, `info.date` = inicio UTC).
+    Confirmado en vivo el 2026-10-12 (lunes de la J8): Ryan (Levante, aún
+    por jugar esa noche) tenía `match` de la J8; todos los que ya habían
+    jugado su partido de la J8, ya el de la J9. No hay endpoint conocido
+    con la jornada actual (`/1/userteam/information` no la trae), así que
+    se toma como jornada en curso la más baja entre `player_ids` -- por eso
+    hay que pasar titulares + banquillo, no solo la pareja implicada.
+
+    Ya jugado = su próximo partido es de una jornada posterior a la en
+    curso, o su partido ya ha empezado (`info.date` <= ahora). Si todos
+    tienen el próximo partido en la misma jornada (entre jornadas) no se
+    marca a nadie. Limitación conocida: un jugador cuyo equipo no juega
+    esta jornada (aplazado/descanso) también sale como "ya jugado".
+    """
+    now = now or datetime.now(timezone.utc)
+    next_match_by_id = {}
+    for pid in player_ids:
+        match = client.get_player_summary(pid).get("answer", {}).get("match") or {}
+        round_number = (match.get("r") or {}).get("number")
+        if round_number is None:
+            continue
+        date = (match.get("info") or {}).get("date")
+        next_match_by_id[pid] = (round_number, datetime.fromisoformat(date) if date else None)
+    if not next_match_by_id:
+        return set()
+    current_round = min(round_number for round_number, _ in next_match_by_id.values())
+    return {
+        pid
+        for pid, (round_number, kickoff) in next_match_by_id.items()
+        if round_number > current_round or (kickoff is not None and kickoff <= now)
+    }
+
+
 def run():
     if not config.ENABLE_BOT:
         print("manage_substitutes: ENABLE_BOT=false, no se ejecuta.")
@@ -87,6 +127,8 @@ def run():
 
     all_players = get_player_features(only_on_market=False)
     players_by_id = {p["id"]: p for p in all_players}
+
+    lineup_and_bench_ids = set(current_lineup_by_position.values()) | set(current_bench_by_position.values())
 
     confirmed_out_ids = set()
     if config.ENABLE_REAL_LINEUP_CHECK:
@@ -112,7 +154,6 @@ def run():
         # mismo en Futmondo) cierra el hueco.
         from clients.football_lineups_client import find_players_confirmed_out_of_real_lineup
 
-        lineup_and_bench_ids = set(current_lineup_by_position.values()) | set(current_bench_by_position.values())
         players_in_play_by_id = {pid: players_by_id[pid] for pid in lineup_and_bench_ids if pid in players_by_id}
         try:
             confirmed_out_ids = find_players_confirmed_out_of_real_lineup(players_in_play_by_id)
@@ -122,6 +163,20 @@ def run():
     changes = build_substitution_changes(players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids)
     if not changes:
         return  # nadie confirmado fuera con suplente disponible esta pasada -- ver docstring del módulo
+
+    # Solo ahora (hay alguna sustitución candidata) se consulta quién ya ha
+    # jugado su partido de la jornada: una ficha por jugador en juego, no
+    # merece la pena pagarlo en cada pasada sin nada que decidir.
+    try:
+        already_played_ids = find_players_already_played(client, lineup_and_bench_ids)
+    except Exception as e:  # noqa: BLE001 -- mismo criterio que el fallo de Fotmob de arriba
+        notify(f"manage_substitutes: fallo consultando qué jugadores ya han jugado esta jornada, sigo sin esa comprobación: {e}")
+        already_played_ids = set()
+    changes = build_substitution_changes(
+        players_by_id, current_lineup_by_position, current_bench_by_position, confirmed_out_ids, already_played_ids
+    )
+    if not changes:
+        return  # todas las candidatas implicaban a alguien que ya jugó su partido de esta jornada
 
     # build_substitution_changes() genera exactamente 4 `changes` por
     # sustitución, siempre en este orden fijo (ver su docstring): vaciar

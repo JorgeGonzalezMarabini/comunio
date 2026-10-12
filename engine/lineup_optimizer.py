@@ -480,6 +480,7 @@ def build_substitution_changes(
     current_lineup_by_position: dict,
     current_bench_by_position: dict,
     confirmed_out_ids: set = None,
+    already_played_ids: set = None,
 ) -> list[dict]:
     """
     Construye la lista `changes` (mismo shape que build_lineup_changes()/
@@ -560,8 +561,19 @@ def build_substitution_changes(
     una posición si el titular no está lesionado/en duda, si no hay nadie
     asignado en el slot de banquillo de esa posición, o si el suplente
     asignado TAMBIÉN está lesionado/en duda (no hay a quién meter).
+
+    `already_played_ids` (opcional): jugadores cuyo partido de la jornada
+    en curso ya se ha jugado o ya ha empezado (ver jobs/manage_substitutes.
+    find_players_already_played()). Se salta la posición si el titular O
+    el suplente están ahí. Bug real 2026-10-11 (J8): Dotor (Málaga, ya
+    jugado el viernes, 2 pts) volvió a entrar por Otorbi (Valencia, aún
+    sin jugar, no titular según Fotmob) — Otorbi salió desde el banquillo
+    real e hizo 12 pts que se quedaron en nuestro banquillo. Meter a un
+    suplente que ya jugó no puede sumar nada nuevo, y sacar a un titular
+    que ya jugó tira los puntos que ya hizo.
     """
     confirmed_out_ids = confirmed_out_ids or set()
+    already_played_ids = already_played_ids or set()
 
     def _is_confirmed_out(player_id: str, player: dict | None) -> bool:
         return (player is not None and is_injury_status(player.get("status"))) or player_id in confirmed_out_ids
@@ -572,6 +584,8 @@ def build_substitution_changes(
         starter = players_by_id.get(starter_id)
         if starter is None or not _is_confirmed_out(starter_id, starter):
             continue
+        if starter_id in already_played_ids:
+            continue  # sus puntos de esta jornada ya cuentan, ver docstring
         position = starter["position"]
         if position in replaced_positions:
             continue  # ya se usó el único suplente de esta posición en esta pasada
@@ -582,6 +596,8 @@ def build_substitution_changes(
         substitute = players_by_id.get(substitute_id)
         if _is_confirmed_out(substitute_id, substitute):
             continue  # el suplente asignado tampoco puede jugar
+        if substitute_id in already_played_ids:
+            continue  # ya jugó su partido de esta jornada, no puede sumar nada nuevo
 
         changes.append(
             {"cpt": False, "from": starter_id, "position": slot, "isBench": False, "multiposition": False}
