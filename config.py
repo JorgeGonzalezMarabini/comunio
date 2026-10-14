@@ -1023,6 +1023,15 @@ SELLING_REVALUATION_MAX_PREMIUM_PCT = float(os.getenv("SELLING_REVALUATION_MAX_P
 # Futmondo si offer_price >= listing_price * (1 - SELLING_OFFER_ACCEPTANCE_MARGIN).
 SELLING_OFFER_ACCEPTANCE_MARGIN = float(os.getenv("SELLING_OFFER_ACCEPTANCE_MARGIN", "0.05"))
 
+# Margen más amplio que el de arriba, solo para ventas listadas por
+# "oportunidad de mercado" (con fila en `db.models.sale_swap_targets`, ver
+# SELLING_SWAP_MIN_HOURS_BEFORE_ACCEPT) -- a petición del usuario,
+# 2026-10-14, caso real Dani Martínez: con la plantilla llena el fichaje
+# del objetivo solo se puja tras vender, y con el VM en el suelo (1M)
+# Futmondo ofrece ~93-97%, así que el 5% dejaba el swap bloqueado días por
+# unos pocos miles frente a una mejora clara del once.
+SELLING_SWAP_OFFER_ACCEPTANCE_MARGIN = float(os.getenv("SELLING_SWAP_OFFER_ACCEPTANCE_MARGIN", "0.10"))
+
 # Umbral MÁS ESTRICTO que el de listar, exclusivo del momento de ACEPTAR
 # una oferta recibida (a petición del usuario, 2026-08-29, ver docstring
 # de jobs/run_sales.py): decide_sales() permite listar hasta dejar una

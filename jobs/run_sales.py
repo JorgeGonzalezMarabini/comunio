@@ -702,7 +702,14 @@ def _process_received_offers(
             continue  # ninguna oferta es de Futmondo -- se ignoran las de otro manager
 
         best = max(futmondo_bids, key=lambda b: b["price"])
-        acceptance_threshold = listing_price * (1 - config.SELLING_OFFER_ACCEPTANCE_MARGIN)
+        # Venta por oportunidad de mercado: margen más amplio (ver
+        # config.SELLING_SWAP_OFFER_ACCEPTANCE_MARGIN).
+        margin = (
+            config.SELLING_SWAP_OFFER_ACCEPTANCE_MARGIN
+            if get_swap_target_for_player(str(item["id"])) is not None
+            else config.SELLING_OFFER_ACCEPTANCE_MARGIN
+        )
+        acceptance_threshold = listing_price * (1 - margin)
         if best["price"] < acceptance_threshold:
             continue  # ni supera lo pedido ni queda dentro del margen de tolerancia -- se deja listado tal cual
 

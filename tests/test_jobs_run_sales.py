@@ -486,6 +486,33 @@ def test_run_sales_does_not_accept_offer_below_acceptance_margin(tmp_db):
     assert row["accepted"] == 0
 
 
+@pytest.mark.parametrize("offer_price,accepted", [(933_578, True), (890_000, False)])
+def test_run_sales_swap_listing_uses_wider_acceptance_margin(tmp_db, offer_price, accepted):
+    """
+    Venta por oportunidad de mercado (fila en sale_swap_targets): margen
+    config.SELLING_SWAP_OFFER_ACCEPTANCE_MARGIN (10%) en vez del 5% normal --
+    caso real Dani Martínez, oferta de 933_578 sobre 1_000_000 (umbral 900_000).
+    """
+    _seed_swap_target(25, 999)
+    accept_calls = []
+
+    class FakeClient(_BaseFakeClient):
+        def get_my_players_in_market(self):
+            return {"answer": [_offer_listing(listing_price=1_000_000, bid_id="bid_swap", offer_price=offer_price)]}
+
+        def accept_sale_offer(self, bid_id, player_id):
+            accept_calls.append((bid_id, player_id))
+            return {"code": "api.general.ok"}
+
+        def get_roster(self):
+            return {"answer": []}
+
+    with patch("jobs.run_sales.FutmondoClient", FakeClient), patch("jobs.run_sales.notify"):
+        run_sales.run()
+
+    assert accept_calls == ([("bid_swap", "25")] if accepted else [])
+
+
 def test_run_sales_ignores_clause_listings_when_processing_offers(tmp_db):
     """isClause=true queda fuera de accept_sale_offer() (ver su docstring) -- ni se registra ni se intenta aceptar."""
     class FakeClient(_BaseFakeClient):
