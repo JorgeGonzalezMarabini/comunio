@@ -228,6 +228,31 @@ def test_apply_position_priority_sums_both_boosts_when_candidate_hits_both():
     assert prioritized[0]["score"] == 0.2 + 0.15 + 0.15
 
 
+def test_apply_position_priority_skips_boosts_for_doubtful_candidate():
+    """
+    Un candidato en duda no recibe ningún boost aunque su posición esté en
+    riesgo y mejore el once (caso real: Stassin, 2026-09-27) -- su
+    doubt_penalty no debe quedar compensada por la necesidad de plantilla.
+    """
+    candidates = [
+        {"id": "en_duda", "position": "DEL", "score": 0.5, "lineup_score": 0.9, "is_doubtful": True},
+        {"id": "sano", "position": "DEL", "score": 0.4, "lineup_score": 0.9, "is_doubtful": False},
+    ]
+    prioritized = apply_position_priority(
+        candidates,
+        at_risk_positions={"DEL"},
+        upgrade_thresholds={"DEL": 0.5},
+        boost=0.15,
+        upgrade_boost=0.15,
+    )
+    by_id = {p["id"]: p for p in prioritized}
+    assert by_id["en_duda"]["score"] == 0.5
+    assert by_id["en_duda"]["position_at_risk"] is False
+    assert by_id["en_duda"]["would_upgrade_lineup"] is False
+    assert by_id["sano"]["score"] == 0.4 + 0.15 + 0.15
+    assert prioritized[0]["id"] == "sano"
+
+
 def test_decide_bid_reason_mentions_lineup_upgrade_when_boosted():
     player = {
         "id": "1",

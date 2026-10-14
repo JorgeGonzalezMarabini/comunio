@@ -274,6 +274,12 @@ def apply_position_priority(
     score) — solo dan ventaja frente a otro candidato de score similar en
     una posición sin ese problema.
 
+    Un candidato en duda ("is_doubtful", ver engine.evaluator.normalize_pool)
+    no recibe ninguno de los dos boosts y queda con ambas marcas a False:
+    su doubt_penalty no debe quedar compensada por la necesidad de
+    plantilla (caso real 2026-09-27: Stassin, comprado en duda con score
+    0.50 + boosts = 0.80, siguió en duda semanas sin puntuar).
+
     Guarda el score original en "base_score" (para la auditoría) y marca
     "position_at_risk"/"would_upgrade_lineup": bool en cada candidato.
     Devuelve la lista reordenada por score ajustado (mayor primero) —
@@ -286,10 +292,11 @@ def apply_position_priority(
     adjusted = []
     for c in candidates:
         base_score = c.get("score", 0.0)
-        is_at_risk = c.get("position") in at_risk_positions
+        is_doubtful = bool(c.get("is_doubtful"))
+        is_at_risk = not is_doubtful and c.get("position") in at_risk_positions
 
         would_upgrade = False
-        if c.get("position") in upgrade_thresholds:
+        if not is_doubtful and c.get("position") in upgrade_thresholds:
             threshold = upgrade_thresholds[c["position"]]
             would_upgrade = threshold is None or c.get("lineup_score", base_score) > threshold
 
