@@ -45,7 +45,7 @@ import requests
 
 import config
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError, FUTMONDO_POSITION_MAP
-from clients.laliga_stats_client import build_player_index, get_league_data_with_fallback, match_player
+from clients.laliga_stats_client import UnderstatUnavailable, build_player_index, get_league_data_with_fallback, match_player
 from db.models import init_db, get_connection, get_open_bids, update_bid_status, get_open_sales, update_sale_status
 from engine.squad_risk import assess_squad_depth, sales_to_cancel
 from notifier import notify, track_job_run
@@ -474,8 +474,21 @@ def run():
     roster = client.get_roster()
     market = client.get_market()
 
-    league_data, season, fallback_by_team = get_league_data_with_fallback()
-    if not league_data.get("players"):
+    # Understat caído (ver docstring de UnderstatUnavailable) no debe tumbar
+    # el sync de Futmondo, que es lo que consumen el resto de jobs: se sigue
+    # sin cruzar stats externas (las de external_stats quedan como estaban)
+    # y se avisa en el resumen final -- no en un notify() aparte, que con el
+    # cron horario sería un mensaje extra cada hora mientras dure la caída.
+    understat_error = None
+    try:
+        league_data, season, fallback_by_team = get_league_data_with_fallback()
+    except UnderstatUnavailable as e:
+        understat_error = e
+        league_data, season, fallback_by_team = {}, None, {}
+
+    if understat_error:
+        player_index = None
+    elif not league_data.get("players"):
         # Ni la temporada actual ni la anterior tienen datos -- caso
         # extremo, no visto en la práctica, pero no debe romper el sync.
         notify("sync_data: Understat sin datos ni para la temporada actual ni la anterior, se reintentará en el próximo sync.")
@@ -595,6 +608,8 @@ def run():
         f"sync_data: {len(roster_players)} en plantilla, {len(market_players)} en mercado, "
         f"{matched}/{total} cruzados con Understat" + (f" ({breakdown})" if breakdown else "") + "."
     ]
+    if understat_error:
+        message.append(f"⚠️ Understat no disponible ({understat_error}), stats externas sin actualizar en este sync.")
     if reconciled["won"] or reconciled["lost"]:
         message.append(f"Pujas resueltas desde el último sync: {reconciled['won']} ganada(s), {reconciled['lost']} perdida(s).")
     if backfilled:

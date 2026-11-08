@@ -696,3 +696,26 @@ def test_upsert_player_and_snapshot_stores_matches_played(tmp_db, roster_player_
     with get_connection() as conn:
         sync_data._upsert_player_and_snapshot(conn, roster_player, NOW)
     assert get_player_features()[0]["matches"] == 4
+
+
+def test_sync_data_understat_down_still_syncs_futmondo(tmp_db, roster_player_factory):
+    """Regresión 2026-11-02: Understat caído (HTML de mantenimiento con 200) tumbaba todo el sync."""
+    from clients.laliga_stats_client import UnderstatUnavailable
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [roster_player_factory(id=3001, role="defensa")]}
+
+        def get_market(self):
+            return {"answer": []}
+
+    captured = []
+    with patch("jobs.sync_data.FutmondoClient", FakeClient), \
+         patch("jobs.sync_data.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.sync_data.get_league_data_with_fallback", side_effect=UnderstatUnavailable("JSONDecodeError")):
+        sync_data.run()
+
+    with get_connection() as conn:
+        assert conn.execute("SELECT 1 FROM players WHERE id = ?", ("3001",)).fetchone()
+    assert len(captured) == 1
+    assert "Understat no disponible" in captured[0]

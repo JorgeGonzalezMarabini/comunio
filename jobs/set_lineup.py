@@ -101,7 +101,7 @@ from datetime import datetime, timezone
 
 import config
 from clients.futmondo_client import FutmondoClient
-from clients.laliga_stats_client import get_league_data, next_match_difficulty
+from clients.laliga_stats_client import UnderstatUnavailable, get_league_data, next_match_difficulty
 from db.models import get_connection, get_player_features, get_standby_sales, init_db
 from engine.evaluator import evaluate_players
 from engine.lineup_optimizer import apply_fixture_difficulty, build_bench_changes, build_lineup_changes, pick_lineup, pick_substitutes
@@ -145,13 +145,22 @@ def run():
     # plantilla es coste hundido, no debe influir en quién juega.
     ranked = evaluate_players(squad_raw, weights=config.LINEUP_EVALUATOR_WEIGHTS)
 
-    league_data = get_league_data()
-    teams = {p["team"] for p in ranked if p.get("team")}
+    # Understat caído (ver docstring de UnderstatUnavailable) no debe impedir
+    # alinear -- caso real: el viernes 2026-11-06 ninguna pasada llegó a
+    # enviar la alineación por esto. Sin dificultad de rival, cada jugador
+    # se queda con su score base (ver apply_fixture_difficulty()).
     difficulty_by_team = {}
-    for team in teams:
-        difficulty = next_match_difficulty(league_data, team)
-        if difficulty is not None:
-            difficulty_by_team[team] = difficulty
+    understat_error = None
+    try:
+        league_data = get_league_data()
+    except UnderstatUnavailable as e:
+        understat_error = e
+    else:
+        teams = {p["team"] for p in ranked if p.get("team")}
+        for team in teams:
+            difficulty = next_match_difficulty(league_data, team)
+            if difficulty is not None:
+                difficulty_by_team[team] = difficulty
 
     adjusted = apply_fixture_difficulty(ranked, difficulty_by_team)
 
@@ -252,6 +261,9 @@ def run():
             message.extend(f"  - {name}: {error}" for name, error in failed_players)
     else:
         message.append("NO enviada a Futmondo (ENABLE_LINEUP_AUTO_SUBMIT=false).")
+
+    if understat_error:
+        message.append(f"⚠️ Understat no disponible ({understat_error}), once elegido sin ajustar por dificultad del rival.")
 
     if risk_warnings:
         message.append("⚠️ Riesgo de plantilla (posición sin suplente disponible):")

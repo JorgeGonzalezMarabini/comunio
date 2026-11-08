@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clients.laliga_stats_client import (
+    UnderstatUnavailable,
     build_player_index,
     current_season,
     get_league_data,
@@ -34,6 +35,17 @@ def test_current_season_from_july_is_current_year():
         mock_dt.now.return_value.year = 2026
         mock_dt.now.return_value.month = 8
         assert current_season() == "2026"
+
+
+def test_get_league_data_html_maintenance_page_raises_unavailable():
+    """Regresión 2026-11-02: Understat sirvió una página HTML de mantenimiento con HTTP 200."""
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+    with patch("clients.laliga_stats_client.requests.get", return_value=resp), \
+         patch("clients.laliga_stats_client.time.sleep"):
+        with pytest.raises(UnderstatUnavailable):
+            get_league_data(season="2026")
 
 
 def _fake_get_league_data(players_by_season, teams_by_season=None):

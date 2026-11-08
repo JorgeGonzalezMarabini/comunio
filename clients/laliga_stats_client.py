@@ -44,6 +44,19 @@ _HEADERS = {
 }
 
 
+class UnderstatUnavailable(Exception):
+    """
+    Understat no ha devuelto datos utilizables (error de red/HTTP o una
+    respuesta que no es JSON). Caso real (2026-11-02 en adelante): la web
+    entera pasó a servir una página de mantenimiento ("We will come back
+    soon") con HTTP 200, así que `raise_for_status()` no saltaba y
+    `resp.json()` reventaba con un JSONDecodeError que tumbaba sync_data y
+    set_lineup enteros (este último ANTES de enviar la alineación). Los
+    jobs capturan esta excepción y siguen sin stats externas: Understat es
+    una señal de apoyo, no algo sin lo que no se pueda operar.
+    """
+
+
 def current_season() -> str:
     """
     Temporada de Understat vigente (año de inicio; La Liga corre
@@ -84,14 +97,19 @@ def get_league_data(league: str = "La_liga", season: str = None) -> dict:
     partido — la señal más directa de dificultad del próximo rival.
     """
     season = season or current_season()
-    resp = requests.get(
-        f"{UNDERSTAT_BASE_URL}/getLeagueData/{league}/{season}",
-        headers=_HEADERS,
-        timeout=15,
-    )
-    resp.raise_for_status()
-    time.sleep(REQUEST_DELAY_SECONDS)
-    return resp.json()
+    try:
+        resp = requests.get(
+            f"{UNDERSTAT_BASE_URL}/getLeagueData/{league}/{season}",
+            headers=_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        time.sleep(REQUEST_DELAY_SECONDS)
+        return resp.json()
+    except (requests.RequestException, ValueError) as e:
+        # ValueError cubre el JSONDecodeError de una página HTML servida con
+        # 200 (ver docstring de UnderstatUnavailable).
+        raise UnderstatUnavailable(f"{type(e).__name__}: {e}") from e
 
 
 def get_league_data_with_fallback(league: str = "La_liga", season: str = None) -> tuple[dict, str, dict[str, str]]:

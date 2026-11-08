@@ -447,3 +447,28 @@ def test_set_lineup_main_does_not_record_job_run_when_bot_disabled(tmp_db, monke
         count = conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
     assert count == 0
     assert "ENABLE_BOT=false" in capsys.readouterr().out
+
+
+def test_set_lineup_understat_down_still_picks_lineup(tmp_db, monkeypatch):
+    """Regresión 2026-11-06: Understat caído tumbaba el job antes de enviar la alineación."""
+    from clients.laliga_stats_client import UnderstatUnavailable
+
+    monkeypatch.setattr(config, "ENABLE_LINEUP_AUTO_SUBMIT", False)
+    with get_connection() as conn:
+        squad_ids = _seed_squad_11(conn)
+
+    class FakeClient(FutmondoClient):
+        def get_roster(self):
+            return {"answer": [{"id": pid} for pid in squad_ids]}
+
+    captured = []
+    with patch("jobs.set_lineup.FutmondoClient", FakeClient), \
+         patch("jobs.set_lineup.notify", side_effect=lambda m: captured.append(m)), \
+         patch("jobs.set_lineup.get_league_data", side_effect=UnderstatUnavailable("JSONDecodeError")):
+        set_lineup.run()
+
+    assert "once decidido" in captured[0]
+    assert "Understat no disponible" in captured[0]
+    with get_connection() as conn:
+        row = conn.execute("SELECT player_ids FROM lineup_decisions").fetchone()
+    assert len(json.loads(row["player_ids"])) == 11
