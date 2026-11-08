@@ -10,7 +10,13 @@ on:
     # y no hace falta cuadrar la hora con la pasada de cláusulas de
     # Futmondo. Minuto :46, libre en el escalonado del resto de workflows
     # (ver comentario largo en sync_data.yml).
-    - cron: "46 9 * * *"
+    #
+    # Solo de lunes a viernes: la liga solo permite clausulazos esos días, y
+    # el viernes hasta las 18:00 hora de Madrid (09:46 UTC = 10:46/11:46 en
+    # Madrid, siempre antes). El propio job vuelve a filtrar con
+    # scheduling.is_clause_window() por si se lanza a mano o desde
+    # cron-job.org fuera de esa ventana.
+    - cron: "46 9 * * 1-5"
 
 concurrency:
   group: db-futmondo-write

@@ -547,7 +547,9 @@ def record_clause_payment(
 def count_clause_payments_since(since_iso: str) -> int:
     """
     Clausulazos con dinero ya salido ('paid' o 'unconfirmed') desde
-    `since_iso` -- para el tope semanal config.CLAUSE_MAX_PER_WEEK. Las
+    `since_iso` (el lunes 00:00 de la semana, ver
+    scheduling.start_of_local_week) -- para el tope semanal
+    config.CLAUSE_MAX_PER_WEEK. Las
     propuestas ('proposed') y los rechazos ('failed') no cuentan.
     """
     with get_connection() as conn:

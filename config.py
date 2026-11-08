@@ -1106,10 +1106,13 @@ ENABLE_SUBSTITUTE_AUTO_SUBMIT = os.getenv("ENABLE_SUBSTITUTE_AUTO_SUBMIT", "fals
 #   - Tope por clausulazo: CLAUSE_MAX_BUDGET_PCT del saldo disponible.
 ENABLE_CLAUSE_AUTO_PAY = os.getenv("ENABLE_CLAUSE_AUTO_PAY", "false").lower() == "true"
 CLAUSE_MAX_BUDGET_PCT = float(os.getenv("CLAUSE_MAX_BUDGET_PCT", "0.20"))
-# Salvaguarda propia (no la pidió el usuario, ajustable): como mucho este
-# número de clausulazos pagados en 7 días, para que un fallo de criterio no
-# vacíe el saldo en una semana. El job paga además como mucho 1 por pasada.
-CLAUSE_MAX_PER_WEEK = int(os.getenv("CLAUSE_MAX_PER_WEEK", "2"))
+# Regla de la liga (indicada por el usuario, 2026-11-08): como mucho 4
+# clausulazos por semana, contados desde el lunes 00:00 hora de Madrid
+# (cuando Futmondo reinicia su contador, ver scheduling.start_of_local_week).
+# Bajarlo si se quiere ir más despacio; nunca por encima de 4. El job paga
+# además como mucho 1 por pasada, y solo dentro de la ventana permitida
+# (lunes a viernes, viernes hasta las 18:00, ver scheduling.is_clause_window).
+CLAUSE_MAX_PER_WEEK = int(os.getenv("CLAUSE_MAX_PER_WEEK", "4"))
 # Cuántas propuestas se listan en el mensaje de Telegram (modo propuesta).
 CLAUSE_PROPOSALS_TO_NOTIFY = int(os.getenv("CLAUSE_PROPOSALS_TO_NOTIFY", "3"))
 

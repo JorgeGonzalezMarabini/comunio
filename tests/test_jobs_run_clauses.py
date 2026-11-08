@@ -1,13 +1,22 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import pytest
+
 import config
 import jobs.run_clauses as run_clauses
 from clients.futmondo_client import FutmondoClient, FutmondoOfferError
 from db.models import get_connection
+from scheduling import start_of_local_week
 
 OWN_TEAM = "own-team"
 PAST = "2026-10-01T21:59:59.999Z"
+
+
+@pytest.fixture(autouse=True)
+def clause_window_open(monkeypatch):
+    """Los tests corren cualquier día/hora: la ventana de la liga se prueba aparte."""
+    monkeypatch.setattr(run_clauses, "is_clause_window", lambda now: True)
 
 
 def _squad(roster_player_factory):
@@ -168,14 +177,45 @@ def test_weekly_cap_blocks_payment(tmp_db, roster_player_factory, monkeypatch):
     monkeypatch.setattr(config, "CLAUSE_MAX_PER_WEEK", 1)
     squad = _squad(roster_player_factory)
     _seed_squad(squad)
-    recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    this_week = start_of_local_week(datetime.now(timezone.utc)).isoformat()
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO clause_payments (player_id, clause_price, status, created_at) VALUES ('1000', 1, 'paid', ?)",
-            (recent,),
+            (this_week,),
         )
     paid = []
 
     captured = _run(_fake_client(squad, [_rival(roster_player_factory)], paid=paid))
 
     assert paid == [] and captured == []
+
+
+def test_payment_from_previous_week_does_not_count(tmp_db, roster_player_factory, monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_CLAUSE_AUTO_PAY", True)
+    monkeypatch.setattr(config, "CLAUSE_MAX_PER_WEEK", 1)
+    squad = _squad(roster_player_factory)
+    _seed_squad(squad)
+    rival = _rival(roster_player_factory)
+    last_week = (start_of_local_week(datetime.now(timezone.utc)) - timedelta(minutes=1)).isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO clause_payments (player_id, clause_price, status, created_at) VALUES ('1000', 1, 'paid', ?)",
+            (last_week,),
+        )
+    paid = []
+
+    _run(_fake_client(squad, [rival], after_pay_roster=squad + [rival], paid=paid))
+
+    assert paid == [("9001", 20_000_000)]
+
+
+def test_outside_clause_window_exits_without_touching_futmondo(tmp_db, monkeypatch):
+    monkeypatch.setattr(run_clauses, "is_clause_window", lambda now: False)
+
+    class ExplodingClient:
+        def __init__(self, *a, **k):
+            raise AssertionError("fuera de la ventana no debe crearse el cliente")
+
+    captured = _run(ExplodingClient)
+
+    assert captured == []

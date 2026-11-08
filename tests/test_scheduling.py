@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scheduling import is_matchday_lineup_guard_time, is_within_local_window
+from scheduling import is_clause_window, is_matchday_lineup_guard_time, is_within_local_window, start_of_local_week
 
 WINDOW = ((17, 23), (21, 43))  # misma ventana local que usa jobs/set_lineup.py
 
@@ -71,3 +71,29 @@ def test_fixed_utc_cron_would_miss_the_window_in_winter():
 )
 def test_is_matchday_lineup_guard_time(now_utc, expected):
     assert is_matchday_lineup_guard_time(now_utc) is expected
+
+
+@pytest.mark.parametrize(
+    "now_utc, expected",
+    [
+        (_utc("2026-11-12T22:00:00"), True),  # jueves 23:00 Madrid
+        (_utc("2026-11-13T16:59:00"), True),  # viernes 17:59 Madrid (CET, UTC+1)
+        (_utc("2026-11-13T17:00:00"), False),  # viernes 18:00 Madrid: ya cerrado
+        (_utc("2026-09-04T15:59:00"), True),  # viernes 17:59 Madrid (CEST, UTC+2)
+        (_utc("2026-09-04T16:00:00"), False),  # viernes 18:00 Madrid en verano
+        (_utc("2026-11-14T10:00:00"), False),  # sábado
+        (_utc("2026-11-08T22:59:00"), False),  # domingo 23:59 Madrid
+        (_utc("2026-11-08T23:00:00"), True),  # lunes 00:00 Madrid (domingo en UTC)
+    ],
+)
+def test_is_clause_window(now_utc, expected):
+    assert is_clause_window(now_utc) is expected
+
+
+def test_start_of_local_week_is_monday_midnight_madrid():
+    # Domingo 22:00 Madrid -> lunes 2 nov 00:00 Madrid = 1 nov 23:00 UTC.
+    assert start_of_local_week(_utc("2026-11-08T21:00:00")) == _utc("2026-11-01T23:00:00")
+    # Lunes 00:30 Madrid (aún domingo en UTC) -> ese mismo lunes.
+    assert start_of_local_week(_utc("2026-11-08T23:30:00")) == _utc("2026-11-08T23:00:00")
+    # En verano (CEST): lunes 00:00 Madrid = domingo 22:00 UTC.
+    assert start_of_local_week(_utc("2026-09-09T12:00:00")) == _utc("2026-09-06T22:00:00")

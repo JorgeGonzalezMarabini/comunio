@@ -590,7 +590,15 @@ no encontrar una mejora.
 A petición del usuario: el equipo va último y en el mercado del Computer
 casi nunca salen jugadores buenos, mientras que los rivales tienen
 jugadores mucho mejores con cláusulas asumibles para el saldo acumulado.
-Una pasada al día (`run_clauses.yml`, 09:46 UTC):
+Una pasada al día de lunes a viernes (`run_clauses.yml`, 09:46 UTC).
+
+**Reglas de la liga** (indicadas por el usuario): como mucho **4
+clausulazos por semana**, contados desde el lunes 00:00 hora de Madrid
+(`CLAUSE_MAX_PER_WEEK`), y solo **de lunes a viernes, el viernes hasta las
+18:00** (`scheduling.is_clause_window()`). Fuera de la ventana, o con el
+cupo gastado, el job sale sin proponer ni pagar. El cupo solo cuenta lo
+pagado por el bot: un clausulazo hecho a mano en la app no se ve.
+
 
 1. Lee la plantilla de todos los managers con
    `POST /5/league/championshipplayers` (confirmado en vivo, solo lectura):
@@ -613,8 +621,7 @@ Una pasada al día (`run_clauses.yml`, 09:46 UTC):
    `CLAUSE_PROPOSALS_TO_NOTIFY` mejores por Telegram y las audita en
    `clause_payments` como `'proposed'`; no paga nada.
    **Pago automático** (`ENABLE_CLAUSE_AUTO_PAY=true` como GitHub
-   Variable): paga como mucho 1 por pasada y `CLAUSE_MAX_PER_WEEK` (2) en 7
-   días, relee la plantilla para confirmar la llegada (`'paid'`, o
+   Variable): paga como mucho 1 por pasada (dentro del cupo semanal), relee la plantilla para confirmar la llegada (`'paid'`, o
    `'unconfirmed'` si no aparece) y registra el importe como puja `'won'`
    en `bids` para que la lógica de ventas conozca el coste real.
 
@@ -1319,7 +1326,7 @@ jobs, uno por workflow, todos con:
 | run_sales | `36 1,3,5,7,9,11,13,15,17,19,21,23 * * *` | `run_sales.yml` |
 | manage_substitutes | `13,33,53 10-23 * * 5,6,0,1` | `manage_substitutes.yml` |
 | set_lineup | `3,23,43 15-20 * * 5` | `set_lineup.yml` |
-| run_clauses | `46 9 * * *` | `run_clauses.yml` (añadido 2026-11-08, hay que darlo de alta a mano) |
+| run_clauses | `46 9 * * 1-5` | `run_clauses.yml` (añadido 2026-11-08, hay que darlo de alta a mano) |
 
 **Importante — zona horaria del job explícita en UTC**: cron-job.org, a
 diferencia de GitHub Actions (siempre UTC), aplica por defecto la zona

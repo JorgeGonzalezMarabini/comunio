@@ -63,3 +63,34 @@ def is_matchday_lineup_guard_time(now_utc):
     if local.weekday() > _FRIDAY or local.weekday() == _MONDAY:
         return True
     return local.weekday() == _FRIDAY and (local.hour, local.minute) >= SET_LINEUP_WINDOW_START
+
+
+# Reglas de la liga para clausulazos (indicadas por el usuario, 2026-11-08):
+# solo de lunes a viernes, y el viernes solo hasta las 18:00 hora de Madrid.
+CLAUSE_FRIDAY_DEADLINE = (18, 0)
+
+
+def is_clause_window(now_utc):
+    """
+    True si `now_utc` cae, en hora local de Madrid, de lunes a jueves (todo
+    el día) o en viernes ANTES de `CLAUSE_FRIDAY_DEADLINE` -- cuándo la liga
+    permite pagar cláusulas (ver jobs/run_clauses.py).
+    """
+    local = now_utc.astimezone(MADRID_TZ)
+    if local.weekday() < _FRIDAY:
+        return True
+    return local.weekday() == _FRIDAY and (local.hour, local.minute) < CLAUSE_FRIDAY_DEADLINE
+
+
+def start_of_local_week(now_utc):
+    """
+    Lunes a las 00:00 hora de Madrid de la semana de `now_utc`, devuelto en
+    UTC -- el contador semanal de clausulazos de Futmondo se reinicia el
+    lunes a las 00:00 (ayuda oficial, "¿Qué son las cláusulas y cómo
+    activarlas?").
+    """
+    from datetime import timedelta, timezone
+
+    local = now_utc.astimezone(MADRID_TZ)
+    monday = (local - timedelta(days=local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return monday.astimezone(timezone.utc)

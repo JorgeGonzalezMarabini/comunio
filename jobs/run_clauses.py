@@ -6,7 +6,16 @@ del Computer casi nunca salen jugadores buenos, mientras que los rivales
 tienen jugadores mucho mejores con cláusulas asumibles para el saldo que
 el bot va acumulando.
 
-Flujo (una pasada al día, ver .github/workflows/run_clauses.yml):
+Reglas de la liga (indicadas por el usuario, 2026-11-08): como mucho 4
+clausulazos por semana (desde el lunes 00:00), solo de lunes a viernes y el
+viernes solo hasta las 18:00 hora de Madrid -- ver
+scheduling.is_clause_window()/start_of_local_week() y
+config.CLAUSE_MAX_PER_WEEK. Fuera de eso el job sale sin hacer nada. Ojo:
+el cupo solo cuenta los clausulazos pagados por el bot (`clause_payments`);
+uno pagado a mano en la app no se ve aquí -- si con él se pasara el límite,
+Futmondo debería rechazar el pago y quedaría auditado como 'failed'.
+
+Flujo (una pasada al día de lunes a viernes, ver .github/workflows/run_clauses.yml):
 1. Lee la plantilla de TODOS los managers (`get_championship_players()`)
    y guarda en BD la foto de los jugadores rivales (mismo upsert que
    jobs/sync_data.py) para poder evaluarlos con engine.evaluator igual que
@@ -18,14 +27,13 @@ Flujo (una pasada al día, ver .github/workflows/run_clauses.yml):
    saldo disponible, mismos filtros duros que las pujas).
 3. Sin config.ENABLE_CLAUSE_AUTO_PAY (por defecto): solo notifica las
    mejores propuestas por Telegram y las audita como 'proposed'.
-   Con el flag: paga como mucho UNA por pasada (y CLAUSE_MAX_PER_WEEK en 7
-   días), relee la plantilla para confirmar que el jugador ha llegado
+   Con el flag: paga como mucho UNA por pasada, relee la plantilla para confirmar que el jugador ha llegado
    (`playerMoveInDays` = 0 en la liga, el traspaso debería ser inmediato)
    y registra el importe como puja 'won' en `bids` -- así
    db.models.get_won_bid_prices() y la lógica de ventas conocen el coste
    real del jugador, no solo su VM.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
 
@@ -46,6 +54,7 @@ from engine.evaluator import evaluate_players
 from engine.squad_risk import assess_squad_depth, weakest_starter_scores
 from jobs.sync_data import _upsert_player_and_snapshot
 from notifier import format_number, notify, track_job_run
+from scheduling import CLAUSE_FRIDAY_DEADLINE, is_clause_window, start_of_local_week
 
 
 def _rival_players(championship_players: list[dict], own_userteam_id: str, now: datetime) -> list[dict]:
@@ -99,11 +108,26 @@ def run():
     if not config.ENABLE_BOT:
         print("run_clauses: ENABLE_BOT=false, no se ejecuta.")
         return
-    init_db()
-
-    client = FutmondoClient()
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
+
+    # Reglas de la liga (ver scheduling.is_clause_window y
+    # config.CLAUSE_MAX_PER_WEEK): fuera de la ventana o con el cupo semanal
+    # gastado no se puede pagar, así que tampoco tiene sentido proponer.
+    # Antes de tocar la red ni la BD.
+    if not is_clause_window(now_dt):
+        print(
+            "run_clauses: fuera de la ventana de clausulazos de la liga "
+            f"(lunes a viernes, viernes hasta las {CLAUSE_FRIDAY_DEADLINE[0]:02d}:{CLAUSE_FRIDAY_DEADLINE[1]:02d} Europe/Madrid)."
+        )
+        return
+    init_db()
+    paid_this_week = count_clause_payments_since(start_of_local_week(now_dt).isoformat())
+    if paid_this_week >= config.CLAUSE_MAX_PER_WEEK:
+        print(f"run_clauses: cupo semanal gastado ({paid_this_week}/{config.CLAUSE_MAX_PER_WEEK} desde el lunes).")
+        return
+
+    client = FutmondoClient()
 
     roster = client.get_roster().get("answer", [])
     market = client.get_market().get("answer", [])
@@ -189,17 +213,12 @@ def run():
                 )
         lines = [
             f"run_clauses: {len(targets)} clausulazo(s) posibles (saldo disponible {format_number(available_budget)}, "
-            f"tope por clausulazo {format_number(int(available_budget * config.CLAUSE_MAX_BUDGET_PCT))}). "
+            f"tope por clausulazo {format_number(int(available_budget * config.CLAUSE_MAX_BUDGET_PCT))}, "
+            f"cupo semanal {paid_this_week}/{config.CLAUSE_MAX_PER_WEEK} usado). "
             "NO pagados (ENABLE_CLAUSE_AUTO_PAY=false), mejores propuestas:"
         ]
         lines.extend(f"  {i}. {_describe(c)}" for i, c in enumerate(proposals, 1))
         notify("\n".join(lines))
-        return
-
-    week_ago = (now_dt - timedelta(days=7)).isoformat()
-    paid_this_week = count_clause_payments_since(week_ago)
-    if paid_this_week >= config.CLAUSE_MAX_PER_WEEK:
-        print(f"run_clauses: tope semanal alcanzado ({paid_this_week}/{config.CLAUSE_MAX_PER_WEEK}), no se paga ninguno.")
         return
 
     target = targets[0]
