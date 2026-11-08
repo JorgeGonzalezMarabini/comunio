@@ -41,7 +41,9 @@ def _rival(roster_player_factory, id="9001", name="Crack", role="delantero", cla
     return p
 
 
-def _fake_client(squad, rivals, budget=200_000_000, after_pay_roster=None, pay_error=None, paid=None):
+def _fake_client(
+    squad, rivals, budget=200_000_000, after_pay_roster=None, pay_error=None, paid=None, market=None, max_roster=18
+):
     class FakeClient(FutmondoClient):
         def __init__(self, *a, **k):
             super().__init__(token="t", user_id="u", championship_id="c", userteam_id=OWN_TEAM)
@@ -54,10 +56,10 @@ def _fake_client(squad, rivals, budget=200_000_000, after_pay_roster=None, pay_e
             return {"answer": squad}
 
         def get_market(self):
-            return {"answer": []}
+            return {"answer": market or []}
 
         def get_information(self):
-            return {"answer": {"budget": budget, "configuration": {"maxPlayersInRoster": 18}}}
+            return {"answer": {"budget": budget, "configuration": {"maxPlayersInRoster": max_roster}}}
 
         def get_championship_players(self):
             own = [{**p, "userteamId": OWN_TEAM, "clause": {"price": 1, "date": PAST, "transferred": False}} for p in squad]
@@ -219,3 +221,53 @@ def test_outside_clause_window_exits_without_touching_futmondo(tmp_db, monkeypat
     captured = _run(ExplodingClient)
 
     assert captured == []
+
+
+def test_pending_market_bids_count_against_free_roster_slots(tmp_db, roster_player_factory, monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_CLAUSE_AUTO_PAY", True)
+    squad = _squad(roster_player_factory)  # 10 jugadores
+    _seed_squad(squad)
+    bid_target = {**roster_player_factory(id="7001", role="defensa"), "computer": True, "bid": {"id": "b1", "price": 1_000_000}}
+    paid = []
+
+    captured = _run(_fake_client(squad, [_rival(roster_player_factory)], paid=paid, market=[bid_target], max_roster=11))
+
+    assert paid == [] and captured == []
+
+
+def test_pending_bid_in_deficit_position_counts_as_covered(tmp_db, roster_player_factory, monkeypatch):
+    from jobs.sync_data import _upsert_player_and_snapshot
+
+    monkeypatch.setattr(config, "ENABLE_CLAUSE_AUTO_PAY", False)
+    squad = _squad(roster_player_factory)  # un solo DEL -> hueco
+    _seed_squad(squad)
+    pending_del = {**roster_player_factory(id="7002", role="delantero"), "computer": True, "bid": {"id": "b2", "price": 1_000_000}}
+    with get_connection() as conn:
+        _upsert_player_and_snapshot(conn, pending_del, "2026-11-08T10:00:00+00:00", on_market=True)
+
+    captured = _run(_fake_client(squad, [_rival(roster_player_factory)], market=[pending_del]))
+
+    # El hueco ya lo tapa la puja pendiente: el rival solo se propone por
+    # mejorar el once, no por "tapar un hueco".
+    assert "tapa un hueco" not in captured[0]
+    assert "mejora el once" in captured[0]
+
+
+def test_rival_listed_by_owner_suggests_offer_instead_of_paying(tmp_db, roster_player_factory, monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_CLAUSE_AUTO_PAY", True)
+    squad = _squad(roster_player_factory)
+    _seed_squad(squad)
+    rival = _rival(roster_player_factory)
+    listing = {**rival, "computer": False, "price": 12_000_000}
+    paid = []
+
+    captured = _run(_fake_client(squad, [rival], paid=paid, market=[listing]))
+
+    assert paid == []
+    assert "hacer oferta" in captured[0] and "12.000.000" in captured[0] and "Crack" in captured[0]
+    with get_connection() as conn:
+        assert conn.execute("SELECT status FROM clause_payments").fetchone()["status"] == "offer_suggested"
+        snap = conn.execute(
+            "SELECT on_market, listing_price FROM futmondo_snapshots WHERE player_id = '9001' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert (snap["on_market"], snap["listing_price"]) == (1, 12_000_000)

@@ -277,7 +277,9 @@ CREATE TABLE IF NOT EXISTS job_runs (
 -- modo por defecto sin config.ENABLE_CLAUSE_AUTO_PAY) o por intento de pago
 -- real ('paid' si el jugador ya aparece en la plantilla tras pagar,
 -- 'unconfirmed' si Futmondo aceptó el pago pero no aparece todavía,
--- 'failed' si Futmondo lo rechazó o falló la red).
+-- 'failed' si Futmondo lo rechazó o falló la red). 'offer_suggested': el
+-- jugador cumplía los criterios pero su dueño lo tenía a la venta, así que
+-- no se clausula y se avisa para hacer oferta en la app.
 CREATE TABLE IF NOT EXISTS clause_payments (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id       TEXT NOT NULL REFERENCES players(id),
@@ -285,7 +287,7 @@ CREATE TABLE IF NOT EXISTS clause_payments (
     clause_price    INTEGER NOT NULL,      -- importe de la cláusula ("clause.price")
     market_value    INTEGER,               -- VM en ese momento, para ver la prima pagada
     lineup_score    REAL,
-    status          TEXT NOT NULL,         -- 'proposed' | 'paid' | 'unconfirmed' | 'failed'
+    status          TEXT NOT NULL,         -- 'proposed' | 'paid' | 'unconfirmed' | 'failed' | 'offer_suggested'
     reason          TEXT,
     error           TEXT,
     created_at      TEXT NOT NULL

@@ -625,6 +625,20 @@ pagado por el bot: un clausulazo hecho a mano en la app no se ve.
    `'unconfirmed'` si no aparece) y registra el importe como puja `'won'`
    en `bids` para que la lógica de ventas conozca el coste real.
 
+**Coordinación con el mercado** (`run_market`): nunca corren a la vez
+(mismo `concurrency.group`) y los dos leen el saldo y la plantilla reales
+de Futmondo en cada pasada. Además, `run_clauses`:
+
+- resta las pujas de mercado pendientes del hueco libre en la plantilla
+  (las locales `'placed'` y las que Futmondo marca con `"bid"`), y del saldo
+  disponible;
+- cuenta los fichajes con puja pendiente como ya en plantilla al decidir si
+  una posición tiene hueco, para no tapar dos veces el mismo hueco (el
+  listón de "mejora el once" sigue siendo el once real);
+- no clausula a un rival que su dueño tiene a la venta: lo avisa por
+  Telegram (precio de venta, cláusula y VM) para hacer oferta en la app, y
+  lo audita como `'offer_suggested'`.
+
 **Sin confirmar todavía**: el endpoint de pago `POST /1/market/rosterclause`
 solo viene de la referencia comunitaria (ver `FutmondoClient.pay_clause()`);
 el primer pago real lo confirmará. Tampoco está confirmado el significado

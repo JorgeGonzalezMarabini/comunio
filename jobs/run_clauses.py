@@ -43,6 +43,7 @@ from db.models import (
     count_clause_payments_since,
     get_connection,
     get_league_setting,
+    get_open_bids,
     get_pending_bid_amount,
     get_player_features,
     get_standby_sales,
@@ -135,11 +136,20 @@ def run():
     championship_players = client.get_championship_players().get("answer", {}).get("players", [])
 
     roster_ids = {str(p["id"]) for p in roster}
+    # Pujas de mercado todavía abiertas: las locales ('placed') y las que el
+    # propio Futmondo marca con "bid" en el mercado (misma doble fuente que
+    # jobs/run_market.py). Cada una puede acabar ocupando una plaza, así que
+    # cuentan para el hueco libre en la plantilla.
+    market_by_id = {str(p["id"]): p for p in market}
+    pending_bid_ids = {str(b["player_id"]) for b in get_open_bids()} | {pid for pid, p in market_by_id.items() if "bid" in p}
     max_roster_size = information.get("configuration", {}).get("maxPlayersInRoster") or get_league_setting(
         "max_players_in_roster"
     )
-    if max_roster_size is None or len(roster_ids) >= max_roster_size:
-        print(f"run_clauses: plantilla llena o límite desconocido ({len(roster_ids)}/{max_roster_size}), no se clausula.")
+    if max_roster_size is None or len(roster_ids) + len(pending_bid_ids) >= max_roster_size:
+        print(
+            f"run_clauses: sin plaza libre o límite desconocido ({len(roster_ids)} en plantilla + "
+            f"{len(pending_bid_ids)} pujas pendientes / {max_roster_size}), no se clausula."
+        )
         return
 
     budget = information.get("budget", 0)
@@ -149,17 +159,18 @@ def run():
     rivals = _rival_players(championship_players, client.userteam_id, now_dt)
     rival_by_id = {str(p["id"]): p for p in rivals}
 
-    # Foto de los rivales en BD para evaluarlos. Se saltan los que ahora
-    # mismo están en el mercado: ya tienen foto fresca de sync_data con
-    # on_market=1 y pisarla con 0 los sacaría de los candidatos de
-    # run_market hasta el siguiente sync.
-    market_ids = {str(p["id"]) for p in market}
+    # Foto de los rivales en BD para evaluarlos. Los que su dueño tiene
+    # ahora mismo a la venta se guardan con on_market=1, igual que haría
+    # sync_data: con 0 desaparecerían de los candidatos de run_market hasta
+    # el siguiente sync. Para esos se mezcla el item del mercado, que trae
+    # el precio de venta ("price") y el equipo, ausentes en la lista del
+    # campeonato.
     team_names = _team_names_by_id(roster, market, championship_players)
     with get_connection() as conn:
         for p in rivals:
-            if str(p["id"]) in market_ids:
-                continue
-            _upsert_player_and_snapshot(conn, {**p, "team": team_names.get(str(p.get("teamId")))}, now, on_market=False)
+            pid = str(p["id"])
+            item = {"team": team_names.get(str(p.get("teamId"))), **p, **market_by_id.get(pid, {})}
+            _upsert_player_and_snapshot(conn, item, now, on_market=pid in market_by_id)
 
     features = {p["id"]: p for p in get_player_features(only_on_market=False)}
     standby_ids = {str(sale["player_id"]) for sale in get_standby_sales()}
@@ -177,7 +188,13 @@ def run():
     lineup_scored = evaluate_players(squad_raw + rival_raw, weights=config.LINEUP_EVALUATOR_WEIGHTS)
     squad_ranked = [p for p in lineup_scored if p["id"] in roster_ids]
     upgrade_thresholds = weakest_starter_scores(squad_ranked, formation=config.DEFAULT_FORMATION)
-    depth = assess_squad_depth(squad_raw, formation=config.DEFAULT_FORMATION)
+    # Los fichajes con puja pendiente cuentan como ya en plantilla para
+    # decidir si una posición tiene hueco: si run_market ya está pujando por
+    # un delantero, ese hueco ya tiene quien lo tape y no hace falta pagar
+    # además una cláusula. Para "mejora el once" se sigue usando el once
+    # real (upgrade_thresholds), no uno con fichajes que aún no han llegado.
+    pending_raw = [{**features[pid], "on_market": False} for pid in pending_bid_ids if pid in features and pid not in roster_ids]
+    depth = assess_squad_depth(squad_raw + pending_raw, formation=config.DEFAULT_FORMATION)
     deficit_positions = {pos for pos, info in depth.items() if info["deficit"] > 0}
 
     candidates = []
@@ -195,12 +212,39 @@ def run():
             }
         )
 
-    targets = select_clause_targets(candidates, upgrade_thresholds, deficit_positions, available_budget)
-    if not targets:
+    selected = select_clause_targets(candidates, upgrade_thresholds, deficit_positions, available_budget)
+    # Rivales que su dueño tiene ahora mismo a la venta: no se clausulan, se
+    # avisa para hacer una oferta en la app (a petición del usuario,
+    # 2026-11-08) -- run_market no puja por ventas de otros managers
+    # (config.ENABLE_BIDS_ON_MANAGER_LISTINGS) y la cláusula suele costar más.
+    listed = [c for c in selected if c["id"] in market_by_id]
+    targets = [c for c in selected if c["id"] not in market_by_id]
+    if not selected:
         print(
             f"run_clauses: ningún clausulazo cumple los criterios (saldo disponible={format_number(available_budget)}, "
             f"tope={format_number(int(available_budget * config.CLAUSE_MAX_BUDGET_PCT))}, rivales evaluados={len(candidates)})."
         )
+        return
+
+    offer_lines = []
+    if listed:
+        with get_connection() as conn:
+            for c in listed:
+                listing_price = market_by_id[c["id"]].get("price")
+                reason = f"{_describe(c)}; a la venta por su dueño por {format_number(listing_price or 0)}"
+                record_clause_payment(
+                    conn, c["id"], c["owner_userteam"], c["clause_price"], c.get("price"), c["lineup_score"],
+                    "offer_suggested", reason, now,
+                )
+                offer_lines.append(
+                    f"  - {c['name']} ({c['position']}, de {c['owner_userteam']}) está a la venta por "
+                    f"{format_number(listing_price or 0)} (cláusula {format_number(c['clause_price'])}, "
+                    f"VM {format_number(c.get('price') or 0)})"
+                )
+        offer_lines.insert(0, "💡 Cumplen los criterios pero su dueño los tiene a la venta: mejor hacer oferta en la app que pagar la cláusula:")
+
+    if not targets:
+        notify("run_clauses:\n" + "\n".join(offer_lines))
         return
 
     if not config.ENABLE_CLAUSE_AUTO_PAY:
@@ -218,7 +262,7 @@ def run():
             "NO pagados (ENABLE_CLAUSE_AUTO_PAY=false), mejores propuestas:"
         ]
         lines.extend(f"  {i}. {_describe(c)}" for i, c in enumerate(proposals, 1))
-        notify("\n".join(lines))
+        notify("\n".join(lines + offer_lines))
         return
 
     target = targets[0]
@@ -231,7 +275,7 @@ def run():
                 conn, target["id"], target["owner_userteam"], target["clause_price"], target.get("price"),
                 target["lineup_score"], "failed", reason, now, error=str(e),
             )
-        notify(f"run_clauses: ⚠️ falló el clausulazo de {reason} (error: {e}).")
+        notify("\n".join([f"run_clauses: ⚠️ falló el clausulazo de {reason} (error: {e})."] + offer_lines))
         return
 
     arrived = str(target["id"]) in {str(p["id"]) for p in client.get_roster().get("answer", [])}
@@ -246,13 +290,13 @@ def run():
                 (target["id"], target["clause_price"], target["lineup_score"], f"clausulazo: {reason}", now),
             )
     if arrived:
-        notify(f"run_clauses: ✅ clausulazo pagado y jugador ya en plantilla: {reason}.")
+        result = f"run_clauses: ✅ clausulazo pagado y jugador ya en plantilla: {reason}."
     else:
-        notify(
+        result = (
             f"run_clauses: ⚠️ Futmondo aceptó el clausulazo pero el jugador todavía no aparece en la plantilla: {reason}. "
             "Revisar en la app."
         )
-
+    notify("\n".join([result] + offer_lines))
 
 if __name__ == "__main__":
     # Mismo doble chequeo que el resto de jobs (ver jobs/sync_data.py).
