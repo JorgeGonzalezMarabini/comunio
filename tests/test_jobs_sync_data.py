@@ -719,3 +719,4 @@ def test_sync_data_understat_down_still_syncs_futmondo(tmp_db, roster_player_fac
         assert conn.execute("SELECT 1 FROM players WHERE id = ?", ("3001",)).fetchone()
     assert len(captured) == 1
     assert "Understat no disponible" in captured[0]
+    assert "0/1 cruzados con Understat" in captured[0]

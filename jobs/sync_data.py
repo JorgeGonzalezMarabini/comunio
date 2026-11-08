@@ -602,7 +602,10 @@ def run():
     rescued = _rescue_sales_at_risk(client, roster_players)
 
     total = len(roster_players) + len(market_players)
-    matched = total - match_counts.get("sin_match", 0) - match_counts.get("sin_nombre", 0)
+    # Suma de cruces reales, no "total - fallos": sin player_index (Understat
+    # caído o sin datos) match_counts queda vacío y "total - fallos" daría
+    # N/N cruzados sin haber cruzado a nadie.
+    matched = sum(n for strategy, n in match_counts.items() if strategy not in ("sin_match", "sin_nombre"))
     breakdown = ", ".join(f"{n} {strategy}" for strategy, n in sorted(match_counts.items()) if strategy not in ("sin_match", "sin_nombre"))
     message = [
         f"sync_data: {len(roster_players)} en plantilla, {len(market_players)} en mercado, "
