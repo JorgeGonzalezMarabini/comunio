@@ -1093,5 +1093,25 @@ ENABLE_LINEUP_AUTO_SUBMIT = os.getenv("ENABLE_LINEUP_AUTO_SUBMIT", "true").lower
 # `substitution_decisions` a mano antes de dejarlo escribir solo.
 ENABLE_SUBSTITUTE_AUTO_SUBMIT = os.getenv("ENABLE_SUBSTITUTE_AUTO_SUBMIT", "false").lower() == "true"
 
+# --- Clausulazos (jobs/run_clauses.py) ---
+# A petición del usuario (2026-11-08, último en la liga: en el mercado del
+# Computer casi nunca salen jugadores buenos). Decisiones explícitas suyas:
+#   - Primero solo PROPONE por Telegram; el pago automático se activa con
+#     este flag cuando el primer pago real confirme el endpoint
+#     (`POST /1/market/rosterclause`, solo visto en una referencia
+#     comunitaria, ver FutmondoClient.pay_clause()).
+#   - Solo si el jugador entra en el once por delante del peor titular de
+#     su posición, o tapa un hueco (posición con menos jugadores que
+#     titulares) -- ver engine.clause_strategy.select_clause_targets().
+#   - Tope por clausulazo: CLAUSE_MAX_BUDGET_PCT del saldo disponible.
+ENABLE_CLAUSE_AUTO_PAY = os.getenv("ENABLE_CLAUSE_AUTO_PAY", "false").lower() == "true"
+CLAUSE_MAX_BUDGET_PCT = float(os.getenv("CLAUSE_MAX_BUDGET_PCT", "0.20"))
+# Salvaguarda propia (no la pidió el usuario, ajustable): como mucho este
+# número de clausulazos pagados en 7 días, para que un fallo de criterio no
+# vacíe el saldo en una semana. El job paga además como mucho 1 por pasada.
+CLAUSE_MAX_PER_WEEK = int(os.getenv("CLAUSE_MAX_PER_WEEK", "2"))
+# Cuántas propuestas se listan en el mensaje de Telegram (modo propuesta).
+CLAUSE_PROPOSALS_TO_NOTIFY = int(os.getenv("CLAUSE_PROPOSALS_TO_NOTIFY", "3"))
+
 # --- Logging / auditoría ---
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")

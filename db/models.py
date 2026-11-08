@@ -263,12 +263,32 @@ CREATE TABLE IF NOT EXISTS real_lineup_checks (
 -- excepción no controlada.
 CREATE TABLE IF NOT EXISTS job_runs (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_name          TEXT NOT NULL,        -- 'run_market' | 'sync_data' | 'run_sales' | 'set_lineup' | 'manage_substitutes'
+    job_name          TEXT NOT NULL,        -- 'run_market' | 'sync_data' | 'run_sales' | 'set_lineup' | 'manage_substitutes' | 'run_clauses'
     status            TEXT NOT NULL,        -- 'ok' | 'error'
     duration_seconds  REAL NOT NULL,
     error             TEXT,                 -- "TipoExcepcion: mensaje" si status='error', NULL si 'ok'
     started_at        TEXT NOT NULL,
     finished_at       TEXT NOT NULL
+);
+
+-- Clausulazos sobre jugadores de otros managers (jobs/run_clauses.py, a
+-- petición del usuario 2026-11-08: en el mercado del Computer casi nunca
+-- hay jugadores buenos). Una fila por propuesta notificada ('proposed',
+-- modo por defecto sin config.ENABLE_CLAUSE_AUTO_PAY) o por intento de pago
+-- real ('paid' si el jugador ya aparece en la plantilla tras pagar,
+-- 'unconfirmed' si Futmondo aceptó el pago pero no aparece todavía,
+-- 'failed' si Futmondo lo rechazó o falló la red).
+CREATE TABLE IF NOT EXISTS clause_payments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id       TEXT NOT NULL REFERENCES players(id),
+    owner_userteam  TEXT,                  -- nombre del manager al que se le quita
+    clause_price    INTEGER NOT NULL,      -- importe de la cláusula ("clause.price")
+    market_value    INTEGER,               -- VM en ese momento, para ver la prima pagada
+    lineup_score    REAL,
+    status          TEXT NOT NULL,         -- 'proposed' | 'paid' | 'unconfirmed' | 'failed'
+    reason          TEXT,
+    error           TEXT,
+    created_at      TEXT NOT NULL
 );
 
 -- Caché local de valores de configuración de LIGA que el usuario fija una
@@ -499,6 +519,43 @@ def update_bid_status(bid_id: int, status: str, conn=None) -> None:
     `_execute_write()`.
     """
     _execute_write(conn, "UPDATE bids SET status = ? WHERE id = ?", (status, bid_id))
+
+
+def record_clause_payment(
+    conn,
+    player_id: str,
+    owner_userteam: str | None,
+    clause_price: int,
+    market_value: int | None,
+    lineup_score: float | None,
+    status: str,
+    reason: str,
+    now: str,
+    error: str | None = None,
+) -> None:
+    """Audita una propuesta o un intento de clausulazo (tabla `clause_payments`)."""
+    conn.execute(
+        """
+        INSERT INTO clause_payments
+            (player_id, owner_userteam, clause_price, market_value, lineup_score, status, reason, error, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (player_id, owner_userteam, clause_price, market_value, lineup_score, status, reason, error, now),
+    )
+
+
+def count_clause_payments_since(since_iso: str) -> int:
+    """
+    Clausulazos con dinero ya salido ('paid' o 'unconfirmed') desde
+    `since_iso` -- para el tope semanal config.CLAUSE_MAX_PER_WEEK. Las
+    propuestas ('proposed') y los rechazos ('failed') no cuentan.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM clause_payments WHERE status IN ('paid', 'unconfirmed') AND created_at >= ?",
+            (since_iso,),
+        ).fetchone()
+        return row["n"]
 
 
 def get_won_bid_prices() -> dict[str, int]:

@@ -585,6 +585,53 @@ margen de score que sí exige el swap normal (`config.
 BIDDING_CANCEL_SWAP_MIN_MARGIN`): aquí lo urgente es recuperar un cuerpo,
 no encontrar una mejora.
 
+## Clausulazos (`jobs/run_clauses.py`, 2026-11-08)
+
+A petición del usuario: el equipo va último y en el mercado del Computer
+casi nunca salen jugadores buenos, mientras que los rivales tienen
+jugadores mucho mejores con cláusulas asumibles para el saldo acumulado.
+Una pasada al día (`run_clauses.yml`, 09:46 UTC):
+
+1. Lee la plantilla de todos los managers con
+   `POST /5/league/championshipplayers` (confirmado en vivo, solo lectura):
+   cada jugador con dueño trae `userteamId`, `userteam` y
+   `clause: {price, date, transferred, suggestedClause}` -- el importe a
+   pagar es `clause.price`. No trae el nombre del equipo (solo `teamId`),
+   se resuelve con la plantilla, el mercado y los jugadores ya en BD.
+2. Guarda la foto de los rivales en BD (mismo upsert que `sync_data`) y
+   los evalúa con `config.LINEUP_EVALUATOR_WEIGHTS` en el MISMO pool que la
+   plantilla propia.
+3. `engine/clause_strategy.select_clause_targets()` -- criterios elegidos
+   por el usuario: el jugador entra en el once por delante del peor
+   titular de su posición, o tapa un hueco (posición con menos jugadores
+   que titulares); cláusula <= `CLAUSE_MAX_BUDGET_PCT` (20%) del saldo
+   disponible (saldo menos pujas pendientes); mismos filtros duros que las
+   pujas (forma y partidos mínimos) y nada de lesionados ni en duda.
+   Orden: primero los que tapan un hueco, luego por mejora del once y, a
+   igualdad, el más barato.
+4. **Modo propuesta (por defecto)**: notifica las
+   `CLAUSE_PROPOSALS_TO_NOTIFY` mejores por Telegram y las audita en
+   `clause_payments` como `'proposed'`; no paga nada.
+   **Pago automático** (`ENABLE_CLAUSE_AUTO_PAY=true` como GitHub
+   Variable): paga como mucho 1 por pasada y `CLAUSE_MAX_PER_WEEK` (2) en 7
+   días, relee la plantilla para confirmar la llegada (`'paid'`, o
+   `'unconfirmed'` si no aparece) y registra el importe como puja `'won'`
+   en `bids` para que la lógica de ventas conozca el coste real.
+
+**Sin confirmar todavía**: el endpoint de pago `POST /1/market/rosterclause`
+solo viene de la referencia comunitaria (ver `FutmondoClient.pay_clause()`);
+el primer pago real lo confirmará. Tampoco está confirmado el significado
+de `clause.date` (en los datos reales coincide con el día de llegada del
+jugador a su equipo); si viniera en el futuro, el job lo trata como
+protegido y no lo propone.
+
+**Cómo calcula Futmondo la cláusula** ([ayuda oficial](https://help.futmondo.com/article/244-como-se-calculan-las-clausulas-de-los-jugadores)):
+tabla según el MÁXIMO entre precio de compra y VM, con la configuración de
+la liga (esta usa "cláusulas bajas"). Por eso cada clausulazo encarece el
+siguiente: Iñaki Williams, comprado por 22,7 M, tenía ~30 M de cláusula;
+quien la pagó le dejó una nueva de 38,5 M (tabla para 30 M). Pagar una
+cláusula es pagar una prima sobre el VM que no se recupera vendiendo.
+
 ## Fichajes que mejoran el once, no solo tapan huecos (`engine/squad_risk.weakest_starter_scores`)
 
 `assess_squad_depth()` (arriba) solo mira CANTIDAD: si una posición tiene
@@ -1272,6 +1319,7 @@ jobs, uno por workflow, todos con:
 | run_sales | `36 1,3,5,7,9,11,13,15,17,19,21,23 * * *` | `run_sales.yml` |
 | manage_substitutes | `13,33,53 10-23 * * 5,6,0,1` | `manage_substitutes.yml` |
 | set_lineup | `3,23,43 15-20 * * 5` | `set_lineup.yml` |
+| run_clauses | `46 9 * * *` | `run_clauses.yml` (añadido 2026-11-08, hay que darlo de alta a mano) |
 
 **Importante — zona horaria del job explícita en UTC**: cron-job.org, a
 diferencia de GitHub Actions (siempre UTC), aplica por defecto la zona
@@ -1297,8 +1345,8 @@ Ver el detalle de cada módulo en su propio docstring. Resumen:
 ```
 clients/    -> integraciones externas (Futmondo, Understat)
 db/         -> esquema SQLite + conexión
-engine/     -> evaluator, bidding_strategy, lineup_optimizer, squad_risk, selling_strategy
-jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup, manage_substitutes)
+engine/     -> evaluator, bidding_strategy, lineup_optimizer, squad_risk, selling_strategy, clause_strategy
+jobs/       -> entrypoints ejecutados por cron (sync_data, run_market, run_sales, set_lineup, manage_substitutes, run_clauses)
 tests/      -> batería pytest (ver sección "Tests" más arriba)
 notifier.py -> resumen por Telegram tras cada job
 logs/       -> auditoría de decisiones

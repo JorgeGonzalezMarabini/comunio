@@ -75,7 +75,8 @@ primera versión, documentados por si hacen falta más adelante):
                                          no tienen endpoint propio dedicado -- se leen del campo "bid" de
                                          cada item de /1/market/players, ver real_pending_bid_amount())
     POST /1/league/championshipteams -> equipos/managers de la liga
-    POST /5/league/championshipplayers -> plantillas de todos los managers de la liga
+    POST /5/league/championshipplayers -> plantillas de todos los managers de la liga (usado desde
+                                          2026-11-08 por jobs/run_clauses.py, ver get_championship_players())
 
 Endpoints de escritura del mercado vistos SOLO por nombre (grep de
 `main.dart.js`, 2026-08-22, TODO.md #15 -- ver docstring de
@@ -503,6 +504,22 @@ class FutmondoClient:
         """
         return self._post("/1/market/players", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
 
+    def get_championship_players(self) -> dict:
+        """
+        Todos los jugadores del campeonato, incluidos los de los demás
+        managers. Confirmado en vivo (2026-11-08, solo lectura):
+        {"answer": {"players": [...], "automaticClauses": bool}}. Mismo shape
+        de jugador que roster/market, salvo que NO trae `team` (solo
+        `teamId`) y que los que tienen dueño traen además `userteamId`,
+        `userteam` (nombre del manager) y `clause`: {"price" (lo que hay
+        que pagar), "date", "transferred", "suggestedClause"}. Los que no
+        tienen dueño (del Computer) no traen `clause`.
+
+        Idempotente (solo lectura) -> reintenta ante fallo de conexión
+        transitorio (ver `_post`, `config.FUTMONDO_READ_MAX_RETRIES`).
+        """
+        return self._post("/5/league/championshipplayers", max_retries=config.FUTMONDO_READ_MAX_RETRIES)
+
     def get_my_players_in_market(self) -> dict:
         """
         Jugadores propios puestos en venta. **100% confirmado**, incluida
@@ -759,8 +776,9 @@ class FutmondoClient:
             body.query: {..., "player_id": ..., "player_slug": ..., "price": ...}
                         (sin "type", a diferencia del resto de escrituras)
 
-        No usado todavía por ningún job del bot — Comunio tampoco lo tenía
-        automatizado (función de pago fuera de alcance, ver README).
+        Usado por jobs/run_clauses.py SOLO con config.ENABLE_CLAUSE_AUTO_PAY
+        activado (por defecto solo propone por Telegram, ver ese job) -- el
+        primer pago real es el que confirmará este contrato.
         """
         result = self._post("/1/market/rosterclause", {"player_id": player_id, "player_slug": player_slug, "price": price})
         return self._check_ok(result)

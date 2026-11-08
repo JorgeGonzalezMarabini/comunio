@@ -1,0 +1,53 @@
+name: run_clauses
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Una vez al día (2026-11-08, ver docstring de jobs/run_clauses.py): en
+    # modo propuesta manda como mucho un mensaje diario a Telegram, y con
+    # ENABLE_CLAUSE_AUTO_PAY paga como mucho un clausulazo por pasada. En
+    # esta liga `playerMoveInDays` = 0, así que el jugador pasa al momento
+    # y no hace falta cuadrar la hora con la pasada de cláusulas de
+    # Futmondo. Minuto :46, libre en el escalonado del resto de workflows
+    # (ver comentario largo en sync_data.yml).
+    - cron: "46 9 * * *"
+
+concurrency:
+  group: db-futmondo-write
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  clauses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - run: python -m jobs.run_clauses
+        env:
+          ENABLE_BOT: ${{ vars.ENABLE_BOT }}
+          FUTMONDO_TOKEN: ${{ secrets.FUTMONDO_TOKEN }}
+          FUTMONDO_USER_ID: ${{ secrets.FUTMONDO_USER_ID }}
+          FUTMONDO_CHAMPIONSHIP_ID: ${{ vars.FUTMONDO_CHAMPIONSHIP_ID }}
+          FUTMONDO_USERTEAM_ID: ${{ vars.FUTMONDO_USERTEAM_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # false por defecto (solo propone, ver config.ENABLE_CLAUSE_AUTO_PAY):
+          # poner ENABLE_CLAUSE_AUTO_PAY=true como GitHub Variable para que
+          # pague solo.
+          ENABLE_CLAUSE_AUTO_PAY: ${{ vars.ENABLE_CLAUSE_AUTO_PAY }}
+      # clause_payments y la foto de los rivales quedan en db/futmondo.db --
+      # ver nota en sync_data.yml.
+      - name: Commit BD actualizada
+        run: |
+          git config user.name "futmondo-bot"
+          git config user.email "actions@github.com"
+          git add db/futmondo.db logs/
+          git diff --staged --quiet || git commit -m "run_clauses: actualiza BD [skip ci]"
+          git push
