@@ -575,6 +575,7 @@ def find_cancel_swap_candidates(
     min_margin: float = None,
     min_hours_before_expiry: float = None,
     max_swaps: int = None,
+    deficit_positions: set = frozenset(),
 ) -> list[dict]:
     """
     Decide qué pujas abiertas merece la pena cancelar para poder pujar por
@@ -608,6 +609,13 @@ def find_cancel_swap_candidates(
     por defecto — deliberadamente 1 mientras esta feature no tiene
     histórico real, ver config.py).
 
+    `deficit_positions`: posiciones con déficit REAL de plantilla. Nunca se
+    sacrifica una puja de una de ellas por un candidato de OTRA posición
+    (caso real 2026-11-13: la única puja por un DEL, con DEL en déficit, se
+    canceló dos veces por un MED y el bot volvía a pujar por el DEL en la
+    pasada siguiente). Sí se permite cambiarla por un candidato de su misma
+    posición, que sigue tapando el hueco.
+
     Devuelve una lista de `{"candidate": ..., "sacrifice": ..., "reason": ...}`
     en el mismo orden (mejor candidato primero) -- jobs/run_market.py decide
     qué hacer si la cancelación o la puja posterior fallan a medias.
@@ -635,6 +643,8 @@ def find_cancel_swap_candidates(
             break
         for sacrifice in eligible:
             if sacrifice["bid_id"] in used_bid_ids:
+                continue
+            if sacrifice.get("position") in deficit_positions and sacrifice.get("position") != candidate.get("position"):
                 continue
             if candidate.get("score", 0) - sacrifice["score"] < min_margin:
                 # `eligible` está ordenada por score ascendente: si esta ni

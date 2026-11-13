@@ -584,6 +584,22 @@ def test_find_cancel_swap_candidates_proposes_swap_when_margin_is_met():
     assert proposals[0]["sacrifice"]["bid_id"] == "bid-old"
 
 
+def test_find_cancel_swap_candidates_never_sacrifices_deficit_position_for_another_position():
+    """Caso real 2026-11-13: la única puja DEL (DEL en déficit) se cancelaba por un MED."""
+    mid = {"id": "mid", "score": 0.90, "price": 5_000_000, "position": "MED"}
+    striker_bid = _open_bid("del", score=0.37, bid_id="bid-del", position="DEL")
+
+    assert find_cancel_swap_candidates([mid], [striker_bid], now=NOW, min_margin=0.25, deficit_positions={"DEL"}) == []
+    # Sin déficit se sigue sacrificando igual que antes.
+    assert len(find_cancel_swap_candidates([mid], [striker_bid], now=NOW, min_margin=0.25)) == 1
+    # Por un candidato de la MISMA posición sí: el hueco sigue tapado.
+    better_striker = {**mid, "id": "del2", "position": "DEL"}
+    proposals = find_cancel_swap_candidates(
+        [better_striker], [striker_bid], now=NOW, min_margin=0.25, deficit_positions={"DEL"}
+    )
+    assert [p["sacrifice"]["bid_id"] for p in proposals] == ["bid-del"]
+
+
 def test_find_cancel_swap_candidates_respects_min_margin():
     candidate = {"id": "new", "score": 0.55, "price": 5_000_000}  # solo +0.15 sobre la puja abierta
     open_bid = _open_bid("old", score=0.40, bid_id="bid-old")

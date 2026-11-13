@@ -723,9 +723,9 @@ def run():
     # swap normal de abajo (candidato mejor bloqueado) y el rescate de
     # déficit de plantilla de más abajo (engine.bidding_strategy.
     # find_deficit_rescue_swaps), que puede hacer falta aunque no haya
-    # ningún `blocked_candidates` todavía evaluado. "position" (nuevo aquí)
-    # solo lo usa el rescate de déficit, para no sacrificar nunca una puja
-    # de una posición TAMBIÉN en déficit.
+    # ningún `blocked_candidates` todavía evaluado. "position" lo usan
+    # ambas fases para no sacrificar nunca una puja de una posición en
+    # déficit (el swap solo la cambia por otra de su misma posición).
     sacrificable_bids = []
     for b in get_open_bids():
         market_item = market_by_id.get(str(b["player_id"]))
@@ -763,8 +763,16 @@ def run():
             }
         )
 
+    # Déficit REAL (sin descontar lo que ya cubren pujas abiertas): justo esas
+    # pujas son las que el swap no debe sacrificar.
+    raw_deficit_positions = {pos for pos, info in depth.items() if info["deficit"] > 0} if squad_raw else set()
     swap_proposals = (
-        find_cancel_swap_candidates(blocked_candidates, sacrificable_bids, now=datetime.now(timezone.utc))
+        find_cancel_swap_candidates(
+            blocked_candidates,
+            sacrificable_bids,
+            now=datetime.now(timezone.utc),
+            deficit_positions=raw_deficit_positions,
+        )
         if blocked_candidates
         else []
     )
@@ -805,9 +813,7 @@ def run():
         | {p["candidate"].get("position") for p in swap_proposals}
         | {p.get("position") for p in skipped_already_bid}
     )
-    deficit_positions = (
-        {pos for pos, info in depth.items() if info["deficit"] > 0} - covered_positions if squad_raw else set()
-    )
+    deficit_positions = raw_deficit_positions - covered_positions
     deficit_rescue_proposals = (
         find_deficit_rescue_swaps(
             deficit_positions,
